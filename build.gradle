@@ -1,0 +1,40 @@
+plugins {
+    id 'java'
+}
+
+group = 'com.matterworks'
+version = '1.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // 1. Database Connection Pool (Prestazioni)
+    implementation 'com.zaxxer:HikariCP:5.1.0'
+
+    // 2. MariaDB Driver (Connessione al DB)
+    implementation 'org.mariadb.jdbc:mariadb-java-client:3.3.3'
+
+    // 3. Gson (Per serializzare i JSON nei campi "meta_data")
+    implementation 'com.google.code.gson:gson:2.10.1'
+
+    // 4. Logging (Standard per server Java)
+    implementation 'org.slf4j:slf4j-api:2.0.12'
+    implementation 'org.slf4j:slf4j-simple:2.0.12' // Simple logger per dev
+
+    // Testing
+    testImplementation platform('org.junit:junit-bom:5.9.1')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+}
+
+test {
+    useJUnitPlatform()
+}
+
+// Imposta Java 21 come target
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
