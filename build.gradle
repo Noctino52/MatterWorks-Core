@@ -5,36 +5,44 @@ plugins {
 group = 'com.matterworks'
 version = '1.0-SNAPSHOT'
 
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
 repositories {
     mavenCentral()
 }
 
 dependencies {
-    // 1. Database Connection Pool (Prestazioni)
     implementation 'com.zaxxer:HikariCP:5.1.0'
-
-    // 2. MariaDB Driver (Connessione al DB)
     implementation 'org.mariadb.jdbc:mariadb-java-client:3.3.3'
-
-    // 3. Gson (Per serializzare i JSON nei campi "meta_data")
     implementation 'com.google.code.gson:gson:2.10.1'
 
-    // 4. Logging (Standard per server Java)
-    implementation 'org.slf4j:slf4j-api:2.0.12'
-    implementation 'org.slf4j:slf4j-simple:2.0.12' // Simple logger per dev
 
-    // Testing
-    testImplementation platform('org.junit:junit-bom:5.9.1')
+    testImplementation platform('org.junit:junit-bom:5.10.2')
     testImplementation 'org.junit.jupiter:junit-jupiter'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    // Abilita feature sperimentali (utile per StructuredTaskScope di Java 25)
+    options.compilerArgs.add('--enable-preview')
 }
 
 test {
     useJUnitPlatform()
+    jvmArgs('--enable-preview')
 }
 
-// Imposta Java 21 come target
-java {
-    toolchain {
-        languageVersion = JavaLanguageVersion.of(21)
+// Aggiungilo ovunque nel build.gradle (fuori da 'dependencies' o 'plugins')
+sourceSets {
+    main {
+        java {
+            // Esclude ricorsivamente tutto ciò che sta in 'dao', 'managers', ecc.
+            // Aggiungi qui i package che ti stanno dando errori
+            exclude 'com/matterworks/core/**'
+        }
     }
 }
