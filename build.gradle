@@ -19,6 +19,7 @@ dependencies {
     implementation 'com.zaxxer:HikariCP:5.1.0'
     implementation 'org.mariadb.jdbc:mariadb-java-client:3.3.3'
     implementation 'com.google.code.gson:gson:2.10.1'
+    implementation 'org.slf4j:slf4j-simple:2.0.12'
 
 
     testImplementation platform('org.junit:junit-bom:5.10.2')
@@ -34,15 +35,4 @@ tasks.withType(JavaCompile).configureEach {
 test {
     useJUnitPlatform()
     jvmArgs('--enable-preview')
-}
-
-// Aggiungilo ovunque nel build.gradle (fuori da 'dependencies' o 'plugins')
-sourceSets {
-    main {
-        java {
-            // Esclude ricorsivamente tutto ciò che sta in 'dao', 'managers', ecc.
-            // Aggiungi qui i package che ti stanno dando errori
-            exclude 'com/matterworks/core/**'
-        }
-    }
 }
