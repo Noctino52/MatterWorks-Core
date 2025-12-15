@@ -12,7 +12,7 @@ import com.matterworks.core.domain.machines.PlacedMachine;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.infrastructure.CoreConfig;
 import com.matterworks.core.infrastructure.MariaDBAdapter;
-import com.matterworks.core.infrastructure.swing.MatterWorksGUI; // Import della GUI
+import com.matterworks.core.infrastructure.swing.MatterWorksGUI;
 import com.matterworks.core.managers.GridManager;
 import com.matterworks.core.managers.WorldIntegrityValidator;
 import com.matterworks.core.ports.IRepository;
@@ -21,22 +21,24 @@ import com.matterworks.core.synchronization.FactoryLoop;
 import com.matterworks.core.synchronization.GridSaverService;
 
 import javax.swing.SwingUtilities;
+import java.awt.GraphicsEnvironment; // IMPORT FONDAMENTALE PER IL CHECK
 import java.util.UUID;
 
 public class Main {
 
     public static void main(String[] args) throws InterruptedException {
-        System.out.println("🏭 MatterWorks Core (Swing Edition) Starting...");
+        System.out.println("🏭 MatterWorks Core Starting...");
 
         // ---------------------------------------------------------
         // FASE 0: CONFIGURAZIONE & INFRASTRUTTURA
         // ---------------------------------------------------------
         CoreConfig.load();
 
+        // Nota: localhost va bene sia su PC (se hai il tunnel o db locale) sia su VPS (se docker espone su 127.0.0.1)
         String url = "jdbc:mariadb://localhost:3306/matterworks_core?allowPublicKeyRetrieval=true&useSSL=false";
         DatabaseManager dbManager = new DatabaseManager(url, "Noctino52", "Yy72s7mRnVs3");
 
-        // World Adapter "Mock" (Verrà sostituito da Hytale, ora serve per logica interna)
+        // World Adapter "Mock"
         IWorldAccess world = new MockWorld();
 
         // ---------------------------------------------------------
@@ -44,7 +46,7 @@ public class Main {
         // ---------------------------------------------------------
         MachineDefinitionDAO defDao = new MachineDefinitionDAO(dbManager);
         BlockRegistry blockRegistry = new BlockRegistry(world, defDao);
-        blockRegistry.loadFromDatabase(); // Carica le dimensioni (es. Nexus = 3x3x3)
+        blockRegistry.loadFromDatabase();
 
         // ---------------------------------------------------------
         // FASE 2: VALIDAZIONE INTEGRITÀ (Safety First)
@@ -59,16 +61,12 @@ public class Main {
         // FASE 3: WIRING DEL CORE (Hexagonal Setup)
         // ---------------------------------------------------------
         IRepository repository = new MariaDBAdapter(dbManager);
-
-        // GridManager: Il cervello che gestisce la griglia
         GridManager gridManager = new GridManager(repository, world, blockRegistry);
-
-        // SaverService: Salva periodicamente
         GridSaverService saverService = new GridSaverService(gridManager, repository);
 
-        // FactoryLoop: Il cuore pulsante (Tick rate)
+        // FactoryLoop: Il cuore pulsante
         FactoryLoop gameLoop = new FactoryLoop(gridManager);
-        gameLoop.start();
+        gameLoop.start(); // IL GIOCO PARTE QUI (indipendentemente dalla GUI)
 
         // ---------------------------------------------------------
         // FASE 4: SETUP PLAYER & SCENARIO
@@ -79,40 +77,50 @@ public class Main {
 
         System.out.println("📥 Caricamento Plot dal Database...");
         gridManager.loadPlotFromDB(playerUuid);
-        Thread.sleep(500); // Attesa IO
+        Thread.sleep(500);
 
-        // --- SETUP SCENARIO: Drill -> Belt -> Nexus ---
         setupScenario(gridManager, blockRegistry, playerUuid);
 
-// ---------------------------------------------------------
-        // FASE 5: AVVIO GUI (SWING ADAPTER)
         // ---------------------------------------------------------
-        System.out.println("🖥️ Avvio Interfaccia Grafica di Debug...");
+        // FASE 5: GESTIONE GUI vs HEADLESS (FIX PER VPS)
+        // ---------------------------------------------------------
 
-        SwingUtilities.invokeLater(() -> {
-            new MatterWorksGUI(
-                    gridManager,
-                    blockRegistry,
-                    playerUuid,
-                    // 1. Azione di Salvataggio (Lambda)
-                    () -> {
-                        System.out.println("💾 Manual Save Requested via GUI...");
-                        saverService.autoSaveTask();
-                    },
-                    // 2. Provider dei Soldi (Lambda)
-                    () -> {
-                        PlayerProfile p = repository.loadPlayerProfile(playerUuid);
-                        return (p != null) ? p.getMoney() : 0.0;
-                    }
-            );
-        });
+        // Controlliamo se siamo su un server senza monitor (VPS) o su un PC Desktop
+        if (GraphicsEnvironment.isHeadless()) {
+            // --- MODALITÀ SERVER (VPS) ---
+            System.out.println("\n==================================================");
+            System.out.println("👻 MODALITÀ HEADLESS ATTIVA (SERVER)");
+            System.out.println("   Nessun monitor rilevato. GUI disabilitata.");
+            System.out.println("   Il Core sta girando in background.");
+            System.out.println("==================================================\n");
+
+            // Qui non lanciamo SwingUtilities.invokeLater, quindi niente crash!
+
+        } else {
+            // --- MODALITÀ DESKTOP (PC LOCALE) ---
+            System.out.println("🖥️ Monitor rilevato: Avvio Interfaccia Grafica di Debug...");
+
+            SwingUtilities.invokeLater(() -> {
+                new MatterWorksGUI(
+                        gridManager,
+                        blockRegistry,
+                        playerUuid,
+                        () -> {
+                            System.out.println("💾 Manual Save Requested via GUI...");
+                            saverService.autoSaveTask();
+                        },
+                        () -> {
+                            PlayerProfile p = repository.loadPlayerProfile(playerUuid);
+                            return (p != null) ? p.getMoney() : 0.0;
+                        }
+                );
+            });
+        }
 
         // ---------------------------------------------------------
-        // FASE 6: LOOP DI MANTENIMENTO
+        // FASE 6: LOOP DI MANTENIMENTO (Server Keep-Alive)
         // ---------------------------------------------------------
-        System.out.println("\n--- 🟢 SISTEMA ONLINE ---");
-        System.out.println("    Monitora la finestra grafica per vedere la fabbrica.");
-        System.out.println("    Premi STOP nell'IDE per chiudere tutto.\n");
+        System.out.println("--- 🟢 SISTEMA ONLINE ---");
 
         int ticks = 0;
         while (true) {
@@ -124,10 +132,10 @@ public class Main {
                 System.out.println("💾 AutoSave Triggered...");
                 saverService.autoSaveTask();
 
-                // Monitoraggio Saldo (opzionale)
+                // Logghiamo lo stato per capire che il server è vivo anche senza GUI
                 PlayerProfile p = repository.loadPlayerProfile(playerUuid);
                 if (p != null) {
-                    System.out.println("💰 Saldo Player: " + p.getMoney() + "$");
+                    System.out.println("   [Server Status] Saldo Player: " + p.getMoney() + "$ | Uptime: " + ticks + "s");
                 }
             }
         }
@@ -136,39 +144,22 @@ public class Main {
     // --- HELPER METODI ---
 
     private static void setupScenario(GridManager gm, BlockRegistry reg, UUID owner) {
-        // 1. TRIVELLA a (10, 64, 10). Output NORD -> (10, 64, 9)
         GridPosition drillPos = new GridPosition(10, 64, 10);
         if (gm.isAreaClear(drillPos, reg.getDimensions("drill_mk1"))) {
-            System.out.println("🆕 Piazzamento Trivella...");
             gm.placeMachine(owner, drillPos, "drill_mk1");
             updateOrientation(gm, drillPos, Direction.NORTH);
         }
 
-        // 2. NASTRO a (10, 64, 9). Riceve da 10, Output NORD -> (10, 64, 8)
         GridPosition beltPos = new GridPosition(10, 64, 9);
         if (gm.isAreaClear(beltPos, reg.getDimensions("conveyor_belt"))) {
-            System.out.println("🆕 Piazzamento Nastro...");
             gm.placeMachine(owner, beltPos, "conveyor_belt");
             updateOrientation(gm, beltPos, Direction.NORTH);
         }
 
-        // 3. NEXUS a (10, 64, 6).
-        // Dimensioni: 3x3x3. Occupa X[10-12], Y[64-66], Z[6-8].
-        // Il "retro" del Nexus è a Z=8. Il nastro a Z=9 spinge verso Z=8.
         GridPosition nexusPos = new GridPosition(10, 64, 6);
         if (gm.isAreaClear(nexusPos, reg.getDimensions("nexus_core"))) {
-            System.out.println("🆕 Piazzamento Nexus Core...");
             gm.placeMachine(owner, nexusPos, "nexus_core");
-            // L'orientamento del Nexus è meno rilevante, ma lo mettiamo a SUD per "guardare" la fabbrica
             updateOrientation(gm, nexusPos, Direction.SOUTH);
-        } else {
-            // Se non è clear, controlliamo se è perché c'è già il nexus
-            PlacedMachine m = gm.getMachineAt(nexusPos);
-            if (m != null && m.getTypeId().equals("nexus_core")) {
-                System.out.println("✅ Nexus Core già presente.");
-            } else {
-                System.out.println("⚠️ Impossibile piazzare Nexus: Area occupata.");
-            }
         }
     }
 
@@ -196,7 +187,6 @@ public class Main {
         }
     }
 
-    // Mock World Adapter (usato solo per validazione base, la grafica la fa Swing)
     static class MockWorld implements IWorldAccess {
         @Override public void setBlock(GridPosition pos, String blockId) {}
         @Override public boolean isBlockSolid(GridPosition pos) { return true; }
