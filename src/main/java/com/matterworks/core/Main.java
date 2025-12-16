@@ -130,43 +130,45 @@ public class Main {
     // --- SETUP SCENARIO AGGIORNATO ---
     private static void setupScenario(GridManager gm, BlockRegistry reg, UUID owner) {
 
-        // 1. TRIVELLA a (10, 64, 10). Output NORD -> Z=9
-        GridPosition drillPos = new GridPosition(10, 64, 10);
-        if (gm.isAreaClear(drillPos, reg.getDimensions("drill_mk1"))) {
-            gm.placeMachine(owner, drillPos, "drill_mk1");
+        // 1. TRIVELLA a (10, 0, 10). Output NORD -> Z=9
+        // NOTA: Y=0 perché ora è obbligatorio per le trivelle!
+        // (10,0,10) è definito come vena RAW nel GridManager.
+        GridPosition drillPos = new GridPosition(10, 0, 10);
+        if (gm.placeMachine(owner, drillPos, "drill_mk1")) {
             updateOrientation(gm, drillPos, Direction.NORTH);
+        } else {
+            System.err.println("❌ Setup Scenario fallito: Impossibile piazzare Trivella (Controlla Y=0 e Risorse)");
         }
 
-        // 2. NASTRO 1 a (10, 64, 9). Riceve da 10, Output NORD -> Z=8
-        GridPosition beltPos1 = new GridPosition(10, 64, 9);
-        if (gm.isAreaClear(beltPos1, reg.getDimensions("conveyor_belt"))) {
-            gm.placeMachine(owner, beltPos1, "conveyor_belt");
+        // 2. NASTRO SALITA (Elevator) - Simulato con Conveyor per ora
+        // Dato che la trivella è a Y=0 e spara a Z=9 (che è a Y=0),
+        // per ora costruiamo tutto a terra (Y=0) per semplicità,
+        // oppure dovremmo fare nastri inclinati. Facciamo tutto a Y=0.
+
+        // NASTRO a (10, 0, 9). Riceve da 10, Output NORD -> Z=8
+        GridPosition beltPos1 = new GridPosition(10, 0, 9);
+        if (gm.placeMachine(owner, beltPos1, "conveyor_belt")) {
             updateOrientation(gm, beltPos1, Direction.NORTH);
         }
 
-        // 3. CHROMATOR a (10, 64, 8). Riceve da 9, Output NORD -> Z=7
-        GridPosition chromatorPos = new GridPosition(10, 64, 8);
-        if (gm.isAreaClear(chromatorPos, reg.getDimensions("chromator"))) {
+        // 3. CHROMATOR a (10, 0, 8). Riceve da 9, Output NORD -> Z=7
+        GridPosition chromatorPos = new GridPosition(10, 0, 8);
+        if (gm.placeMachine(owner, chromatorPos, "chromator")) {
             System.out.println("🆕 Piazzamento Chromator...");
-            gm.placeMachine(owner, chromatorPos, "chromator");
             updateOrientation(gm, chromatorPos, Direction.NORTH);
         }
 
-        // 4. NASTRO 2 (NUOVO) a (10, 64, 7). Riceve da 8, Output NORD -> Z=6
-        GridPosition beltPos2 = new GridPosition(10, 64, 7);
-        if (gm.isAreaClear(beltPos2, reg.getDimensions("conveyor_belt"))) {
-            System.out.println("🆕 Piazzamento Nastro di Uscita...");
-            gm.placeMachine(owner, beltPos2, "conveyor_belt");
+        // 4. NASTRO USCITA a (10, 0, 7). Riceve da 8, Output NORD -> Z=6
+        GridPosition beltPos2 = new GridPosition(10, 0, 7);
+        if (gm.placeMachine(owner, beltPos2, "conveyor_belt")) {
             updateOrientation(gm, beltPos2, Direction.NORTH);
         }
 
-        // 5. NEXUS CORE a (10, 64, 4).
-        // Dimensioni 3x3x3. Occupa Z=4, Z=5, Z=6.
-        // Il Nastro 2 (a Z=7) spinge dentro Z=6 (che è il retro del Nexus).
-        GridPosition nexusPos = new GridPosition(10, 64, 4);
-        if (gm.isAreaClear(nexusPos, reg.getDimensions("nexus_core"))) {
+        // 5. NEXUS CORE a (10, 0, 4).
+        // Y=0. Occupa Z=4,5,6. Retro Z=6.
+        GridPosition nexusPos = new GridPosition(10, 0, 4);
+        if (gm.placeMachine(owner, nexusPos, "nexus_core")) {
             System.out.println("🆕 Piazzamento Nexus Core...");
-            gm.placeMachine(owner, nexusPos, "nexus_core");
             updateOrientation(gm, nexusPos, Direction.SOUTH);
         }
     }

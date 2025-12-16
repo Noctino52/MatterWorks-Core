@@ -85,8 +85,10 @@ public class ConveyorBelt extends PlacedMachine {
     public JsonObject serialize() {
         super.serialize();
         if (currentItem != null) {
+            // Se c'è un item, SCRIVILO nel metadata
             this.metadata.add("currentItem", currentItem.serialize());
         } else {
+            // Se non c'è, RIMUOVI la chiave vecchia (altrimenti rimane il fantasma)
             this.metadata.remove("currentItem");
         }
         return this.metadata;

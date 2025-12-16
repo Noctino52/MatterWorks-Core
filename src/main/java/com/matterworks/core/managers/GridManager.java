@@ -4,8 +4,10 @@ import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.domain.factory.MachineFactory;
 import com.matterworks.core.domain.machines.BlockRegistry;
+import com.matterworks.core.domain.machines.DrillMachine; // Import
 import com.matterworks.core.domain.machines.IGridComponent;
 import com.matterworks.core.domain.machines.PlacedMachine;
+import com.matterworks.core.domain.matter.MatterColor; // Import
 import com.matterworks.core.domain.shop.MarketManager;
 import com.matterworks.core.model.PlotObject;
 import com.matterworks.core.ports.IRepository;
@@ -27,11 +29,41 @@ public class GridManager {
     private final List<PlacedMachine> tickingMachines = new ArrayList<>();
     private final ExecutorService ioExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
+    // --- NUOVO: MAPPA DELLE RISORSE DEL TERRENO ---
+    // Mappa Coordinate 2D (x, z) -> Tipo di Risorsa
+    // Usiamo una String key "x,z" per semplicità o una mappa dedicata.
+    // Per coerenza col progetto, usiamo una Map<GridPosition, MatterColor> dove y è sempre 0.
+    private final Map<GridPosition, MatterColor> terrainResources = new ConcurrentHashMap<>();
+
     public GridManager(IRepository repository, IWorldAccess worldAdapter, BlockRegistry registry) {
         this.repository = repository;
         this.worldAdapter = worldAdapter;
         this.blockRegistry = registry;
         this.marketManager = new MarketManager(repository);
+
+        // Generiamo il terreno finto (in futuro verra caricato dal PlotDAO)
+        generateMockTerrain();
+    }
+
+    private void generateMockTerrain() {
+        System.out.println("🌍 Generazione Vene Risorse (Mock)...");
+
+        // Vena RAW (Grigia) sotto la zona di partenza (x=10, z=10)
+        terrainResources.put(new GridPosition(10, 0, 10), MatterColor.RAW);
+        terrainResources.put(new GridPosition(10, 0, 11), MatterColor.RAW);
+        terrainResources.put(new GridPosition(11, 0, 10), MatterColor.RAW);
+
+        // Vena RED (Rossa) un po' più a sinistra
+        terrainResources.put(new GridPosition(5, 0, 5), MatterColor.RED);
+        terrainResources.put(new GridPosition(6, 0, 5), MatterColor.RED);
+
+        // Vena BLUE (Blu) un po' più a destra
+        terrainResources.put(new GridPosition(15, 0, 15), MatterColor.BLUE);
+    }
+
+    // Metodo pubblico per la GUI (per disegnare le risorse a terra)
+    public Map<GridPosition, MatterColor> getTerrainResources() {
+        return Collections.unmodifiableMap(terrainResources);
     }
 
     public void loadPlotFromDB(UUID ownerId) {
@@ -54,15 +86,40 @@ public class GridManager {
     public boolean placeMachine(UUID ownerId, GridPosition pos, String typeId) {
         Vector3Int dim = blockRegistry.getDimensions(typeId);
 
+        // Controllo generico collisioni
         if (!isAreaClear(pos, dim)) {
             System.out.println("⚠️ Area ostruita per " + typeId + " a " + pos);
             return false;
         }
 
+        // --- NUOVO: CONTROLLO SPECIFICO PER TRIVELLE ---
+        MatterColor resourceUnderDrill = null;
+
+        if (typeId.equals("drill_mk1")) {
+            // 1. Deve essere a terra (Y=0)
+            if (pos.y() != 0) {
+                System.out.println("⛔ ERRORE: La trivella può essere piazzata solo a terra (Y=0)!");
+                return false;
+            }
+            // 2. Deve esserci una risorsa sotto
+            resourceUnderDrill = terrainResources.get(pos);
+            if (resourceUnderDrill == null) {
+                System.out.println("⛔ ERRORE: Nessuna risorsa da estrarre qui!");
+                return false;
+            }
+        }
+        // ------------------------------------------------
+
         PlotObject newDto = new PlotObject(null, null, pos.x(), pos.y(), pos.z(), typeId, null);
         PlacedMachine newMachine = MachineFactory.createFromModel(newDto, ownerId);
 
         if (newMachine == null) return false;
+
+        // --- NUOVO: CONFIGURA LA TRIVELLA ---
+        if (newMachine instanceof DrillMachine drill && resourceUnderDrill != null) {
+            drill.setResourceToMine(resourceUnderDrill);
+            System.out.println("⛏️ Trivella configurata per estrarre: " + resourceUnderDrill);
+        }
 
         internalAddMachine(newMachine);
         newMachine.onPlace(worldAdapter);
@@ -71,7 +128,6 @@ public class GridManager {
 
     private void internalAddMachine(PlacedMachine machine) {
         machine.setGridContext(this);
-
         Vector3Int dim = machine.getDimensions();
         GridPosition origin = machine.getPos();
 
@@ -91,29 +147,19 @@ public class GridManager {
         }
     }
 
-    // NEW: Logica di rimozione completa (DB + RAM)
     public void removeComponent(GridPosition pos) {
-        // 1. Identifica la macchina bersaglio (anche se clicchi su un pezzo del multiblocco)
         PlacedMachine target = getMachineAt(pos);
-
-        if (target == null) {
-            return; // Click a vuoto
-        }
+        if (target == null) return;
 
         System.out.println("🗑️ Removing: " + target.getTypeId() + " (DB_ID: " + target.getDbId() + ")");
 
-        // 2. Cancellazione dal DB
-        // Se dbId è null, significa che non è stata ancora salvata (è solo in RAM),
-        // quindi non serve delete SQL.
         if (target.getDbId() != null) {
             repository.deleteMachine(target.getDbId());
         }
 
-        // 3. Pulizia RAM (Griglia)
         Vector3Int dim = target.getDimensions();
         GridPosition origin = target.getPos();
 
-        // Rimuoviamo TUTTE le celle occupate (utile per Nexus 3x3x3)
         for (int x = 0; x < dim.x(); x++) {
             for (int y = 0; y < dim.y(); y++) {
                 for (int z = 0; z < dim.z(); z++) {
@@ -125,11 +171,9 @@ public class GridManager {
             }
         }
 
-        // 4. Stop Logic (Rimuovi dalla lista dei tick)
         synchronized (tickingMachines) {
             tickingMachines.remove(target);
         }
-
         target.onRemove();
     }
 
@@ -158,8 +202,6 @@ public class GridManager {
     }
 
     public void tick(long currentTick) {
-        // Creiamo una copia thread-safe per evitare ConcurrentModificationException
-        // se una macchina si cancella da sola o viene cancellata durante il tick
         List<PlacedMachine> snapshot;
         synchronized (tickingMachines) {
             snapshot = new ArrayList<>(tickingMachines);

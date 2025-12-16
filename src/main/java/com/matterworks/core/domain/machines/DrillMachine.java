@@ -18,19 +18,38 @@ public class DrillMachine extends PlacedMachine {
     private long nextSpawnTick = -1;
     private final MachineInventory outputBuffer;
 
+    // --- NUOVO: Risorsa target ---
+    private MatterColor resourceToMine = MatterColor.RAW; // Default fallback
+
     public DrillMachine(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata, int tierLevel) {
         super(dbId, ownerId, typeId, pos, metadata);
-
         this.tierLevel = tierLevel;
         this.productionSpeed = tierLevel * 1.0f;
-        this.dimensions = new Vector3Int(1, 2, 1);
+        this.dimensions = new Vector3Int(1, 2, 1); // 1x1 base, 2 altezza
 
         int capacity = CoreConfig.getInt("machine.inventory.capacity", 64);
         this.outputBuffer = new MachineInventory(capacity);
 
-        if (this.metadata != null && this.metadata.has("items")) {
-            this.outputBuffer.loadState(this.metadata);
+        if (this.metadata != null) {
+            if (this.metadata.has("items")) {
+                this.outputBuffer.loadState(this.metadata);
+            }
+            // Carichiamo la risorsa dal salvataggio precedente
+            if (this.metadata.has("mining_resource")) {
+                try {
+                    this.resourceToMine = MatterColor.valueOf(this.metadata.get("mining_resource").getAsString());
+                } catch (Exception e) {
+                    this.resourceToMine = MatterColor.RAW;
+                }
+            }
         }
+    }
+
+    // Chiamato dal GridManager al momento del piazzamento
+    public void setResourceToMine(MatterColor resource) {
+        this.resourceToMine = resource;
+        this.metadata.addProperty("mining_resource", resource.name());
+        markDirty();
     }
 
     @Override
@@ -50,10 +69,14 @@ public class DrillMachine extends PlacedMachine {
     }
 
     private void produceItem() {
-        MatterPayload newItem = new MatterPayload(MatterShape.CUBE, MatterColor.RAW);
+        // --- MODIFICA: Usa la risorsa specifica invece di RAW fisso ---
+        MatterPayload newItem = new MatterPayload(MatterShape.CUBE, this.resourceToMine);
+
         if (outputBuffer.insert(newItem)) {
-            System.out.println("Drill -> PRODUCED item. Buffer: " + outputBuffer.getCount());
+            System.out.println("Drill -> MINED " + this.resourceToMine + ". Buffer: " + outputBuffer.getCount());
             this.metadata = outputBuffer.serialize();
+            // Assicuriamoci di salvare anche la config risorsa
+            this.metadata.addProperty("mining_resource", resourceToMine.name());
             markDirty();
         } else {
             // Buffer pieno
@@ -64,12 +87,10 @@ public class DrillMachine extends PlacedMachine {
         if (outputBuffer.isEmpty()) return;
         if (gridManager == null) return;
 
-        // Trova il vicino in base all'orientamento
         Vector3Int dir = orientation.toVector();
         GridPosition targetPos = new GridPosition(pos.x() + dir.x(), pos.y() + dir.y(), pos.z() + dir.z());
 
         PlacedMachine neighbor = gridManager.getMachineAt(targetPos);
-
         if (neighbor instanceof ConveyorBelt belt) {
             MatterPayload item = outputBuffer.extractFirst();
             if (item != null) {
@@ -79,8 +100,6 @@ public class DrillMachine extends PlacedMachine {
                     this.metadata = outputBuffer.serialize();
                     markDirty();
                 } else {
-                    // Se rifiutato, rimetti in testa (rollback semplice)
-                    // Nota: In un sistema reale useremmo peek() prima di extract()
                     outputBuffer.insert(item);
                 }
             }
