@@ -29,11 +29,9 @@ public class FactoryPanel extends JPanel {
     // Stato Editor
     private String currentTool = "drill_mk1";
     private Direction currentOrientation = Direction.NORTH;
-    private int currentLayer = 64; // Asse Y (Default livello del terreno)
+    private int currentLayer = 64;
 
     private GridPosition mouseHoverPos = null;
-
-    // Callback per aggiornare la GUI principale (es. quando ruoto col tasto R)
     private Runnable onStateChange;
 
     public FactoryPanel(GridManager gridManager, BlockRegistry registry, UUID playerUuid, Runnable onStateChange) {
@@ -53,7 +51,6 @@ public class FactoryPanel extends JPanel {
                 repaint();
             }
         });
-
         this.addMouseListener(new MouseAdapter() {
             @Override
             public void mouseClicked(MouseEvent e) {
@@ -63,7 +60,7 @@ public class FactoryPanel extends JPanel {
             }
         });
 
-        // Tasti Rapidi (Opzionali, ma comodi da tenere insieme ai pulsanti)
+        // Tasti Rapidi
         this.addKeyListener(new KeyAdapter() {
             @Override
             public void keyPressed(KeyEvent e) {
@@ -85,7 +82,6 @@ public class FactoryPanel extends JPanel {
         int gx = toGridX(x);
         int gz = toGridY(y);
         if (gx >= 0 && gx <= 20 && gz >= 0 && gz <= 20) {
-            // FIX: Usiamo currentLayer invece di 64 fisso
             this.mouseHoverPos = new GridPosition(gx, currentLayer, gz);
         } else {
             this.mouseHoverPos = null;
@@ -110,21 +106,20 @@ public class FactoryPanel extends JPanel {
         }
     }
 
-    // --- COMANDI ESTERNI (Chiamati dalla GUI) ---
+    // --- COMANDI ESTERNI ---
     public void setTool(String toolId) {
         this.currentTool = toolId;
         repaint();
     }
 
     public void rotate() {
-        // Rotazione
         switch(currentOrientation) {
             case NORTH -> currentOrientation = Direction.EAST;
             case EAST -> currentOrientation = Direction.SOUTH;
             case SOUTH -> currentOrientation = Direction.WEST;
             case WEST -> currentOrientation = Direction.NORTH;
         }
-        if (onStateChange != null) onStateChange.run(); // Aggiorna etichette GUI
+        if (onStateChange != null) onStateChange.run();
         repaint();
     }
 
@@ -139,7 +134,7 @@ public class FactoryPanel extends JPanel {
         g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
 
         drawGrid(g2);
-        drawMachines(g2); // Disegna solo macchine su questo layer
+        drawMachines(g2);
         drawGhost(g2);
     }
 
@@ -149,22 +144,16 @@ public class FactoryPanel extends JPanel {
             g.drawLine(toScreenX(i), toScreenY(0), toScreenX(i), toScreenY(20));
             g.drawLine(toScreenX(0), toScreenY(i), toScreenX(20), toScreenY(i));
         }
-
-        // Indicatore del Layer corrente sullo sfondo
         g.setColor(new Color(60, 60, 60));
         g.drawString("LAYER Y = " + currentLayer, 10, getHeight() - 10);
     }
 
     private void drawMachines(Graphics2D g) {
         Map<GridPosition, PlacedMachine> machines = gridManager.getSnapshot();
-
         for (PlacedMachine m : machines.values()) {
-            // LOGICA DI VISIBILITÀ 3D
-            // Una macchina è visibile se il layer corrente "taglia" la sua altezza.
             int machineY = m.getPos().y();
             int machineHeight = m.getDimensions().y();
 
-            // Se il layer corrente è dentro il range [Y, Y + H]
             if (currentLayer >= machineY && currentLayer < machineY + machineHeight) {
                 drawSingleMachine(g, m, false);
             }
@@ -204,19 +193,29 @@ public class FactoryPanel extends JPanel {
 
         g.setColor(getColorForType(m.getTypeId()));
         g.fillRect(x + 2, z + 2, w - 4, h - 4);
-
         drawDirectionArrow(g, x, z, w, h, m.getOrientation());
 
         // Dettagli Extra
         if (m instanceof ConveyorBelt belt) {
             JsonObject meta = belt.serialize();
             if (meta.has("currentItem")) {
-                g.setColor(Color.GREEN);
+                // Se c'è un item, disegnalo
+                g.setColor(Color.CYAN);
                 g.fillOval(x + 10, z + 10, 20, 20);
+
+                // Se riusciamo a leggere il colore dall'item, usiamolo
+                try {
+                    String colorName = meta.getAsJsonObject("currentItem").get("color").getAsString();
+                    if ("RED".equals(colorName)) g.setColor(Color.RED);
+                    else if ("BLUE".equals(colorName)) g.setColor(Color.BLUE);
+                    else if ("GREEN".equals(colorName)) g.setColor(Color.GREEN);
+
+                    // Ridisegna sopra col colore giusto
+                    g.fillOval(x + 10, z + 10, 20, 20);
+                } catch(Exception ignored){}
             }
         } else if (m instanceof NexusMachine) {
             g.setColor(Color.WHITE);
-            // Se stiamo vedendo il layer base, scriviamo il nome
             if (pos.y() == currentLayer) {
                 g.drawString("NEXUS", x + 10, z + 20);
             } else {
@@ -230,7 +229,8 @@ public class FactoryPanel extends JPanel {
             case "drill_mk1" -> Color.LIGHT_GRAY;
             case "conveyor_belt" -> Color.DARK_GRAY;
             case "nexus_core" -> new Color(150, 0, 150);
-            default -> Color.RED;
+            case "chromator" -> new Color(255, 140, 0); // ARANCIONE
+            default -> Color.RED; // Errore/Sconosciuto
         };
     }
 

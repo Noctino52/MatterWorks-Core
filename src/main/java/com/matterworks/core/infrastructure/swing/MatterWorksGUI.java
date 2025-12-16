@@ -11,13 +11,9 @@ import java.util.function.Supplier;
 public class MatterWorksGUI extends JFrame {
 
     private final FactoryPanel panel;
-
-    // Etichette Info
     private final JLabel lblTool;
     private final JLabel lblOrient;
     private final JLabel lblLayer;
-
-    // Etichetta Soldi
     private final JLabel lblMoney;
 
     public MatterWorksGUI(GridManager gridManager, BlockRegistry registry, UUID playerUuid, Runnable onSave, Supplier<Double> moneyProvider) {
@@ -28,8 +24,7 @@ public class MatterWorksGUI extends JFrame {
 
         setLayout(new BorderLayout());
 
-        // --- 1. INIZIALIZZAZIONE COMPONENTI INFO (Prima di tutto!) ---
-        // Devono esistere perché il Panel proverà ad aggiornarle
+        // INFO LABELS
         lblTool = createLabel("TOOL: Drill");
         lblOrient = createLabel("DIR: NORTH");
         lblLayer = createLabel("LAYER Y: 64");
@@ -39,18 +34,20 @@ public class MatterWorksGUI extends JFrame {
         lblMoney.setFont(new Font("Monospaced", Font.BOLD, 16));
         lblMoney.setForeground(Color.GREEN);
 
-        // --- 2. INIZIALIZZAZIONE GRIGLIA (PANEL) ---
-        // Ora possiamo crearlo perché le Label esistono
+        // GRID PANEL
         panel = new FactoryPanel(gridManager, registry, playerUuid, this::updateLabels);
 
-        // --- 3. CREAZIONE PULSANTI (Ora 'panel' esiste!) ---
-
-        // A. Pannello Sinistro (Strumenti)
+        // BUTTONS
         JPanel leftTools = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
         leftTools.setOpaque(false);
 
         JButton btnDrill = createButton("⛏ Drill", e -> setTool("drill_mk1"));
         JButton btnBelt = createButton("⨠ Belt", e -> setTool("conveyor_belt"));
+        // NUOVO BOTTONE CHROMATOR
+        JButton btnChromator = createButton("🎨 Chromator", e -> setTool("chromator"));
+        btnChromator.setBackground(new Color(255, 140, 0)); // Arancione
+        btnChromator.setForeground(Color.BLACK);
+
         JButton btnNexus = createButton("🔮 Nexus", e -> setTool("nexus_core"));
 
         JSeparator sep1 = new JSeparator(SwingConstants.VERTICAL); sep1.setPreferredSize(new Dimension(5, 25));
@@ -60,11 +57,11 @@ public class MatterWorksGUI extends JFrame {
 
         JSeparator sep2 = new JSeparator(SwingConstants.VERTICAL); sep2.setPreferredSize(new Dimension(5, 25));
 
-        // Qui dava errore prima: ora panel è inizializzato!
         JButton btnRotate = createButton("↻ Rotate (R)", e -> panel.rotate());
 
         leftTools.add(btnDrill);
         leftTools.add(btnBelt);
+        leftTools.add(btnChromator); // Aggiunto qui
         leftTools.add(btnNexus);
         leftTools.add(sep1);
         leftTools.add(btnLayerDown);
@@ -72,7 +69,7 @@ public class MatterWorksGUI extends JFrame {
         leftTools.add(sep2);
         leftTools.add(btnRotate);
 
-        // B. Pannello Destro (Sistema)
+        // SYSTEM BUTTONS
         JPanel rightSystem = new JPanel(new FlowLayout(FlowLayout.RIGHT, 15, 0));
         rightSystem.setOpaque(false);
 
@@ -85,8 +82,7 @@ public class MatterWorksGUI extends JFrame {
         rightSystem.add(lblMoney);
         rightSystem.add(btnSave);
 
-        // --- 4. ASSEMBLAGGIO LAYOUT ---
-
+        // LAYOUT ASSEMBLY
         JPanel topContainer = new JPanel(new BorderLayout());
         topContainer.setBackground(new Color(45, 45, 48));
         topContainer.setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
@@ -106,9 +102,8 @@ public class MatterWorksGUI extends JFrame {
         add(northGroup, BorderLayout.NORTH);
         add(panel, BorderLayout.CENTER);
 
-        // --- 5. TIMERS ---
+        // TIMERS
         new Timer(50, e -> panel.repaint()).start();
-
         new Timer(1000, e -> {
             double m = moneyProvider.get();
             lblMoney.setText(String.format("MONEY: $%,.2f", m));
@@ -116,12 +111,9 @@ public class MatterWorksGUI extends JFrame {
 
         setVisible(true);
         panel.requestFocusInWindow();
-
-        // Aggiorna le label iniziali con i valori del panel
         updateLabels();
     }
 
-    // --- AZIONI ---
     private void setTool(String toolId) {
         panel.setTool(toolId);
         updateLabels();
@@ -135,7 +127,6 @@ public class MatterWorksGUI extends JFrame {
     }
 
     private void updateLabels() {
-        // Controllo di sicurezza se chiamato dal costruttore del panel prima dell'init
         if (lblTool != null && panel != null) {
             lblTool.setText("TOOL: " + panel.getCurrentToolName());
             lblOrient.setText("DIR: " + panel.getCurrentOrientationName());
@@ -143,7 +134,6 @@ public class MatterWorksGUI extends JFrame {
         }
     }
 
-    // --- HELPER UI ---
     private JButton createButton(String text, java.awt.event.ActionListener action) {
         JButton btn = new JButton(text);
         btn.setFocusable(false);

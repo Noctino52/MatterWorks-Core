@@ -1,10 +1,7 @@
 package com.matterworks.core.domain.factory;
 
 import com.matterworks.core.common.GridPosition;
-import com.matterworks.core.domain.machines.ConveyorBelt;
-import com.matterworks.core.domain.machines.DrillMachine;
-import com.matterworks.core.domain.machines.NexusMachine; // Import
-import com.matterworks.core.domain.machines.PlacedMachine;
+import com.matterworks.core.domain.machines.*;
 import com.matterworks.core.model.PlotObject;
 
 import java.util.UUID;
@@ -40,6 +37,14 @@ public class MachineFactory {
                     "nexus_core",
                     model.getMetaData()
             );
+            case "chromator" -> new Chromator(
+                    model.getId(),
+                    ownerId,
+                    pos,
+                    "chromator",
+                    model.getMetaData()
+            );
+
 
             default -> {
                 System.err.println("Unknown machine type: " + model.getTypeId());

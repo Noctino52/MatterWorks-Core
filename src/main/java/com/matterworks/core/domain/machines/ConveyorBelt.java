@@ -63,9 +63,13 @@ public class ConveyorBelt extends PlacedMachine {
         if (neighbor instanceof ConveyorBelt nextBelt) {
             moved = nextBelt.insertItem(currentItem, currentTick);
         }
-        // --- NEW: Supporto Nexus ---
         else if (neighbor instanceof NexusMachine nexus) {
             moved = nexus.insertItem(currentItem);
+        }
+        // 2. AGGIUNGI QUESTO BLOCCO FONDAMENTALE
+        else if (neighbor instanceof ProcessorMachine processor) {
+            // Il Chromator è un ProcessorMachine
+            moved = processor.insertItem(currentItem);
         }
 
         if (moved) {
