@@ -35,7 +35,7 @@ public class Main {
         CoreConfig.load();
 
         // Nota: localhost va bene sia su PC (se hai il tunnel o db locale) sia su VPS (se docker espone su 127.0.0.1)
-        String url = "jdbc:mariadb://213.199.37.52:3306/matterworks_core?allowPublicKeyRetrieval=true&useSSL=false";
+        String url = "jdbc:mariadb://db.matterworks.org:3306/matterworks_core?allowPublicKeyRetrieval=true&useSSL=false";
         DatabaseManager dbManager = new DatabaseManager(url, "Noctino52", "Yy72s7mRnVs3");
 
         // World Adapter "Mock"
