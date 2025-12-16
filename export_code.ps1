@@ -1,0 +1,1 @@
+Get-ChildItem -Path src -Recurse -Filter *.java | ForEach-Object { "`n`n--------------------------------`nFILE: $($_.Name)`n--------------------------------"; Get-Content $_.FullName } | Set-Content -Encoding UTF8 context_matterworks.txt

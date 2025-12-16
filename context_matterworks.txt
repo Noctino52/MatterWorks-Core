@@ -1,0 +1,2774 @@
+﻿
+
+--------------------------------
+FILE: Main.java
+--------------------------------
+package com.matterworks;
+
+//TIP To <b>Run</b> code, press <shortcut actionId="Run"/> or
+// click the <icon src="AllIcons.Actions.Execute"/> icon in the gutter.
+public class Main {
+    public static void main(String[] args) {
+        //TIP Press <shortcut actionId="ShowIntentionActions"/> with your caret at the highlighted text
+        // to see how IntelliJ IDEA suggests fixing it.
+        System.out.printf("Hello and welcome!");
+
+        for (int i = 1; i <= 5; i++) {
+            //TIP Press <shortcut actionId="Debug"/> to start debugging your code. We have set one <icon src="AllIcons.Debugger.Db_set_breakpoint"/> breakpoint
+            // for you, but you can always add more by pressing <shortcut actionId="ToggleLineBreakpoint"/>.
+            System.out.println("i = " + i);
+        }
+    }
+}
+
+
+--------------------------------
+FILE: Main.java
+--------------------------------
+package com.matterworks.core;
+
+import com.matterworks.core.common.Direction;
+import com.matterworks.core.common.GridPosition;
+import com.matterworks.core.common.Vector3Int;
+import com.matterworks.core.database.DatabaseManager;
+import com.matterworks.core.database.dao.MachineDefinitionDAO;
+import com.matterworks.core.database.dao.PlayerDAO;
+import com.matterworks.core.database.dao.PlotDAO;
+import com.matterworks.core.domain.machines.BlockRegistry;
+import com.matterworks.core.domain.machines.PlacedMachine;
+import com.matterworks.core.domain.player.PlayerProfile;
+import com.matterworks.core.infrastructure.CoreConfig;
+import com.matterworks.core.infrastructure.MariaDBAdapter;
+import com.matterworks.core.infrastructure.swing.MatterWorksGUI;
+import com.matterworks.core.managers.GridManager;
+import com.matterworks.core.managers.WorldIntegrityValidator;
+import com.matterworks.core.ports.IRepository;
+import com.matterworks.core.ports.IWorldAccess;
+import com.matterworks.core.synchronization.FactoryLoop;
+import com.matterworks.core.synchronization.GridSaverService;
+
+import javax.swing.SwingUtilities;
+import java.awt.GraphicsEnvironment; // IMPORT FONDAMENTALE PER IL CHECK
+import java.util.UUID;
+
+public class Main {
+
+    public static void main(String[] args) throws InterruptedException {
+        System.out.println("ðŸ­ MatterWorks Core Starting...");
+
+        // ---------------------------------------------------------
+        // FASE 0: CONFIGURAZIONE & INFRASTRUTTURA
+        // ---------------------------------------------------------
+        CoreConfig.load();
+
+        // Nota: localhost va bene sia su PC (se hai il tunnel o db locale) sia su VPS (se docker espone su 127.0.0.1)
+        String url = "jdbc:mariadb://db.matterworks.org:3306/matterworks_core?allowPublicKeyRetrieval=true&useSSL=false";
+        DatabaseManager dbManager = new DatabaseManager(url, "Noctino52", "Yy72s7mRnVs3");
+
+        // World Adapter "Mock"
+        IWorldAccess world = new MockWorld();
+
+        // ---------------------------------------------------------
+        // FASE 1: REGISTRY & DEFINIZIONI
+        // ---------------------------------------------------------
+        MachineDefinitionDAO defDao = new MachineDefinitionDAO(dbManager);
+        BlockRegistry blockRegistry = new BlockRegistry(world, defDao);
+        blockRegistry.loadFromDatabase();
+
+        // ---------------------------------------------------------
+        // FASE 2: VALIDAZIONE INTEGRITÃ€ (Safety First)
+        // ---------------------------------------------------------
+        WorldIntegrityValidator validator = new WorldIntegrityValidator(dbManager, blockRegistry);
+        if (!validator.validateWorldIntegrity()) {
+            System.err.println("ðŸš¨ ATTENZIONE: Il mondo contiene collisioni! Controlla il DB.");
+            Thread.sleep(2000);
+        }
+
+        // ---------------------------------------------------------
+        // FASE 3: WIRING DEL CORE (Hexagonal Setup)
+        // ---------------------------------------------------------
+        IRepository repository = new MariaDBAdapter(dbManager);
+        GridManager gridManager = new GridManager(repository, world, blockRegistry);
+        GridSaverService saverService = new GridSaverService(gridManager, repository);
+
+        // FactoryLoop: Il cuore pulsante
+        FactoryLoop gameLoop = new FactoryLoop(gridManager);
+        gameLoop.start(); // IL GIOCO PARTE QUI (indipendentemente dalla GUI)
+
+        // ---------------------------------------------------------
+        // FASE 4: SETUP PLAYER & SCENARIO
+        // ---------------------------------------------------------
+        UUID playerUuid = UUID.fromString("550e8400-e29b-41d4-a716-446655440000");
+        ensurePlayerExists(dbManager, playerUuid);
+        ensurePlayerHasPlot(dbManager, playerUuid);
+
+        System.out.println("ðŸ“¥ Caricamento Plot dal Database...");
+        gridManager.loadPlotFromDB(playerUuid);
+        Thread.sleep(500);
+
+        setupScenario(gridManager, blockRegistry, playerUuid);
+
+        // ---------------------------------------------------------
+        // FASE 5: GESTIONE GUI vs HEADLESS (FIX PER VPS)
+        // ---------------------------------------------------------
+
+        // Controlliamo se siamo su un server senza monitor (VPS) o su un PC Desktop
+        if (GraphicsEnvironment.isHeadless()) {
+            // --- MODALITÃ€ SERVER (VPS) ---
+            System.out.println("\n==================================================");
+            System.out.println("ðŸ‘» MODALITÃ€ HEADLESS ATTIVA (SERVER)");
+            System.out.println("   Nessun monitor rilevato. GUI disabilitata.");
+            System.out.println("   Il Core sta girando in background.");
+            System.out.println("==================================================\n");
+
+            // Qui non lanciamo SwingUtilities.invokeLater, quindi niente crash!
+
+        } else {
+            // --- MODALITÃ€ DESKTOP (PC LOCALE) ---
+            System.out.println("ðŸ–¥ï¸ Monitor rilevato: Avvio Interfaccia Grafica di Debug...");
+
+            SwingUtilities.invokeLater(() -> {
+                new MatterWorksGUI(
+                        gridManager,
+                        blockRegistry,
+                        playerUuid,
+                        () -> {
+                            System.out.println("ðŸ’¾ Manual Save Requested via GUI...");
+                            saverService.autoSaveTask();
+                        },
+                        () -> {
+                            PlayerProfile p = repository.loadPlayerProfile(playerUuid);
+                            return (p != null) ? p.getMoney() : 0.0;
+                        }
+                );
+            });
+        }
+
+        // ---------------------------------------------------------
+        // FASE 6: LOOP DI MANTENIMENTO (Server Keep-Alive)
+        // ---------------------------------------------------------
+        System.out.println("--- ðŸŸ¢ SISTEMA ONLINE ---");
+
+        int ticks = 0;
+        while (true) {
+            Thread.sleep(1000);
+            ticks++;
+
+            // Ogni 10 secondi eseguiamo un autosave
+            if (ticks % 10 == 0) {
+                System.out.println("ðŸ’¾ AutoSave Triggered...");
+                saverService.autoSaveTask();
+
+                // Logghiamo lo stato per capire che il server Ã¨ vivo anche senza GUI
+                PlayerProfile p = repository.loadPlayerProfile(playerUuid);
+                if (p != null) {
+                    System.out.println("   [Server Status] Saldo Player: " + p.getMoney() + "$ | Uptime: " + ticks + "s");
+                }
+            }
+        }
+    }
+
+    // --- HELPER METODI ---
+
+    private static void setupScenario(GridManager gm, BlockRegistry reg, UUID owner) {
+        GridPosition drillPos = new GridPosition(10, 64, 10);
+        if (gm.isAreaClear(drillPos, reg.getDimensions("drill_mk1"))) {
+            gm.placeMachine(owner, drillPos, "drill_mk1");
+            updateOrientation(gm, drillPos, Direction.NORTH);
+        }
+
+        GridPosition beltPos = new GridPosition(10, 64, 9);
+        if (gm.isAreaClear(beltPos, reg.getDimensions("conveyor_belt"))) {
+            gm.placeMachine(owner, beltPos, "conveyor_belt");
+            updateOrientation(gm, beltPos, Direction.NORTH);
+        }
+
+        GridPosition nexusPos = new GridPosition(10, 64, 6);
+        if (gm.isAreaClear(nexusPos, reg.getDimensions("nexus_core"))) {
+            gm.placeMachine(owner, nexusPos, "nexus_core");
+            updateOrientation(gm, nexusPos, Direction.SOUTH);
+        }
+    }
+
+    private static void updateOrientation(GridManager gm, GridPosition pos, Direction dir) {
+        PlacedMachine pm = gm.getMachineAt(pos);
+        if (pm != null) {
+            pm.setOrientation(dir);
+        }
+    }
+
+    private static void ensurePlayerExists(DatabaseManager db, UUID uuid) {
+        PlayerDAO playerDao = new PlayerDAO(db);
+        if (playerDao.load(uuid) == null) {
+            PlayerProfile p = new PlayerProfile(uuid);
+            p.setUsername("Noctino_Dev");
+            p.setMoney(1000.0);
+            playerDao.save(p);
+        }
+    }
+
+    private static void ensurePlayerHasPlot(DatabaseManager db, UUID owner) {
+        PlotDAO plotDao = new PlotDAO(db);
+        if (plotDao.findPlotIdByOwner(owner) == null) {
+            plotDao.createPlot(owner, 1, 0, 0);
+        }
+    }
+
+    static class MockWorld implements IWorldAccess {
+        @Override public void setBlock(GridPosition pos, String blockId) {}
+        @Override public boolean isBlockSolid(GridPosition pos) { return true; }
+        @Override public void createVisuals(GridPosition pos, String visualId) {}
+        @Override public Vector3Int fetchExternalBlockDimensions(String blockId) { return Vector3Int.one(); }
+    }
+}
+
+
+--------------------------------
+FILE: Direction.java
+--------------------------------
+package com.matterworks.core.common;
+
+public enum Direction {
+    NORTH(0, 0, -1),
+    EAST(1, 0, 0),
+    SOUTH(0, 0, 1),
+    WEST(-1, 0, 0),
+    UP(0, 1, 0),
+    DOWN(0, -1, 0);
+
+    private final int x, y, z;
+
+    Direction(int x, int y, int z) {
+        this.x = x;
+        this.y = y;
+        this.z = z;
+    }
+
+    public Vector3Int toVector() {
+        return new Vector3Int(x, y, z);
+    }
+
+    public Direction opposite() {
+        return switch(this) {
+            case NORTH -> SOUTH;
+            case SOUTH -> NORTH;
+            case EAST -> WEST;
+            case WEST -> EAST;
+            case UP -> DOWN;
+            case DOWN -> UP;
+        };
+    }
+}
+
+
+--------------------------------
+FILE: GridPosition.java
+--------------------------------
+package com.matterworks.core.common;
+
+/**
+ * Value Object immutabile che rappresenta una coordinata 3D nel mondo.
+ * Usato come chiave primaria nelle HashMap del GridManager per accesso O(1).
+ */
+public record GridPosition(int x, int y, int z) {
+
+    /**
+     * Factory method statico per leggibilitÃ  (opzionale ma comodo).
+     * Uso: GridPosition.of(10, 64, 10)
+     */
+    public static GridPosition of(int x, int y, int z) {
+        return new GridPosition(x, y, z);
+    }
+
+    /**
+     * Metodo di utilitÃ  per calcolare posizioni relative (es. "il blocco sopra").
+     * Utile per logica di nastri trasportatori o controlli di adiacenza.
+     */
+    public GridPosition add(int dx, int dy, int dz) {
+        return new GridPosition(x + dx, y + dy, z + dz);
+    }
+
+    public GridPosition add(Vector3Int vec) {
+        return new GridPosition(x + vec.x(), y + vec.y(), z + vec.z());
+    }
+
+    // Nota: equals(), hashCode() e toString() sono generati automaticamente dal Record.
+}
+
+
+--------------------------------
+FILE: Vector3Int.java
+--------------------------------
+package com.matterworks.core.common;
+
+/**
+ * Value Object semplice per le dimensioni (Width, Height, Depth).
+ * Usato da IGridComponent.
+ */
+public record Vector3Int(int x, int y, int z) {
+    public static Vector3Int one() { return new Vector3Int(1, 1, 1); }
+}
+
+
+--------------------------------
+FILE: DatabaseManager.java
+--------------------------------
+package com.matterworks.core.database;
+
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
+import java.sql.Connection;
+import java.sql.SQLException;
+
+public class DatabaseManager {
+
+    private final HikariDataSource dataSource;
+
+    public DatabaseManager(String jdbcUrl, String username, String password) {
+        HikariConfig config = new HikariConfig();
+        config.setJdbcUrl(jdbcUrl);
+        config.setUsername(username);
+        config.setPassword(password);
+
+        // Ottimizzazioni per Gaming (Bassa latenza)
+        config.setMaximumPoolSize(10);
+        config.setMinimumIdle(2);
+        config.setIdleTimeout(30000);
+        config.setConnectionTimeout(2000); // Fail fast se il DB Ã¨ giÃ¹
+
+        this.dataSource = new HikariDataSource(config);
+    }
+
+    public Connection getConnection() throws SQLException {
+        return dataSource.getConnection();
+    }
+
+    public void close() {
+        if (dataSource != null) {
+            dataSource.close();
+        }
+    }
+}
+
+
+--------------------------------
+FILE: UuidUtils.java
+--------------------------------
+package com.matterworks.core.database;
+
+import java.nio.ByteBuffer;
+import java.util.UUID;
+
+public class UuidUtils {
+
+    public static byte[] asBytes(UUID uuid) {
+        if (uuid == null) return null;
+        ByteBuffer bb = ByteBuffer.wrap(new byte[16]);
+        bb.putLong(uuid.getMostSignificantBits());
+        bb.putLong(uuid.getLeastSignificantBits());
+        return bb.array();
+    }
+
+    public static UUID asUuid(byte[] bytes) {
+        if (bytes == null || bytes.length != 16) return null;
+        ByteBuffer bb = ByteBuffer.wrap(bytes);
+        long firstLong = bb.getLong();
+        long secondLong = bb.getLong();
+        return new UUID(firstLong, secondLong);
+    }
+}
+
+
+--------------------------------
+FILE: MachineDefinitionDAO.java
+--------------------------------
+package com.matterworks.core.database.dao;
+
+import com.matterworks.core.common.Vector3Int;
+import com.matterworks.core.database.DatabaseManager;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.HashMap;
+import java.util.Map;
+
+public class MachineDefinitionDAO {
+
+    private final DatabaseManager db;
+    private static final String SELECT_ALL = "SELECT type_id, width, height, depth FROM machine_definitions";
+
+    public MachineDefinitionDAO(DatabaseManager db) {
+        this.db = db;
+    }
+
+    public Map<String, Vector3Int> loadAllDefinitions() {
+        Map<String, Vector3Int> defs = new HashMap<>();
+
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(SELECT_ALL);
+             ResultSet rs = ps.executeQuery()) {
+
+            while (rs.next()) {
+                String id = rs.getString("type_id");
+                Vector3Int dim = new Vector3Int(
+                        rs.getInt("width"),
+                        rs.getInt("height"),
+                        rs.getInt("depth")
+                );
+                defs.put(id, dim);
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+        return defs;
+    }
+}
+
+
+--------------------------------
+FILE: PlayerDAO.java
+--------------------------------
+package com.matterworks.core.database.dao;
+
+import com.matterworks.core.database.DatabaseManager;
+import com.matterworks.core.database.UuidUtils; // Importante
+import com.matterworks.core.domain.player.PlayerProfile;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.UUID;
+
+public class PlayerDAO {
+
+    private final DatabaseManager db;
+
+    // UUID Ã¨ BINARY(16) nel DB
+    private static final String UPSERT_SQL = """
+        INSERT INTO players (uuid, username, money) 
+        VALUES (?, ?, ?)
+        ON DUPLICATE KEY UPDATE 
+            username = VALUES(username),
+            money = VALUES(money),
+            last_login = CURRENT_TIMESTAMP
+    """;
+
+    private static final String SELECT_SQL = "SELECT * FROM players WHERE uuid = ?";
+
+    public PlayerDAO(DatabaseManager db) {
+        this.db = db;
+    }
+
+    public void save(PlayerProfile p) {
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(UPSERT_SQL)) {
+
+            // FIX: Usiamo setBytes invece di setString
+            ps.setBytes(1, UuidUtils.asBytes(p.getPlayerId()));
+            ps.setString(2, p.getUsername());
+            ps.setDouble(3, p.getMoney());
+
+            ps.executeUpdate();
+
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public PlayerProfile load(UUID uuid) {
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(SELECT_SQL)) {
+
+            // FIX: Usiamo setBytes per la ricerca
+            ps.setBytes(1, UuidUtils.asBytes(uuid));
+
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    // FIX: Ricostruiamo l'UUID dai byte (anche se l'abbiamo giÃ  passato, Ã¨ buona pratica)
+                    // In questo caso usiamo l'UUID passato per creare l'oggetto
+                    PlayerProfile p = new PlayerProfile(uuid);
+                    p.setUsername(rs.getString("username"));
+                    p.setMoney(rs.getDouble("money"));
+                    return p;
+                }
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+}
+
+
+--------------------------------
+FILE: PlotDAO.java
+--------------------------------
+package com.matterworks.core.database.dao;
+
+import com.matterworks.core.database.DatabaseManager;
+import com.matterworks.core.database.UuidUtils; // Importante
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.UUID;
+
+public class PlotDAO {
+
+    private final DatabaseManager db;
+
+    // owner_id Ã¨ BINARY(16)
+    private static final String SELECT_BY_OWNER = "SELECT id FROM plots WHERE owner_id = ?";
+    private static final String INSERT_PLOT = "INSERT INTO plots (owner_id, allocation_index, world_x, world_z) VALUES (?, ?, ?, ?)";
+
+    public PlotDAO(DatabaseManager db) {
+        this.db = db;
+    }
+
+    public Long findPlotIdByOwner(UUID ownerId) {
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(SELECT_BY_OWNER)) {
+
+            // FIX: Conversione UUID -> Bytes
+            ps.setBytes(1, UuidUtils.asBytes(ownerId));
+
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return rs.getLong("id");
+                }
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    public void createPlot(UUID ownerId, int allocationIndex, int worldX, int worldZ) {
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(INSERT_PLOT)) {
+
+            // FIX: Conversione UUID -> Bytes
+            ps.setBytes(1, UuidUtils.asBytes(ownerId));
+            ps.setInt(2, allocationIndex);
+            ps.setInt(3, worldX);
+            ps.setInt(4, worldZ);
+
+            ps.executeUpdate();
+
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+    }
+}
+
+
+--------------------------------
+FILE: PlotObjectDAO.java
+--------------------------------
+package com.matterworks.core.database.dao;
+
+import com.matterworks.core.database.DatabaseManager;
+import com.matterworks.core.model.PlotObject;
+
+import java.sql.*;
+import java.util.ArrayList;
+import java.util.List;
+
+public class PlotObjectDAO {
+
+    private final DatabaseManager db;
+
+    // --- FIX: USIAMO UPSERT INVECE DI INSERT ---
+    // Se la combinazione (plot_id, x, y, z) esiste giÃ  (Unique Key),
+    // aggiorniamo solo i metadati e il tipo, invece di dare errore.
+    private static final String UPSERT_SQL = """
+        INSERT INTO plot_objects (plot_id, x, y, z, type_id, meta_data)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE 
+            meta_data = VALUES(meta_data),
+            type_id = VALUES(type_id)
+    """;
+
+    private static final String SELECT_SQL = "SELECT * FROM plot_objects WHERE plot_id = ?";
+    private static final String DELETE_SQL = "DELETE FROM plot_objects WHERE id = ?";
+
+    public PlotObjectDAO(DatabaseManager db) {
+        this.db = db;
+    }
+
+    public void placeMachine(PlotObject obj) {
+        // Usiamo Statement.RETURN_GENERATED_KEYS per ottenere l'ID se Ã¨ un nuovo inserimento
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(UPSERT_SQL, Statement.RETURN_GENERATED_KEYS)) {
+
+            ps.setLong(1, obj.getPlotId());
+            ps.setInt(2, obj.getX());
+            ps.setInt(3, obj.getY());
+            ps.setInt(4, obj.getZ());
+            ps.setString(5, obj.getTypeId());
+            // Gestione metadati sicura
+            ps.setString(6, obj.getMetaData() != null ? obj.getMetaData().toString() : "{}");
+
+            ps.executeUpdate();
+
+            // Se Ã¨ stato un INSERT (nuova macchina), prendiamo l'ID.
+            // Se Ã¨ stato un UPDATE, l'ID non cambia (lo abbiamo giÃ  in obj.id solitamente).
+            try (ResultSet rs = ps.getGeneratedKeys()) {
+                if (rs.next()) {
+                    long newId = rs.getLong(1);
+                    // Aggiorniamo l'ID solo se ne abbiamo ricevuto uno valido (cioÃ¨ era un insert)
+                    if (newId > 0) {
+                        obj.setId(newId);
+                    }
+                }
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public List<PlotObject> loadPlotMachines(Long plotId) {
+        List<PlotObject> machines = new ArrayList<>();
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(SELECT_SQL)) {
+
+            ps.setLong(1, plotId);
+
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    PlotObject obj = new PlotObject();
+                    obj.setId(rs.getLong("id"));
+                    obj.setPlotId(plotId);
+                    obj.setX(rs.getInt("x"));
+                    obj.setY(rs.getInt("y"));
+                    obj.setZ(rs.getInt("z"));
+                    obj.setTypeId(rs.getString("type_id"));
+
+                    // Parsing JSON sicuro
+                    String metaStr = rs.getString("meta_data");
+                    if (metaStr != null) {
+                        obj.setMetaDataFromString(metaStr);
+                    }
+
+                    machines.add(obj);
+                }
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+        return machines;
+    }
+
+    public void deleteMachine(Long dbId) {
+        if (dbId == null) return;
+
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(DELETE_SQL)) {
+
+            ps.setLong(1, dbId);
+            ps.executeUpdate();
+            System.out.println("ðŸ—‘ï¸ DB: Cancellata riga ID " + dbId);
+
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+    }
+}
+
+
+--------------------------------
+FILE: TransactionDAO.java
+--------------------------------
+package com.matterworks.core.database.dao;
+
+import com.matterworks.core.database.DatabaseManager;
+import com.matterworks.core.database.UuidUtils;
+
+import java.math.BigDecimal;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.util.UUID;
+
+public class TransactionDAO {
+
+    private final DatabaseManager db;
+
+    private static final String INSERT_SQL = """
+        INSERT INTO transactions (player_uuid, action_type, currency, amount, item_id, occurred_at)
+        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    """;
+
+    public TransactionDAO(DatabaseManager db) {
+        this.db = db;
+    }
+
+    /**
+     * Logga una transazione economica.
+     * @param uuid Chi?
+     * @param type Cosa ha fatto? (es. "MARKET_SELL", "TECH_BUY")
+     * @param currency Valuta ("MONEY", "VOID_COINS")
+     * @param amount Quanto? (Positivo = guadagno, Negativo = spesa)
+     * @param itemId Opzionale (null se non rilevante)
+     */
+    public void logTransaction(UUID uuid, String type, String currency, BigDecimal amount, String itemId) {
+        // Eseguiamo in un thread separato per non bloccare il gioco (Fire & Forget)
+        // In un server vero useremmo un ExecutorService, qui per semplicitÃ  va bene cosÃ¬
+        new Thread(() -> {
+            try (Connection conn = db.getConnection();
+                 PreparedStatement ps = conn.prepareStatement(INSERT_SQL)) {
+
+                ps.setBytes(1, UuidUtils.asBytes(uuid));
+                ps.setString(2, type);
+                ps.setString(3, currency);
+                ps.setBigDecimal(4, amount);
+                ps.setString(5, itemId); // PuÃ² essere null
+
+                ps.executeUpdate();
+
+            } catch (SQLException e) {
+                System.err.println("FAILED TO LOG TRANSACTION: " + e.getMessage());
+                // Non crashare il gioco per un log fallito, ma stampalo
+            }
+        }).start();
+    }
+}
+
+
+--------------------------------
+FILE: VerificationCodeDAO.java
+--------------------------------
+package com.matterworks.core.database.dao;
+
+import com.matterworks.core.database.DatabaseManager;
+import com.matterworks.core.database.UuidUtils;
+import com.matterworks.core.domain.player.LinkCode; // Importante: Usa il Dominio
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.util.UUID;
+
+public class VerificationCodeDAO {
+
+    private final DatabaseManager db;
+
+    private static final String INSERT_CODE = """
+        INSERT INTO verification_codes (code, player_uuid, expires_at)
+        VALUES (?, ?, ?)
+    """;
+
+    public VerificationCodeDAO(DatabaseManager db) {
+        this.db = db;
+    }
+
+    public void saveCode(UUID playerUuid, LinkCode linkCode) {
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(INSERT_CODE)) {
+
+            ps.setString(1, linkCode.code());
+            ps.setBytes(2, UuidUtils.asBytes(playerUuid));
+            // Convertiamo il long (millisecondi) in Timestamp SQL
+            ps.setTimestamp(3, new Timestamp(linkCode.expirationTime()));
+
+            ps.executeUpdate();
+
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+    }
+}
+
+
+--------------------------------
+FILE: MachineFactory.java
+--------------------------------
+package com.matterworks.core.domain.factory;
+
+import com.matterworks.core.common.GridPosition;
+import com.matterworks.core.domain.machines.ConveyorBelt;
+import com.matterworks.core.domain.machines.DrillMachine;
+import com.matterworks.core.domain.machines.NexusMachine; // Import
+import com.matterworks.core.domain.machines.PlacedMachine;
+import com.matterworks.core.model.PlotObject;
+
+import java.util.UUID;
+
+public class MachineFactory {
+
+    public static PlacedMachine createFromModel(PlotObject model, UUID ownerId) {
+        GridPosition pos = new GridPosition(model.getX(), model.getY(), model.getZ());
+
+        return switch (model.getTypeId()) {
+            case "drill_mk1" -> new DrillMachine(
+                    model.getId(),
+                    ownerId,
+                    pos,
+                    "drill_mk1",
+                    model.getMetaData(),
+                    1
+            );
+
+            case "conveyor_belt" -> new ConveyorBelt(
+                    model.getId(),
+                    ownerId,
+                    pos,
+                    "conveyor_belt",
+                    model.getMetaData()
+            );
+
+            // NEW: Creazione Nexus
+            case "nexus_core" -> new NexusMachine(
+                    model.getId(),
+                    ownerId,
+                    pos,
+                    "nexus_core",
+                    model.getMetaData()
+            );
+
+            default -> {
+                System.err.println("Unknown machine type: " + model.getTypeId());
+                yield null;
+            }
+        };
+    }
+}
+
+
+--------------------------------
+FILE: MachineInventory.java
+--------------------------------
+package com.matterworks.core.domain.inventory;
+
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.matterworks.core.domain.matter.MatterPayload;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class MachineInventory {
+
+    private final List<MatterPayload> slots;
+    private final int maxCapacity;
+
+    public MachineInventory(int maxCapacity) {
+        this.maxCapacity = maxCapacity;
+        this.slots = new ArrayList<>();
+    }
+
+    public boolean insert(MatterPayload m) {
+        if (slots.size() >= maxCapacity) return false;
+        slots.add(m);
+        return true;
+    }
+
+    /**
+     * Estrae il primo oggetto disponibile (FIFO).
+     * Usato per l'espulsione automatica verso nastri/inventari.
+     */
+    public MatterPayload extractFirst() {
+        if (slots.isEmpty()) return null;
+        return slots.remove(0);
+    }
+
+    public boolean isEmpty() { return slots.isEmpty(); }
+    public int getCount() { return slots.size(); }
+
+    public JsonObject serialize() {
+        JsonObject json = new JsonObject();
+        json.addProperty("capacity", maxCapacity);
+        json.addProperty("count", slots.size());
+
+        JsonArray items = new JsonArray();
+        for (MatterPayload p : slots) {
+            items.add(p.serialize());
+        }
+        json.add("items", items);
+        return json;
+    }
+
+    public void loadState(JsonObject json) {
+        if (json == null || !json.has("items")) return;
+
+        this.slots.clear();
+        JsonArray items = json.getAsJsonArray("items");
+
+        for (JsonElement el : items) {
+            if (el.isJsonObject()) {
+                MatterPayload mp = MatterPayload.fromJson(el.getAsJsonObject());
+                this.slots.add(mp);
+            }
+        }
+    }
+}
+
+
+--------------------------------
+FILE: BlockRegistry.java
+--------------------------------
+package com.matterworks.core.domain.machines;
+
+import com.matterworks.core.common.Vector3Int;
+import com.matterworks.core.database.dao.MachineDefinitionDAO;
+import com.matterworks.core.ports.IWorldAccess;
+
+import java.util.HashMap;
+import java.util.Map;
+
+public class BlockRegistry {
+
+    private final IWorldAccess worldAdapter;
+    private final Map<String, Vector3Int> dimensionCache;
+    private final MachineDefinitionDAO definitionDAO;
+
+    // Ora richiede il DAO nel costruttore
+    public BlockRegistry(IWorldAccess worldAdapter, MachineDefinitionDAO definitionDAO) {
+        this.worldAdapter = worldAdapter;
+        this.definitionDAO = definitionDAO;
+        this.dimensionCache = new HashMap<>();
+    }
+
+    /**
+     * Chiamato all'avvio del server.
+     */
+    public void loadFromDatabase() {
+        System.out.println("ðŸ“ Caricamento dimensioni macchine dal DB...");
+        Map<String, Vector3Int> dbDefs = definitionDAO.loadAllDefinitions();
+
+        dbDefs.forEach((id, dim) -> {
+            dimensionCache.put(id, dim);
+            System.out.println("   -> " + id + ": " + dim);
+        });
+    }
+
+    public Vector3Int getDimensions(String blockId) {
+        if (dimensionCache.containsKey(blockId)) {
+            return dimensionCache.get(blockId);
+        }
+        // Fallback su Hytale se non Ã¨ nel nostro DB
+        Vector3Int dim = worldAdapter.fetchExternalBlockDimensions(blockId);
+        dimensionCache.put(blockId, dim);
+        return dim;
+    }
+}
+
+
+--------------------------------
+FILE: ConveyorBelt.java
+--------------------------------
+package com.matterworks.core.domain.machines;
+
+import com.google.gson.JsonObject;
+import com.matterworks.core.common.GridPosition;
+import com.matterworks.core.common.Vector3Int;
+import com.matterworks.core.domain.matter.MatterPayload;
+
+import java.util.UUID;
+
+public class ConveyorBelt extends PlacedMachine {
+
+    private MatterPayload currentItem;
+    private long arrivalTick = -1;
+    private static final int TRANSPORT_TIME = 20;
+
+    public ConveyorBelt(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata) {
+        super(dbId, ownerId, typeId, pos, metadata);
+        this.dimensions = Vector3Int.one();
+
+        if (this.metadata.has("currentItem")) {
+            this.currentItem = MatterPayload.fromJson(this.metadata.getAsJsonObject("currentItem"));
+            this.arrivalTick = 0;
+        }
+    }
+
+    @Override
+    public void tick(long currentTick) {
+        if (currentItem == null) return;
+
+        if (arrivalTick == -1) {
+            arrivalTick = currentTick + TRANSPORT_TIME;
+        }
+
+        if (currentTick >= arrivalTick) {
+            pushToNeighbor(currentTick);
+        }
+    }
+
+    public boolean insertItem(MatterPayload item, long currentTick) {
+        if (this.currentItem != null) return false;
+
+        this.currentItem = item;
+        this.arrivalTick = currentTick + TRANSPORT_TIME;
+
+        this.metadata.add("currentItem", item.serialize());
+        markDirty();
+        return true;
+    }
+
+    private void pushToNeighbor(long currentTick) {
+        if (gridManager == null) return;
+
+        Vector3Int dirVec = orientation.toVector();
+        GridPosition targetPos = new GridPosition(
+                pos.x() + dirVec.x(),
+                pos.y() + dirVec.y(),
+                pos.z() + dirVec.z()
+        );
+
+        PlacedMachine neighbor = gridManager.getMachineAt(targetPos);
+        boolean moved = false;
+
+        if (neighbor instanceof ConveyorBelt nextBelt) {
+            moved = nextBelt.insertItem(currentItem, currentTick);
+        }
+        // --- NEW: Supporto Nexus ---
+        else if (neighbor instanceof NexusMachine nexus) {
+            moved = nexus.insertItem(currentItem);
+        }
+
+        if (moved) {
+            // System.out.println("Belt -> Consegnato a " + neighbor.getTypeId());
+            this.currentItem = null;
+            this.arrivalTick = -1;
+            this.metadata.remove("currentItem");
+            markDirty();
+        }
+    }
+
+    @Override
+    public JsonObject serialize() {
+        super.serialize();
+        if (currentItem != null) {
+            this.metadata.add("currentItem", currentItem.serialize());
+        } else {
+            this.metadata.remove("currentItem");
+        }
+        return this.metadata;
+    }
+}
+
+
+--------------------------------
+FILE: DrillMachine.java
+--------------------------------
+package com.matterworks.core.domain.machines;
+
+import com.google.gson.JsonObject;
+import com.matterworks.core.common.GridPosition;
+import com.matterworks.core.common.Vector3Int;
+import com.matterworks.core.domain.inventory.MachineInventory;
+import com.matterworks.core.domain.matter.MatterColor;
+import com.matterworks.core.domain.matter.MatterPayload;
+import com.matterworks.core.domain.matter.MatterShape;
+import com.matterworks.core.infrastructure.CoreConfig;
+
+import java.util.UUID;
+
+public class DrillMachine extends PlacedMachine {
+
+    private int tierLevel;
+    private float productionSpeed;
+    private long nextSpawnTick = -1;
+    private final MachineInventory outputBuffer;
+
+    public DrillMachine(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata, int tierLevel) {
+        super(dbId, ownerId, typeId, pos, metadata);
+
+        this.tierLevel = tierLevel;
+        this.productionSpeed = tierLevel * 1.0f;
+        this.dimensions = new Vector3Int(1, 2, 1);
+
+        int capacity = CoreConfig.getInt("machine.inventory.capacity", 64);
+        this.outputBuffer = new MachineInventory(capacity);
+
+        if (this.metadata != null && this.metadata.has("items")) {
+            this.outputBuffer.loadState(this.metadata);
+        }
+    }
+
+    @Override
+    public void tick(long currentTick) {
+        // 1. Produzione
+        if (nextSpawnTick == -1) {
+            nextSpawnTick = currentTick + (long)(20 / productionSpeed);
+        }
+
+        if (currentTick >= nextSpawnTick) {
+            produceItem();
+            nextSpawnTick = currentTick + (long)(20 / productionSpeed);
+        }
+
+        // 2. Output Logistico
+        tryEjectItem(currentTick);
+    }
+
+    private void produceItem() {
+        MatterPayload newItem = new MatterPayload(MatterShape.CUBE, MatterColor.RAW);
+        if (outputBuffer.insert(newItem)) {
+            System.out.println("Drill -> PRODUCED item. Buffer: " + outputBuffer.getCount());
+            this.metadata = outputBuffer.serialize();
+            markDirty();
+        } else {
+            // Buffer pieno
+        }
+    }
+
+    private void tryEjectItem(long currentTick) {
+        if (outputBuffer.isEmpty()) return;
+        if (gridManager == null) return;
+
+        // Trova il vicino in base all'orientamento
+        Vector3Int dir = orientation.toVector();
+        GridPosition targetPos = new GridPosition(pos.x() + dir.x(), pos.y() + dir.y(), pos.z() + dir.z());
+
+        PlacedMachine neighbor = gridManager.getMachineAt(targetPos);
+
+        if (neighbor instanceof ConveyorBelt belt) {
+            MatterPayload item = outputBuffer.extractFirst();
+            if (item != null) {
+                boolean accepted = belt.insertItem(item, currentTick);
+                if (accepted) {
+                    System.out.println("Drill -> EJECTED item to Belt at " + targetPos);
+                    this.metadata = outputBuffer.serialize();
+                    markDirty();
+                } else {
+                    // Se rifiutato, rimetti in testa (rollback semplice)
+                    // Nota: In un sistema reale useremmo peek() prima di extract()
+                    outputBuffer.insert(item);
+                }
+            }
+        }
+    }
+}
+
+
+--------------------------------
+FILE: IGridComponent.java
+--------------------------------
+package com.matterworks.core.domain.machines;
+
+import com.google.gson.JsonObject;
+import com.matterworks.core.common.Vector3Int;
+import com.matterworks.core.ports.IWorldAccess;
+
+/**
+ * Interfaccia base per qualsiasi oggetto piazzabile sulla griglia.
+ *
+ */
+public interface IGridComponent {
+    void onPlace(IWorldAccess world);
+    void onRemove();
+    JsonObject serialize();
+    Vector3Int getDimensions();
+}
+
+
+--------------------------------
+FILE: NexusMachine.java
+--------------------------------
+package com.matterworks.core.domain.machines;
+
+import com.google.gson.JsonObject;
+import com.matterworks.core.common.GridPosition;
+import com.matterworks.core.common.Vector3Int;
+import com.matterworks.core.domain.inventory.MachineInventory;
+import com.matterworks.core.domain.matter.MatterPayload;
+import com.matterworks.core.domain.shop.MarketManager;
+
+import java.util.UUID;
+
+public class NexusMachine extends PlacedMachine {
+
+    private final MachineInventory storage;
+    private long nextSaleTick = -1;
+    private static final int SALE_INTERVAL = 10; // Vende ogni 0.5s (veloce)
+
+    public NexusMachine(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata) {
+        super(dbId, ownerId, typeId, pos, metadata);
+        // Dimensioni interne di sicurezza (vengono sovrascritte dal Registry comunque)
+        this.dimensions = new Vector3Int(3, 3, 3);
+
+        // Inventario capiente (100 slot)
+        this.storage = new MachineInventory(100);
+
+        if (this.metadata.has("items")) {
+            this.storage.loadState(this.metadata);
+        }
+    }
+
+
+    @Override
+    public void tick(long currentTick) {
+        if (storage.isEmpty()) return;
+
+        if (nextSaleTick == -1) {
+            nextSaleTick = currentTick + SALE_INTERVAL;
+        }
+
+        if (currentTick >= nextSaleTick) {
+            sellNextItem();
+            nextSaleTick = currentTick + SALE_INTERVAL;
+        }
+    }
+
+    /**
+     * Metodo chiamato dai Nastri per inserire roba qui.
+     */
+    public boolean insertItem(MatterPayload item) {
+        System.out.println("Nexus: Ricevuto item " + item.shape()); // <--- DEBUG
+        boolean success = storage.insert(item);
+        if (success) {
+            this.metadata = storage.serialize();
+            markDirty();
+        }
+        return success;
+    }
+
+    private void sellNextItem() {
+        if (gridManager == null) return;
+
+        // Recupera il MarketManager dal contesto
+        MarketManager market = gridManager.getMarketManager();
+        if (market == null) return;
+
+        MatterPayload itemToSell = storage.extractFirst();
+
+        if (itemToSell != null) {
+            market.sellItem(itemToSell, this.ownerId);
+
+            this.metadata = storage.serialize();
+            markDirty();
+        }
+    }
+
+}
+
+
+--------------------------------
+FILE: PlacedMachine.java
+--------------------------------
+package com.matterworks.core.domain.machines;
+
+import com.google.gson.JsonObject;
+import com.matterworks.core.common.Direction;
+import com.matterworks.core.common.GridPosition;
+import com.matterworks.core.common.Vector3Int;
+import com.matterworks.core.managers.GridManager;
+import com.matterworks.core.ports.IMachineVisuals;
+import com.matterworks.core.ports.IWorldAccess;
+
+import java.util.UUID;
+
+public abstract class PlacedMachine implements IGridComponent {
+
+    protected final UUID instanceId;
+    protected final Long dbId;
+    protected final UUID ownerId;
+    protected final GridPosition pos;
+    protected final String typeId;
+
+    // Logistica
+    protected Direction orientation;
+    protected GridManager gridManager;
+
+    // Stato
+    protected JsonObject metadata;
+    protected boolean isDirty;
+    protected Vector3Int dimensions;
+
+    // Riferimenti
+    protected IWorldAccess worldRef;
+    protected IMachineVisuals visuals;
+
+    public PlacedMachine(Long dbId, UUID ownerId, String typeId, GridPosition pos, JsonObject metadata) {
+        this.dbId = dbId;
+        this.instanceId = UUID.randomUUID();
+        this.ownerId = ownerId;
+        this.typeId = typeId;
+        this.pos = pos;
+        this.metadata = (metadata != null) ? metadata : new JsonObject();
+        this.isDirty = false; // Appena caricato Ã¨ pulito
+        this.dimensions = Vector3Int.one();
+
+        // Caricamento Orientamento
+        if (this.metadata.has("orientation")) {
+            this.orientation = Direction.valueOf(this.metadata.get("orientation").getAsString());
+        } else {
+            this.orientation = Direction.NORTH;
+        }
+    }
+
+    public void setGridContext(GridManager gridManager) {
+        this.gridManager = gridManager;
+    }
+
+    public abstract void tick(long currentTick);
+
+    @Override
+    public void onPlace(IWorldAccess world) {
+        this.worldRef = world;
+        markDirty();
+    }
+
+    @Override
+    public void onRemove() {}
+
+    @Override
+    public JsonObject serialize() {
+        this.metadata.addProperty("orientation", orientation.name());
+        return this.metadata;
+    }
+
+    @Override
+    public Vector3Int getDimensions() { return this.dimensions; }
+
+    // --- GESTIONE STATO "DIRTY" (Per il GridSaverService) ---
+
+    protected void markDirty() {
+        this.isDirty = true;
+    }
+
+    // Metodo PUBBLICO richiesto dal GridSaverService
+    public boolean isDirty() {
+        return isDirty;
+    }
+
+    // Metodo PUBBLICO richiesto dal GridSaverService
+    public void clearDirty() {
+        this.isDirty = false;
+    }
+
+    // --- GETTERS (Richiesti dal GridSaverService e altri) ---
+
+    public UUID getOwnerId() { return ownerId; } // <--- ERA MANCANTE
+    public GridPosition getPos() { return pos; }
+    public Direction getOrientation() { return orientation; }
+
+    public void setOrientation(Direction dir) {
+        this.orientation = dir;
+        markDirty();
+    }
+
+    public String getTypeId() { return typeId; }
+    public Long getDbId() { return dbId; }
+}
+
+
+--------------------------------
+FILE: StructuralBlock.java
+--------------------------------
+package com.matterworks.core.domain.machines;
+
+import com.google.gson.JsonObject;
+import com.matterworks.core.common.Vector3Int;
+import com.matterworks.core.ports.IWorldAccess;
+
+/**
+ * Rappresenta un blocco statico o strutturale (Muri, Decorazioni).
+ * Occupa spazio nella griglia ma non ha logica di tick complessa.
+ *
+ */
+public class StructuralBlock implements IGridComponent {
+
+    private final String blockId;
+    private final Vector3Int cachedDimensions;
+
+    public StructuralBlock(String blockId, Vector3Int dimensions) {
+        this.blockId = blockId;
+        this.cachedDimensions = dimensions;
+    }
+
+    @Override
+    public void onPlace(IWorldAccess world) {
+        // Logica semplice: piazza il blocco visivo nel mondo
+        // (La posizione viene gestita dal GridManager al momento del piazzamento)
+    }
+
+    @Override
+    public void onRemove() {
+        // Nessuna pulizia speciale necessaria per blocchi stupidi
+    }
+
+    @Override
+    public JsonObject serialize() {
+        // I blocchi strutturali potrebbero non aver bisogno di salvare metadati complessi
+        // o salvano solo il loro ID se necessario.
+        JsonObject json = new JsonObject();
+        json.addProperty("type", "structure");
+        json.addProperty("blockId", blockId);
+        return json;
+    }
+
+    @Override
+    public Vector3Int getDimensions() {
+        return cachedDimensions;
+    }
+
+    public String getBlockId() { return blockId; }
+}
+
+
+--------------------------------
+FILE: MatterColor.java
+--------------------------------
+package com.matterworks.core.domain.matter;
+
+public enum MatterColor {
+    // Stato base
+    RAW,
+
+    // Primari
+    RED,
+    BLUE,
+    YELLOW,
+
+    // Secondari
+    GREEN,
+    ORANGE,
+    PURPLE,
+
+    // Speciale
+    WHITE
+}
+
+
+--------------------------------
+FILE: MatterEffect.java
+--------------------------------
+package com.matterworks.core.domain.matter;
+
+public enum MatterEffect {
+    SHINY,
+    BLAZING,
+    GLITCH,
+    RADIOACTIVE
+}
+
+
+--------------------------------
+FILE: MatterPayload.java
+--------------------------------
+package com.matterworks.core.domain.matter;
+
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
+public record MatterPayload(
+        MatterShape shape,
+        MatterColor color,
+        List<MatterEffect> effects
+) {
+
+    public MatterPayload(MatterShape shape, MatterColor color) {
+        this(shape, color, Collections.emptyList());
+    }
+
+    public JsonObject serialize() {
+        JsonObject json = new JsonObject();
+        json.addProperty("shape", shape.name());
+        json.addProperty("color", color.name());
+
+        if (!effects.isEmpty()) {
+            JsonArray effectsJson = new JsonArray();
+            effects.forEach(e -> effectsJson.add(e.name()));
+            json.add("effects", effectsJson);
+        }
+        return json;
+    }
+
+    public boolean isComplex() { return !effects.isEmpty(); }
+
+    // --- NUOVO METODO: Deserializzazione ---
+    public static MatterPayload fromJson(JsonObject json) {
+        try {
+            MatterShape s = MatterShape.valueOf(json.get("shape").getAsString());
+            MatterColor c = MatterColor.valueOf(json.get("color").getAsString());
+
+            List<MatterEffect> effs = new ArrayList<>();
+            if (json.has("effects")) {
+                JsonArray arr = json.getAsJsonArray("effects");
+                arr.forEach(el -> effs.add(MatterEffect.valueOf(el.getAsString())));
+            }
+            return new MatterPayload(s, c, effs);
+        } catch (Exception e) {
+            System.err.println("Errore parsing payload: " + e.getMessage());
+            return new MatterPayload(MatterShape.CUBE, MatterColor.RAW); // Fallback
+        }
+    }
+}
+
+
+--------------------------------
+FILE: MatterShape.java
+--------------------------------
+package com.matterworks.core.domain.matter;
+
+public enum MatterShape {
+    CUBE,
+    SPHERE,
+    PYRAMID,
+    CYLINDER
+}
+
+
+--------------------------------
+FILE: LinkCode.java
+--------------------------------
+package com.matterworks.core.domain.player;
+
+public record LinkCode(String code, long expirationTime) {
+    public boolean isValid() {
+        return System.currentTimeMillis() < expirationTime;
+    }
+}
+
+
+--------------------------------
+FILE: PlayerProfile.java
+--------------------------------
+package com.matterworks.core.domain.player;
+
+import java.util.UUID;
+
+public class PlayerProfile {
+
+    private final UUID playerId;
+    private String username;
+
+    // CAMPO MONEY
+    private double money;
+
+    public PlayerProfile(UUID playerId) {
+        this.playerId = playerId;
+        this.money = 0.0; // Default
+    }
+
+    public UUID getPlayerId() {
+        return playerId;
+    }
+
+    public String getUsername() {
+        return username;
+    }
+
+    public void setUsername(String username) {
+        this.username = username;
+    }
+
+    // --- GESTIONE SOLDI ---
+
+    public double getMoney() {
+        return money;
+    }
+
+    public void setMoney(double money) {
+        this.money = money;
+    }
+
+    /**
+     * Modifica il saldo (positivo per aggiungere, negativo per togliere).
+     * @param amount QuantitÃ  da aggiungere/togliere.
+     */
+    public void modifyMoney(double amount) {
+        this.money += amount;
+    }
+}
+
+
+--------------------------------
+FILE: MarketManager.java
+--------------------------------
+package com.matterworks.core.domain.shop;
+
+import com.matterworks.core.domain.matter.MatterPayload;
+import com.matterworks.core.domain.player.PlayerProfile;
+import com.matterworks.core.ports.IRepository;
+
+import java.util.UUID;
+
+public class MarketManager {
+
+    private final IRepository repository;
+
+    public MarketManager(IRepository repository) {
+        this.repository = repository;
+    }
+
+    public void sellItem(MatterPayload item, UUID sellerId) {
+        // Logica semplice: 10$ per ogni cubo. In futuro useremo il ValueCalculator.
+        double value = 10.0;
+
+        // Carichiamo il profilo (Sincrono per ora, in produzione useremmo cache/async)
+        PlayerProfile player = repository.loadPlayerProfile(sellerId);
+
+        if (player != null) {
+            player.modifyMoney(value);
+            repository.savePlayerProfile(player);
+
+            System.out.println("ðŸ’° MARKET: Venduto " + item.shape() + " (" + item.color() + ") per " + value + "$ -> Saldo: " + player.getMoney());
+        } else {
+            System.err.println("âŒ MARKET: Player non trovato per la vendita!");
+        }
+    }
+}
+
+
+--------------------------------
+FILE: CoreConfig.java
+--------------------------------
+package com.matterworks.core.infrastructure;
+
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.util.Properties;
+
+/**
+ * Gestore della configurazione esterna.
+ * Legge il file 'matterworks.properties' dalla root del server.
+ * Permette di cambiare i valori di gioco senza ricompilare.
+ */
+public class CoreConfig {
+
+    private static final Properties props = new Properties();
+
+    // Carica il file all'avvio
+    public static void load() {
+        try (FileInputStream in = new FileInputStream("matterworks.properties")) {
+            props.load(in);
+            System.out.println("âš™ï¸ Configurazione caricata da matterworks.properties");
+        } catch (IOException e) {
+            System.out.println("âš ï¸ matterworks.properties non trovato. Uso valori di DEFAULT.");
+        }
+    }
+
+    /**
+     * Recupera un intero dalla config, o usa il default se manca.
+     */
+    public static int getInt(String key, int defaultValue) {
+        String val = props.getProperty(key);
+        if (val == null) return defaultValue;
+        try {
+            return Integer.parseInt(val);
+        } catch (NumberFormatException e) {
+            System.err.println("âŒ Errore config per " + key + ": " + val + " non Ã¨ un numero.");
+            return defaultValue;
+        }
+    }
+}
+
+
+--------------------------------
+FILE: MariaDBAdapter.java
+--------------------------------
+package com.matterworks.core.infrastructure;
+
+import com.google.gson.JsonParser; // Utile per il parsing
+import com.matterworks.core.database.DatabaseManager;
+import com.matterworks.core.database.dao.PlayerDAO;
+import com.matterworks.core.database.dao.PlotDAO;
+import com.matterworks.core.database.dao.PlotObjectDAO;
+import com.matterworks.core.domain.player.LinkCode;
+import com.matterworks.core.domain.player.PlayerProfile;
+import com.matterworks.core.model.PlotObject;
+import com.matterworks.core.ports.IRepository;
+
+import java.util.Collections;
+import java.util.List;
+import java.util.UUID;
+
+public class MariaDBAdapter implements IRepository {
+
+    private final PlayerDAO playerDAO;
+    private final PlotDAO plotDAO;
+    private final PlotObjectDAO plotObjectDAO;
+
+    public MariaDBAdapter(DatabaseManager dbManager) {
+        this.playerDAO = new PlayerDAO(dbManager);
+        this.plotDAO = new PlotDAO(dbManager);
+        this.plotObjectDAO = new PlotObjectDAO(dbManager);
+    }
+
+    @Override
+    public void savePlayerProfile(PlayerProfile p) {
+        playerDAO.save(p);
+    }
+
+    @Override
+    public PlayerProfile loadPlayerProfile(UUID p) {
+        return playerDAO.load(p);
+    }
+
+    @Override
+    public List<PlotObject> loadPlotMachines(UUID plotOwnerId) {
+        Long plotId = plotDAO.findPlotIdByOwner(plotOwnerId);
+        if (plotId == null) return Collections.emptyList();
+
+        List<PlotObject> machines = plotObjectDAO.loadPlotMachines(plotId);
+
+        // Piccola fix per convertire stringhe JSON in JsonObject se necessario
+        for (PlotObject obj : machines) {
+            if (obj.getMetaData() == null && obj.getRawMetaData() != null) {
+                try {
+                    obj.setMetaData(JsonParser.parseString(obj.getRawMetaData()).getAsJsonObject());
+                } catch (Exception e) { /* Ignora errori parse su dati vecchi */ }
+            }
+        }
+        return machines;
+    }
+
+    @Override
+    public void savePlotMachines(UUID plotOwnerId, List<PlotObject> machines) {
+        Long plotId = plotDAO.findPlotIdByOwner(plotOwnerId);
+        if (plotId == null) return;
+
+        for (PlotObject obj : machines) {
+            obj.setPlotId(plotId);
+            plotObjectDAO.placeMachine(obj);
+        }
+    }
+
+    // NEW: Implementazione delete
+    @Override
+    public void deleteMachine(Long dbId) {
+        plotObjectDAO.deleteMachine(dbId);
+    }
+
+    @Override
+    public void saveWebLinkCode(UUID p, LinkCode code) {
+        // Todo implementation
+    }
+
+    @Override
+    public void loadRecipes() {}
+
+    @Override
+    public void fetchTransactions() {}
+}
+
+
+--------------------------------
+FILE: FactoryPanel.java
+--------------------------------
+package com.matterworks.core.infrastructure.swing;
+
+import com.google.gson.JsonObject;
+import com.matterworks.core.common.Direction;
+import com.matterworks.core.common.GridPosition;
+import com.matterworks.core.common.Vector3Int;
+import com.matterworks.core.domain.machines.BlockRegistry;
+import com.matterworks.core.domain.machines.ConveyorBelt;
+import com.matterworks.core.domain.machines.NexusMachine;
+import com.matterworks.core.domain.machines.PlacedMachine;
+import com.matterworks.core.managers.GridManager;
+
+import javax.swing.*;
+import java.awt.*;
+import java.awt.event.*;
+import java.util.Map;
+import java.util.UUID;
+
+public class FactoryPanel extends JPanel {
+
+    private final GridManager gridManager;
+    private final BlockRegistry registry;
+    private final UUID playerUuid;
+
+    private final int CELL_SIZE = 40;
+    private final int OFFSET_X = 50;
+    private final int OFFSET_Y = 50;
+
+    // Stato Editor
+    private String currentTool = "drill_mk1";
+    private Direction currentOrientation = Direction.NORTH;
+    private int currentLayer = 64; // Asse Y (Default livello del terreno)
+
+    private GridPosition mouseHoverPos = null;
+
+    // Callback per aggiornare la GUI principale (es. quando ruoto col tasto R)
+    private Runnable onStateChange;
+
+    public FactoryPanel(GridManager gridManager, BlockRegistry registry, UUID playerUuid, Runnable onStateChange) {
+        this.gridManager = gridManager;
+        this.registry = registry;
+        this.playerUuid = playerUuid;
+        this.onStateChange = onStateChange;
+
+        this.setBackground(new Color(30, 30, 30));
+        this.setFocusable(true);
+
+        // Mouse Handlers
+        this.addMouseMotionListener(new MouseMotionAdapter() {
+            @Override
+            public void mouseMoved(MouseEvent e) {
+                updateMousePos(e.getX(), e.getY());
+                repaint();
+            }
+        });
+
+        this.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent e) {
+                requestFocusInWindow();
+                handleMouseClick(e);
+                repaint();
+            }
+        });
+
+        // Tasti Rapidi (Opzionali, ma comodi da tenere insieme ai pulsanti)
+        this.addKeyListener(new KeyAdapter() {
+            @Override
+            public void keyPressed(KeyEvent e) {
+                if (e.getKeyCode() == KeyEvent.VK_R) rotate();
+            }
+        });
+    }
+
+    // --- LOGICA LAYER & COORDINATE ---
+
+    public void setLayer(int y) {
+        this.currentLayer = y;
+        repaint();
+    }
+
+    public int getCurrentLayer() { return currentLayer; }
+
+    private void updateMousePos(int x, int y) {
+        int gx = toGridX(x);
+        int gz = toGridY(y);
+        if (gx >= 0 && gx <= 20 && gz >= 0 && gz <= 20) {
+            // FIX: Usiamo currentLayer invece di 64 fisso
+            this.mouseHoverPos = new GridPosition(gx, currentLayer, gz);
+        } else {
+            this.mouseHoverPos = null;
+        }
+    }
+
+    private void handleMouseClick(MouseEvent e) {
+        if (mouseHoverPos == null) return;
+
+        if (SwingUtilities.isLeftMouseButton(e)) {
+            if (currentTool != null) {
+                System.out.println("ðŸ”¨ Place " + currentTool + " at " + mouseHoverPos);
+                boolean success = gridManager.placeMachine(playerUuid, mouseHoverPos, currentTool);
+                if (success) {
+                    PlacedMachine pm = gridManager.getMachineAt(mouseHoverPos);
+                    if (pm != null) pm.setOrientation(currentOrientation);
+                }
+            }
+        } else if (SwingUtilities.isRightMouseButton(e)) {
+            System.out.println("ðŸ”¥ Remove at " + mouseHoverPos);
+            gridManager.removeComponent(mouseHoverPos);
+        }
+    }
+
+    // --- COMANDI ESTERNI (Chiamati dalla GUI) ---
+    public void setTool(String toolId) {
+        this.currentTool = toolId;
+        repaint();
+    }
+
+    public void rotate() {
+        // Rotazione
+        switch(currentOrientation) {
+            case NORTH -> currentOrientation = Direction.EAST;
+            case EAST -> currentOrientation = Direction.SOUTH;
+            case SOUTH -> currentOrientation = Direction.WEST;
+            case WEST -> currentOrientation = Direction.NORTH;
+        }
+        if (onStateChange != null) onStateChange.run(); // Aggiorna etichette GUI
+        repaint();
+    }
+
+    public String getCurrentToolName() { return currentTool != null ? currentTool : "None"; }
+    public String getCurrentOrientationName() { return currentOrientation.name(); }
+
+    // --- RENDERING ---
+    @Override
+    protected void paintComponent(Graphics g) {
+        super.paintComponent(g);
+        Graphics2D g2 = (Graphics2D) g;
+        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+
+        drawGrid(g2);
+        drawMachines(g2); // Disegna solo macchine su questo layer
+        drawGhost(g2);
+    }
+
+    private void drawGrid(Graphics2D g) {
+        g.setColor(new Color(50, 50, 50));
+        for (int i = 0; i <= 20; i++) {
+            g.drawLine(toScreenX(i), toScreenY(0), toScreenX(i), toScreenY(20));
+            g.drawLine(toScreenX(0), toScreenY(i), toScreenX(20), toScreenY(i));
+        }
+
+        // Indicatore del Layer corrente sullo sfondo
+        g.setColor(new Color(60, 60, 60));
+        g.drawString("LAYER Y = " + currentLayer, 10, getHeight() - 10);
+    }
+
+    private void drawMachines(Graphics2D g) {
+        Map<GridPosition, PlacedMachine> machines = gridManager.getSnapshot();
+
+        for (PlacedMachine m : machines.values()) {
+            // LOGICA DI VISIBILITÃ€ 3D
+            // Una macchina Ã¨ visibile se il layer corrente "taglia" la sua altezza.
+            int machineY = m.getPos().y();
+            int machineHeight = m.getDimensions().y();
+
+            // Se il layer corrente Ã¨ dentro il range [Y, Y + H]
+            if (currentLayer >= machineY && currentLayer < machineY + machineHeight) {
+                drawSingleMachine(g, m, false);
+            }
+        }
+    }
+
+    private void drawGhost(Graphics2D g) {
+        if (mouseHoverPos == null || currentTool == null) return;
+
+        Vector3Int dim = registry.getDimensions(currentTool);
+
+        Composite original = g.getComposite();
+        g.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.5f));
+
+        int x = toScreenX(mouseHoverPos.x());
+        int z = toScreenY(mouseHoverPos.z());
+        int w = dim.x() * CELL_SIZE;
+        int h = dim.z() * CELL_SIZE;
+
+        g.setColor(getColorForType(currentTool));
+        g.fillRect(x, z, w, h);
+        g.setColor(Color.WHITE);
+        g.drawRect(x, z, w, h);
+
+        drawDirectionArrow(g, x, z, w, h, currentOrientation);
+        g.setComposite(original);
+    }
+
+    private void drawSingleMachine(Graphics2D g, PlacedMachine m, boolean isGhost) {
+        GridPosition pos = m.getPos();
+        Vector3Int dim = m.getDimensions();
+
+        int x = toScreenX(pos.x());
+        int z = toScreenY(pos.z());
+        int w = dim.x() * CELL_SIZE;
+        int h = dim.z() * CELL_SIZE;
+
+        g.setColor(getColorForType(m.getTypeId()));
+        g.fillRect(x + 2, z + 2, w - 4, h - 4);
+
+        drawDirectionArrow(g, x, z, w, h, m.getOrientation());
+
+        // Dettagli Extra
+        if (m instanceof ConveyorBelt belt) {
+            JsonObject meta = belt.serialize();
+            if (meta.has("currentItem")) {
+                g.setColor(Color.GREEN);
+                g.fillOval(x + 10, z + 10, 20, 20);
+            }
+        } else if (m instanceof NexusMachine) {
+            g.setColor(Color.WHITE);
+            // Se stiamo vedendo il layer base, scriviamo il nome
+            if (pos.y() == currentLayer) {
+                g.drawString("NEXUS", x + 10, z + 20);
+            } else {
+                g.drawString("NEXUS (Part)", x + 2, z + 20);
+            }
+        }
+    }
+
+    private Color getColorForType(String type) {
+        return switch (type) {
+            case "drill_mk1" -> Color.LIGHT_GRAY;
+            case "conveyor_belt" -> Color.DARK_GRAY;
+            case "nexus_core" -> new Color(150, 0, 150);
+            default -> Color.RED;
+        };
+    }
+
+    private void drawDirectionArrow(Graphics2D g, int x, int y, int w, int h, Direction dir) {
+        g.setColor(Color.YELLOW);
+        int cx = x + w / 2;
+        int cy = y + h / 2;
+        switch (dir) {
+            case NORTH -> g.fillOval(cx - 3, y + 2, 6, 6);
+            case SOUTH -> g.fillOval(cx - 3, y + h - 8, 6, 6);
+            case EAST ->  g.fillOval(x + w - 8, cy - 3, 6, 6);
+            case WEST ->  g.fillOval(x + 2, cy - 3, 6, 6);
+        }
+    }
+
+    private int toScreenX(int gridX) { return OFFSET_X + (gridX * CELL_SIZE); }
+    private int toScreenY(int gridZ) { return OFFSET_Y + (gridZ * CELL_SIZE); }
+    private int toGridX(int screenX) { return (screenX - OFFSET_X) / CELL_SIZE; }
+    private int toGridY(int screenY) { return (screenY - OFFSET_Y) / CELL_SIZE; }
+}
+
+
+--------------------------------
+FILE: MatterWorksGUI.java
+--------------------------------
+package com.matterworks.core.infrastructure.swing;
+
+import com.matterworks.core.domain.machines.BlockRegistry;
+import com.matterworks.core.managers.GridManager;
+
+import javax.swing.*;
+import java.awt.*;
+import java.util.UUID;
+import java.util.function.Supplier;
+
+public class MatterWorksGUI extends JFrame {
+
+    private final FactoryPanel panel;
+
+    // Etichette Info
+    private final JLabel lblTool;
+    private final JLabel lblOrient;
+    private final JLabel lblLayer;
+
+    // Etichetta Soldi
+    private final JLabel lblMoney;
+
+    public MatterWorksGUI(GridManager gridManager, BlockRegistry registry, UUID playerUuid, Runnable onSave, Supplier<Double> moneyProvider) {
+        setTitle("MatterWorks Architect (Java 25)");
+        setSize(1280, 900);
+        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        setLocationRelativeTo(null);
+
+        setLayout(new BorderLayout());
+
+        // --- 1. INIZIALIZZAZIONE COMPONENTI INFO (Prima di tutto!) ---
+        // Devono esistere perchÃ© il Panel proverÃ  ad aggiornarle
+        lblTool = createLabel("TOOL: Drill");
+        lblOrient = createLabel("DIR: NORTH");
+        lblLayer = createLabel("LAYER Y: 64");
+        lblLayer.setForeground(Color.CYAN);
+
+        lblMoney = new JLabel("MONEY: $---");
+        lblMoney.setFont(new Font("Monospaced", Font.BOLD, 16));
+        lblMoney.setForeground(Color.GREEN);
+
+        // --- 2. INIZIALIZZAZIONE GRIGLIA (PANEL) ---
+        // Ora possiamo crearlo perchÃ© le Label esistono
+        panel = new FactoryPanel(gridManager, registry, playerUuid, this::updateLabels);
+
+        // --- 3. CREAZIONE PULSANTI (Ora 'panel' esiste!) ---
+
+        // A. Pannello Sinistro (Strumenti)
+        JPanel leftTools = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
+        leftTools.setOpaque(false);
+
+        JButton btnDrill = createButton("â› Drill", e -> setTool("drill_mk1"));
+        JButton btnBelt = createButton("â¨  Belt", e -> setTool("conveyor_belt"));
+        JButton btnNexus = createButton("ðŸ”® Nexus", e -> setTool("nexus_core"));
+
+        JSeparator sep1 = new JSeparator(SwingConstants.VERTICAL); sep1.setPreferredSize(new Dimension(5, 25));
+
+        JButton btnLayerUp = createButton("â¬† Layer UP", e -> changeLayer(1));
+        JButton btnLayerDown = createButton("â¬‡ Layer DOWN", e -> changeLayer(-1));
+
+        JSeparator sep2 = new JSeparator(SwingConstants.VERTICAL); sep2.setPreferredSize(new Dimension(5, 25));
+
+        // Qui dava errore prima: ora panel Ã¨ inizializzato!
+        JButton btnRotate = createButton("â†» Rotate (R)", e -> panel.rotate());
+
+        leftTools.add(btnDrill);
+        leftTools.add(btnBelt);
+        leftTools.add(btnNexus);
+        leftTools.add(sep1);
+        leftTools.add(btnLayerDown);
+        leftTools.add(btnLayerUp);
+        leftTools.add(sep2);
+        leftTools.add(btnRotate);
+
+        // B. Pannello Destro (Sistema)
+        JPanel rightSystem = new JPanel(new FlowLayout(FlowLayout.RIGHT, 15, 0));
+        rightSystem.setOpaque(false);
+
+        JButton btnSave = createButton("ðŸ’¾ SAVE", e -> {
+            onSave.run();
+            JOptionPane.showMessageDialog(this, "Salvataggio Completato!", "Sistema", JOptionPane.INFORMATION_MESSAGE);
+        });
+        btnSave.setBackground(new Color(0, 100, 200));
+
+        rightSystem.add(lblMoney);
+        rightSystem.add(btnSave);
+
+        // --- 4. ASSEMBLAGGIO LAYOUT ---
+
+        JPanel topContainer = new JPanel(new BorderLayout());
+        topContainer.setBackground(new Color(45, 45, 48));
+        topContainer.setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
+        topContainer.add(leftTools, BorderLayout.WEST);
+        topContainer.add(rightSystem, BorderLayout.EAST);
+
+        JPanel infoPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 20, 5));
+        infoPanel.setBackground(new Color(60, 60, 65));
+        infoPanel.add(lblTool);
+        infoPanel.add(lblOrient);
+        infoPanel.add(lblLayer);
+
+        JPanel northGroup = new JPanel(new BorderLayout());
+        northGroup.add(topContainer, BorderLayout.NORTH);
+        northGroup.add(infoPanel, BorderLayout.SOUTH);
+
+        add(northGroup, BorderLayout.NORTH);
+        add(panel, BorderLayout.CENTER);
+
+        // --- 5. TIMERS ---
+        new Timer(50, e -> panel.repaint()).start();
+
+        new Timer(1000, e -> {
+            double m = moneyProvider.get();
+            lblMoney.setText(String.format("MONEY: $%,.2f", m));
+        }).start();
+
+        setVisible(true);
+        panel.requestFocusInWindow();
+
+        // Aggiorna le label iniziali con i valori del panel
+        updateLabels();
+    }
+
+    // --- AZIONI ---
+    private void setTool(String toolId) {
+        panel.setTool(toolId);
+        updateLabels();
+    }
+
+    private void changeLayer(int delta) {
+        int newY = panel.getCurrentLayer() + delta;
+        if (newY < 0) newY = 0;
+        panel.setLayer(newY);
+        updateLabels();
+    }
+
+    private void updateLabels() {
+        // Controllo di sicurezza se chiamato dal costruttore del panel prima dell'init
+        if (lblTool != null && panel != null) {
+            lblTool.setText("TOOL: " + panel.getCurrentToolName());
+            lblOrient.setText("DIR: " + panel.getCurrentOrientationName());
+            lblLayer.setText("LAYER Y: " + panel.getCurrentLayer());
+        }
+    }
+
+    // --- HELPER UI ---
+    private JButton createButton(String text, java.awt.event.ActionListener action) {
+        JButton btn = new JButton(text);
+        btn.setFocusable(false);
+        btn.addActionListener(action);
+        btn.setBackground(new Color(70, 70, 70));
+        btn.setForeground(Color.WHITE);
+        btn.setFont(new Font("SansSerif", Font.PLAIN, 12));
+        btn.setBorder(BorderFactory.createEmptyBorder(5, 10, 5, 10));
+        return btn;
+    }
+
+    private JLabel createLabel(String text) {
+        JLabel lbl = new JLabel(text);
+        lbl.setForeground(Color.WHITE);
+        lbl.setFont(new Font("Monospaced", Font.BOLD, 14));
+        return lbl;
+    }
+}
+
+
+--------------------------------
+FILE: GridManager.java
+--------------------------------
+package com.matterworks.core.managers;
+
+import com.matterworks.core.common.GridPosition;
+import com.matterworks.core.common.Vector3Int;
+import com.matterworks.core.domain.factory.MachineFactory;
+import com.matterworks.core.domain.machines.BlockRegistry;
+import com.matterworks.core.domain.machines.IGridComponent;
+import com.matterworks.core.domain.machines.PlacedMachine;
+import com.matterworks.core.domain.shop.MarketManager;
+import com.matterworks.core.model.PlotObject;
+import com.matterworks.core.ports.IRepository;
+import com.matterworks.core.ports.IWorldAccess;
+
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+public class GridManager {
+
+    private final IRepository repository;
+    private final IWorldAccess worldAdapter;
+    private final BlockRegistry blockRegistry;
+    private final MarketManager marketManager;
+
+    private final Map<GridPosition, IGridComponent> globalGrid = new ConcurrentHashMap<>();
+    private final List<PlacedMachine> tickingMachines = new ArrayList<>();
+    private final ExecutorService ioExecutor = Executors.newVirtualThreadPerTaskExecutor();
+
+    public GridManager(IRepository repository, IWorldAccess worldAdapter, BlockRegistry registry) {
+        this.repository = repository;
+        this.worldAdapter = worldAdapter;
+        this.blockRegistry = registry;
+        this.marketManager = new MarketManager(repository);
+    }
+
+    public void loadPlotFromDB(UUID ownerId) {
+        ioExecutor.submit(() -> {
+            try {
+                List<PlotObject> dtos = repository.loadPlotMachines(ownerId);
+                for (PlotObject dto : dtos) {
+                    PlacedMachine machine = MachineFactory.createFromModel(dto, ownerId);
+                    if (machine != null) {
+                        internalAddMachine(machine);
+                    }
+                }
+                System.out.println("âœ… Plot loaded for " + ownerId + ": " + dtos.size() + " machines.");
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        });
+    }
+
+    public boolean placeMachine(UUID ownerId, GridPosition pos, String typeId) {
+        Vector3Int dim = blockRegistry.getDimensions(typeId);
+
+        if (!isAreaClear(pos, dim)) {
+            System.out.println("âš ï¸ Area ostruita per " + typeId + " a " + pos);
+            return false;
+        }
+
+        PlotObject newDto = new PlotObject(null, null, pos.x(), pos.y(), pos.z(), typeId, null);
+        PlacedMachine newMachine = MachineFactory.createFromModel(newDto, ownerId);
+
+        if (newMachine == null) return false;
+
+        internalAddMachine(newMachine);
+        newMachine.onPlace(worldAdapter);
+        return true;
+    }
+
+    private void internalAddMachine(PlacedMachine machine) {
+        machine.setGridContext(this);
+
+        Vector3Int dim = machine.getDimensions();
+        GridPosition origin = machine.getPos();
+
+        for (int x = 0; x < dim.x(); x++) {
+            for (int y = 0; y < dim.y(); y++) {
+                for (int z = 0; z < dim.z(); z++) {
+                    GridPosition occupiedPos = new GridPosition(
+                            origin.x() + x, origin.y() + y, origin.z() + z
+                    );
+                    globalGrid.put(occupiedPos, machine);
+                }
+            }
+        }
+
+        synchronized (tickingMachines) {
+            tickingMachines.add(machine);
+        }
+    }
+
+    // NEW: Logica di rimozione completa (DB + RAM)
+    public void removeComponent(GridPosition pos) {
+        // 1. Identifica la macchina bersaglio (anche se clicchi su un pezzo del multiblocco)
+        PlacedMachine target = getMachineAt(pos);
+
+        if (target == null) {
+            return; // Click a vuoto
+        }
+
+        System.out.println("ðŸ—‘ï¸ Removing: " + target.getTypeId() + " (DB_ID: " + target.getDbId() + ")");
+
+        // 2. Cancellazione dal DB
+        // Se dbId Ã¨ null, significa che non Ã¨ stata ancora salvata (Ã¨ solo in RAM),
+        // quindi non serve delete SQL.
+        if (target.getDbId() != null) {
+            repository.deleteMachine(target.getDbId());
+        }
+
+        // 3. Pulizia RAM (Griglia)
+        Vector3Int dim = target.getDimensions();
+        GridPosition origin = target.getPos();
+
+        // Rimuoviamo TUTTE le celle occupate (utile per Nexus 3x3x3)
+        for (int x = 0; x < dim.x(); x++) {
+            for (int y = 0; y < dim.y(); y++) {
+                for (int z = 0; z < dim.z(); z++) {
+                    GridPosition occupiedPos = new GridPosition(
+                            origin.x() + x, origin.y() + y, origin.z() + z
+                    );
+                    globalGrid.remove(occupiedPos);
+                }
+            }
+        }
+
+        // 4. Stop Logic (Rimuovi dalla lista dei tick)
+        synchronized (tickingMachines) {
+            tickingMachines.remove(target);
+        }
+
+        target.onRemove();
+    }
+
+    public PlacedMachine getMachineAt(GridPosition pos) {
+        IGridComponent comp = globalGrid.get(pos);
+        if (comp instanceof PlacedMachine pm) {
+            return pm;
+        }
+        return null;
+    }
+
+    public MarketManager getMarketManager() {
+        return marketManager;
+    }
+
+    public boolean isAreaClear(GridPosition origin, Vector3Int dim) {
+        for (int x = 0; x < dim.x(); x++) {
+            for (int y = 0; y < dim.y(); y++) {
+                for (int z = 0; z < dim.z(); z++) {
+                    GridPosition checkPos = new GridPosition(origin.x() + x, origin.y() + y, origin.z() + z);
+                    if (globalGrid.containsKey(checkPos)) return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    public void tick(long currentTick) {
+        // Creiamo una copia thread-safe per evitare ConcurrentModificationException
+        // se una macchina si cancella da sola o viene cancellata durante il tick
+        List<PlacedMachine> snapshot;
+        synchronized (tickingMachines) {
+            snapshot = new ArrayList<>(tickingMachines);
+        }
+        snapshot.forEach(m -> m.tick(currentTick));
+    }
+
+    public Map<GridPosition, PlacedMachine> getSnapshot() {
+        Map<GridPosition, PlacedMachine> uniqueMachines = new HashMap<>();
+        synchronized (tickingMachines) {
+            for (PlacedMachine m : tickingMachines) {
+                uniqueMachines.put(m.getPos(), m);
+            }
+        }
+        return Collections.unmodifiableMap(uniqueMachines);
+    }
+}
+
+
+--------------------------------
+FILE: WorldIntegrityValidator.java
+--------------------------------
+package com.matterworks.core.managers;
+
+import com.matterworks.core.common.GridPosition;
+import com.matterworks.core.common.Vector3Int;
+import com.matterworks.core.database.DatabaseManager;
+import com.matterworks.core.domain.machines.BlockRegistry;
+import com.matterworks.core.model.PlotObject;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.util.*;
+
+/**
+ * Servizio di Diagnostica all'Avvio.
+ * Verifica che le nuove dimensioni nel DB non creino collisioni con piazzamenti esistenti.
+ */
+public class WorldIntegrityValidator {
+
+    private final DatabaseManager db;
+    private final BlockRegistry registry;
+
+    public WorldIntegrityValidator(DatabaseManager db, BlockRegistry registry) {
+        this.db = db;
+        this.registry = registry;
+    }
+
+    /**
+     * Esegue la scansione completa.
+     * @return true se il mondo Ã¨ valido, false se ci sono conflitti critici.
+     */
+    public boolean validateWorldIntegrity() {
+        System.out.println("ðŸ” Esecuzione Validazione IntegritÃ  Mondo...");
+
+        // 1. Carica TUTTE le macchine dal DB (Query grezza per velocitÃ )
+        Map<Long, List<PlotObject>> machinesByPlot = loadAllMachines();
+        boolean hasConflicts = false;
+
+        // 2. Itera Plot per Plot (Le collisioni avvengono solo dentro lo stesso plot)
+        for (Map.Entry<Long, List<PlotObject>> entry : machinesByPlot.entrySet()) {
+            Long plotId = entry.getKey();
+            List<PlotObject> machines = entry.getValue();
+
+            if (!validatePlot(plotId, machines)) {
+                hasConflicts = true;
+            }
+        }
+
+        if (hasConflicts) {
+            System.err.println("âŒ VALIDAZIONE FALLITA: Trovati conflitti di sovrapposizione!");
+            System.err.println("   Il server potrebbe avviarsi con macchine compenetrate.");
+        } else {
+            System.out.println("âœ… IntegritÃ  Mondo Verificata: Nessuna collisione rilevata.");
+        }
+
+        return !hasConflicts;
+    }
+
+    private boolean validatePlot(Long plotId, List<PlotObject> machines) {
+        // Usiamo un Set per tracciare le posizioni occupate in questo plot
+        Set<GridPosition> occupiedPositions = new HashSet<>();
+        boolean plotValid = true;
+
+        for (PlotObject machine : machines) {
+            String typeId = machine.getTypeId();
+            Vector3Int dim = registry.getDimensions(typeId); // Qui usa le dimensioni NUOVE dal DB
+
+            GridPosition origin = new GridPosition(machine.getX(), machine.getY(), machine.getZ());
+
+            // Simuliamo l'occupazione spaziale
+            for (int x = 0; x < dim.x(); x++) {
+                for (int y = 0; y < dim.y(); y++) {
+                    for (int z = 0; z < dim.z(); z++) {
+                        GridPosition pos = new GridPosition(origin.x() + x, origin.y() + y, origin.z() + z);
+
+                        if (occupiedPositions.contains(pos)) {
+                            System.err.println("   âš ï¸ CONFLITTO nel Plot ID " + plotId + ":");
+                            System.err.println("      Macchina '" + typeId + "' a " + origin);
+                            System.err.println("      Invade lo spazio giÃ  occupato a " + pos);
+                            plotValid = false;
+                        } else {
+                            occupiedPositions.add(pos);
+                        }
+                    }
+                }
+            }
+        }
+        return plotValid;
+    }
+
+    private Map<Long, List<PlotObject>> loadAllMachines() {
+        Map<Long, List<PlotObject>> result = new HashMap<>();
+        String sql = "SELECT * FROM plot_objects"; // Carica tutto (in produzione usare paginazione se enorme)
+
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+
+            while (rs.next()) {
+                PlotObject obj = new PlotObject();
+                obj.setId(rs.getLong("id"));
+                obj.setPlotId(rs.getLong("plot_id"));
+                obj.setPosition(rs.getInt("x"), rs.getInt("y"), rs.getInt("z"));
+                obj.setTypeId(rs.getString("type_id"));
+
+                result.computeIfAbsent(obj.getPlotId(), k -> new ArrayList<>()).add(obj);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return result;
+    }
+}
+
+
+--------------------------------
+FILE: PlotObject.java
+--------------------------------
+package com.matterworks.core.model;
+
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+
+public class PlotObject {
+
+    private Long id;
+    private Long plotId;
+    private int x;
+    private int y;
+    private int z;
+    private String typeId;
+    private JsonObject metaData;
+
+    // --- COSTRUTTORI ---
+
+    // 1. Costruttore Vuoto (Richiesto dal Validator e da alcuni framework)
+    public PlotObject() {
+        this.metaData = new JsonObject();
+    }
+
+    // 2. Costruttore Completo
+    public PlotObject(Long id, Long plotId, int x, int y, int z, String typeId, JsonObject metaData) {
+        this.id = id;
+        this.plotId = plotId;
+        this.x = x;
+        this.y = y;
+        this.z = z;
+        this.typeId = typeId;
+        this.metaData = (metaData != null) ? metaData : new JsonObject();
+    }
+
+    // --- GETTERS & SETTERS ---
+
+    public Long getId() { return id; }
+    public void setId(Long id) { this.id = id; }
+
+    public Long getPlotId() { return plotId; }
+    public void setPlotId(Long plotId) { this.plotId = plotId; }
+
+    // Coordinate singole
+    public int getX() { return x; }
+    public void setX(int x) { this.x = x; }
+
+    public int getY() { return y; }
+    public void setY(int y) { this.y = y; }
+
+    public int getZ() { return z; }
+    public void setZ(int z) { this.z = z; }
+
+    // Helper richiesto dal Validator
+    public void setPosition(int x, int y, int z) {
+        this.x = x;
+        this.y = y;
+        this.z = z;
+    }
+
+    // Type ID
+    public String getTypeId() { return typeId; }
+    public void setTypeId(String typeId) { this.typeId = typeId; }
+
+    // Metadata
+    public JsonObject getMetaData() { return metaData; }
+    public void setMetaData(JsonObject metaData) { this.metaData = metaData; }
+
+    // --- METODI DI UTILITÃ€ ---
+
+    public String getRawMetaData() {
+        return this.metaData != null ? this.metaData.toString() : "{}";
+    }
+
+    public void setMetaDataFromString(String jsonString) {
+        if (jsonString == null || jsonString.isEmpty()) {
+            this.metaData = new JsonObject();
+            return;
+        }
+        try {
+            this.metaData = JsonParser.parseString(jsonString).getAsJsonObject();
+        } catch (Exception e) {
+            System.err.println("âš ï¸ Errore parsing JSON per PlotObject " + id + ": " + e.getMessage());
+            this.metaData = new JsonObject();
+        }
+    }
+}
+
+
+--------------------------------
+FILE: IMachineVisuals.java
+--------------------------------
+package com.matterworks.core.ports;
+
+/**
+ * Astrazione per effetti client-side (Particelle, Animazioni).
+ * Definita nel namespace Core_Ports.
+ */
+public interface IMachineVisuals {
+    void playAnimation(String animationName);
+    void spawnParticle(String particleId);
+}
+
+
+--------------------------------
+FILE: IRepository.java
+--------------------------------
+package com.matterworks.core.ports;
+
+import com.matterworks.core.domain.player.LinkCode;
+import com.matterworks.core.domain.player.PlayerProfile;
+import com.matterworks.core.model.PlotObject;
+
+import java.util.List;
+import java.util.UUID;
+
+public interface IRepository {
+    void loadRecipes();
+    void fetchTransactions();
+
+    void savePlayerProfile(PlayerProfile p);
+    PlayerProfile loadPlayerProfile(UUID p);
+
+    List<PlotObject> loadPlotMachines(UUID plotOwnerId);
+    void savePlotMachines(UUID plotOwnerId, List<PlotObject> machines);
+
+    // NEW: Metodo richiesto per il tasto destro
+    void deleteMachine(Long dbId);
+
+    void saveWebLinkCode(UUID p, LinkCode code);
+}
+
+
+--------------------------------
+FILE: IWorldAccess.java
+--------------------------------
+package com.matterworks.core.ports;
+
+import com.matterworks.core.common.GridPosition;
+import com.matterworks.core.common.Vector3Int;
+
+/**
+ * Astrazione per toccare i blocchi di Hytale.
+ * Definita nel namespace Core_Ports.
+ */
+public interface IWorldAccess {
+    void setBlock(GridPosition pos, String blockId);
+    boolean isBlockSolid(GridPosition pos);
+    void createVisuals(GridPosition pos, String visualId);
+    Vector3Int fetchExternalBlockDimensions(String blockId);
+}
+
+
+--------------------------------
+FILE: FactoryLoop.java
+--------------------------------
+package com.matterworks.core.synchronization;
+
+import com.matterworks.core.managers.GridManager;
+
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+
+/**
+ * Il Loop di Gioco.
+ * - FactoryLoop.
+ */
+public class FactoryLoop {
+
+    private final GridManager gridManager;
+    private final ScheduledExecutorService scheduler;
+    private final AtomicLong currentTick = new AtomicLong(0);
+    private volatile boolean isRunning = false;
+
+    public FactoryLoop(GridManager gridManager) {
+        this.gridManager = gridManager;
+        // Thread singolo dedicato al tick del gioco (per evitare race conditions nella logica)
+        this.scheduler = Executors.newSingleThreadScheduledExecutor();
+    }
+
+    public void start() {
+        if (isRunning) return;
+        isRunning = true;
+
+        // Hytale gira a 20 TPS (Ticks Per Second) -> 50ms per tick
+        scheduler.scheduleAtFixedRate(this::runTick, 0, 50, TimeUnit.MILLISECONDS);
+        System.out.println("ðŸ­ Factory Loop Started.");
+    }
+
+    public void stop() {
+        isRunning = false;
+        scheduler.shutdown();
+    }
+
+    /**
+     * runTick
+     */
+    private void runTick() {
+        try {
+            long tick = currentTick.incrementAndGet();
+
+            // 1. Tick della griglia (Macchine producono/consumano)
+            gridManager.tick(tick);
+
+            // TODO: Qui potremmo chiamare TechManager, CapManager, etc.
+
+        } catch (Exception e) {
+            System.err.println("CRITICAL: Exception in Factory Loop!");
+            e.printStackTrace();
+        }
+    }
+}
+
+
+--------------------------------
+FILE: GridSaverService.java
+--------------------------------
+package com.matterworks.core.synchronization;
+
+import com.matterworks.core.domain.machines.PlacedMachine;
+import com.matterworks.core.managers.GridManager;
+import com.matterworks.core.model.PlotObject;
+import com.matterworks.core.ports.IRepository;
+import com.matterworks.core.common.GridPosition;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+/**
+ * Servizio di Auto-Save.
+ * - GridSaverService.
+ */
+public class GridSaverService {
+
+    private final GridManager gridManager;
+    private final IRepository repository;
+
+    public GridSaverService(GridManager gridManager, IRepository repository) {
+        this.gridManager = gridManager;
+        this.repository = repository;
+    }
+
+    /**
+     * Eseguito da uno scheduler o manualmente.
+     * autoSaveTask
+     */
+    public void autoSaveTask() {
+        Map<GridPosition, PlacedMachine> snapshot = gridManager.getSnapshot();
+
+        // Raggruppa le macchine per Proprietario (per fare salvataggi batch per plot)
+        Map<UUID, List<PlacedMachine>> byOwner = snapshot.values().stream()
+                .filter(PlacedMachine::isDirty) // Salva solo quelle cambiate
+                .collect(Collectors.groupingBy(PlacedMachine::getOwnerId));
+
+        if (byOwner.isEmpty()) return;
+
+        System.out.println("ðŸ’¾ AutoSave: Saving dirty machines for " + byOwner.size() + " plots.");
+
+        byOwner.forEach((ownerId, machines) -> {
+            // 1. Converti Domain -> DTO
+            List<PlotObject> dtos = new ArrayList<>();
+            for (PlacedMachine m : machines) {
+                // Creiamo un DTO con i dati aggiornati (specialmente il metadata JSON)
+                PlotObject dto = new PlotObject(
+                        m.getDbId(),
+                        null, // PlotID gestito internamente dal Repository/DAO tramite owner o DB ID
+                        m.getPos().x(), m.getPos().y(), m.getPos().z(),
+                        m.getTypeId(),
+                        m.serialize()   // JSON stato aggiornato
+                );
+                dtos.add(dto);
+            }
+
+            // 2. Salva tramite Repository
+            repository.savePlotMachines(ownerId, dtos);
+
+            // 3. Pulisci dirty flag
+            machines.forEach(PlacedMachine::clearDirty);
+        });
+    }
+}
