@@ -73,14 +73,24 @@ public class MatterWorksGUI extends JFrame {
         JPanel rightSystem = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 0));
         rightSystem.setOpaque(false);
 
-        // SAVE
         JButton btnSave = createButton("💾 SAVE", e -> {
             onSave.run();
             JOptionPane.showMessageDialog(this, "Salvataggio Completato!", "Sistema", JOptionPane.INFORMATION_MESSAGE);
         });
         btnSave.setBackground(new Color(0, 100, 200));
 
-        // NUOVO: RESET BUTTON
+        // NUOVO: SOS BAILOUT BUTTON
+        JButton btnBailout = createButton("🆘 SOS", e -> {
+            boolean success = gridManager.attemptBailout(playerUuid);
+            if (success) {
+                JOptionPane.showMessageDialog(this, "Richiesta approvata! +500$ accreditati.", "MatterWorks Bailout", JOptionPane.INFORMATION_MESSAGE);
+            } else {
+                JOptionPane.showMessageDialog(this, "Richiesta negata.\nHai già fondi o asset sufficienti per produrre.", "MatterWorks Bailout", JOptionPane.ERROR_MESSAGE);
+            }
+        });
+        btnBailout.setBackground(new Color(220, 150, 0)); // Arancio Emergenza
+        btnBailout.setForeground(Color.BLACK);
+
         JButton btnReset = createButton("⚠️ RESET", e -> {
             int choice = JOptionPane.showConfirmDialog(this,
                     "Sei sicuro di voler RESETTARE tutto?\nCancellerà tutte le macchine e cambierà posizione alle vene.\nNon si può annullare.",
@@ -90,7 +100,6 @@ public class MatterWorksGUI extends JFrame {
 
             if (choice == JOptionPane.YES_OPTION) {
                 gridManager.resetUserPlot(playerUuid);
-                // Aspetta un attimo per dare tempo al DB di resettare
                 Timer t = new Timer(500, x -> {
                     panel.repaint();
                     JOptionPane.showMessageDialog(this, "Plot resettato e vene rigenerate!", "Reset", JOptionPane.INFORMATION_MESSAGE);
@@ -102,9 +111,10 @@ public class MatterWorksGUI extends JFrame {
         btnReset.setBackground(new Color(200, 0, 0));
 
         rightSystem.add(lblMoney);
-        rightSystem.add(Box.createHorizontalStrut(20));
+        rightSystem.add(Box.createHorizontalStrut(10));
+        rightSystem.add(btnBailout); // Aggiunto SOS
         rightSystem.add(btnSave);
-        rightSystem.add(btnReset); // Aggiunto qui
+        rightSystem.add(btnReset);
 
         // LAYOUT ASSEMBLY
         JPanel topContainer = new JPanel(new BorderLayout());
@@ -138,6 +148,7 @@ public class MatterWorksGUI extends JFrame {
         updateLabels();
     }
 
+    // ... (metodi helper setTool, changeLayer, etc. rimangono uguali) ...
     private void setTool(String toolId) {
         panel.setTool(toolId);
         updateLabels();

@@ -13,10 +13,12 @@ public interface IRepository {
     void savePlayerProfile(PlayerProfile profile);
 
     List<PlotObject> loadPlotMachines(UUID ownerId);
-
-    // --- NUOVO METODO PER SALVARE NUOVE MACCHINE ---
     Long createMachine(UUID ownerId, PlacedMachine machine);
-
     void deleteMachine(Long dbId);
     void updateMachinesMetadata(List<PlacedMachine> machines);
+
+    void clearPlotData(UUID ownerId); // Metodo aggiunto nel passo precedente
+
+    // --- NUOVO: CONTROLLO INVENTARIO PER BAILOUT ---
+    int getInventoryItemCount(UUID ownerId, String itemId);
 }

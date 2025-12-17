@@ -10,36 +10,45 @@ import java.util.Map;
 public class BlockRegistry {
 
     private final IWorldAccess worldAdapter;
-    private final Map<String, Vector3Int> dimensionCache;
     private final MachineDefinitionDAO definitionDAO;
 
-    // Ora richiede il DAO nel costruttore
+    // Cache aggiornata: String -> MachineStats
+    private final Map<String, MachineStats> statsCache;
+
     public BlockRegistry(IWorldAccess worldAdapter, MachineDefinitionDAO definitionDAO) {
         this.worldAdapter = worldAdapter;
         this.definitionDAO = definitionDAO;
-        this.dimensionCache = new HashMap<>();
+        this.statsCache = new HashMap<>();
     }
 
-    /**
-     * Chiamato all'avvio del server.
-     */
     public void loadFromDatabase() {
-        System.out.println("📏 Caricamento dimensioni macchine dal DB...");
-        Map<String, Vector3Int> dbDefs = definitionDAO.loadAllDefinitions();
+        System.out.println("📋 Caricamento prezzi e dimensioni dal DB...");
+        Map<String, MachineStats> dbDefs = definitionDAO.loadAllDefinitions();
 
-        dbDefs.forEach((id, dim) -> {
-            dimensionCache.put(id, dim);
-            System.out.println("   -> " + id + ": " + dim);
+        dbDefs.forEach((id, stats) -> {
+            statsCache.put(id, stats);
+            System.out.println("   -> " + id + ": " + stats.dimensions() + " | $" + stats.basePrice());
         });
     }
 
+    public MachineStats getStats(String blockId) {
+        return statsCache.getOrDefault(blockId, MachineStats.fallback(blockId));
+    }
+
     public Vector3Int getDimensions(String blockId) {
-        if (dimensionCache.containsKey(blockId)) {
-            return dimensionCache.get(blockId);
+        if (statsCache.containsKey(blockId)) {
+            return statsCache.get(blockId).dimensions();
         }
-        // Fallback su Hytale se non è nel nostro DB
+        // Fallback su Hytale (senza prezzo)
         Vector3Int dim = worldAdapter.fetchExternalBlockDimensions(blockId);
-        dimensionCache.put(blockId, dim);
+        statsCache.put(blockId, new MachineStats(dim, 0.0, blockId));
         return dim;
+    }
+
+    public double getPrice(String blockId) {
+        if (statsCache.containsKey(blockId)) {
+            return statsCache.get(blockId).basePrice();
+        }
+        return 0.0; // Gratis se non definito (o fallback)
     }
 }

@@ -27,7 +27,6 @@ FILE: Main.java
 --------------------------------
 package com.matterworks.core;
 
-import com.matterworks.core.common.Direction;
 import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.database.DatabaseManager;
@@ -35,9 +34,6 @@ import com.matterworks.core.database.dao.MachineDefinitionDAO;
 import com.matterworks.core.database.dao.PlayerDAO;
 import com.matterworks.core.database.dao.PlotDAO;
 import com.matterworks.core.domain.machines.BlockRegistry;
-import com.matterworks.core.domain.machines.DrillMachine;
-import com.matterworks.core.domain.machines.PlacedMachine;
-import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.infrastructure.CoreConfig;
 import com.matterworks.core.infrastructure.MariaDBAdapter;
@@ -90,7 +86,6 @@ public class Main {
         gridManager.loadPlotFromDB(playerUuid);
         Thread.sleep(500);
 
-
         if (GraphicsEnvironment.isHeadless()) {
             System.out.println("ðŸ‘» MODALITÃ€ HEADLESS ATTIVA (SERVER)");
         } else {
@@ -127,7 +122,6 @@ public class Main {
             }
         }
     }
-
 
     private static void ensurePlayerExists(DatabaseManager db, UUID uuid) {
         PlayerDAO playerDao = new PlayerDAO(db);
@@ -462,13 +456,14 @@ public class PlotDAO {
         this.dbManager = dbManager;
     }
 
-    public Integer findPlotIdByOwner(UUID ownerId) {
+    // UPDATE: Ritorna Long
+    public Long findPlotIdByOwner(UUID ownerId) {
         String sql = "SELECT id FROM plots WHERE owner_id = ?";
         try (Connection conn = dbManager.getConnection();
              PreparedStatement stmt = conn.prepareStatement(sql)) {
             stmt.setBytes(1, UuidUtils.asBytes(ownerId));
             try (ResultSet rs = stmt.executeQuery()) {
-                if (rs.next()) return rs.getInt("id");
+                if (rs.next()) return rs.getLong("id"); // getLong
             }
         } catch (SQLException e) {
             e.printStackTrace();
@@ -491,21 +486,20 @@ public class PlotDAO {
         }
     }
 
-    // --- NUOVO METODO PER INSERIRE MACCHINE ---
     public Long insertMachine(UUID ownerId, String typeId, int x, int y, int z, String metadataJson) {
-        Integer plotId = findPlotIdByOwner(ownerId);
+        // UPDATE: Usa Long
+        Long plotId = findPlotIdByOwner(ownerId);
         if (plotId == null) {
             System.err.println("âŒ Nessun plot trovato per salvare la macchina!");
             return null;
         }
 
-        // Usa 'metadata' (senza underscore) come da tuo DB attuale
         String sql = "INSERT INTO plot_machines (plot_id, type_id, x, y, z, metadata) VALUES (?, ?, ?, ?, ?, ?)";
 
         try (Connection conn = dbManager.getConnection();
              PreparedStatement stmt = conn.prepareStatement(sql, java.sql.Statement.RETURN_GENERATED_KEYS)) {
 
-            stmt.setInt(1, plotId);
+            stmt.setLong(1, plotId); // setLong
             stmt.setString(2, typeId);
             stmt.setInt(3, x);
             stmt.setInt(4, y);
@@ -678,6 +672,77 @@ public class PlotObjectDAO {
         } catch (SQLException e) {
             e.printStackTrace();
         }
+    }
+}
+
+
+--------------------------------
+FILE: PlotResourceDAO.java
+--------------------------------
+package com.matterworks.core.database.dao;
+
+import com.matterworks.core.common.GridPosition;
+import com.matterworks.core.database.DatabaseManager;
+import com.matterworks.core.domain.matter.MatterColor;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.HashMap;
+import java.util.Map;
+
+public class PlotResourceDAO {
+
+    private final DatabaseManager db;
+
+    public PlotResourceDAO(DatabaseManager db) {
+        this.db = db;
+    }
+
+    // UPDATE: Long plotId
+    public void addResource(Long plotId, int x, int z, MatterColor type) {
+        String sql = "INSERT INTO plot_resources (plot_id, x, z, resource_type) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE resource_type = VALUES(resource_type)";
+
+        try (Connection conn = db.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setLong(1, plotId); // setLong
+            stmt.setInt(2, x);
+            stmt.setInt(3, z);
+            stmt.setString(4, type.name());
+            stmt.executeUpdate();
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+    }
+
+    // UPDATE: Long plotId
+    public Map<GridPosition, MatterColor> loadResources(Long plotId) {
+        Map<GridPosition, MatterColor> resources = new HashMap<>();
+        String sql = "SELECT x, z, resource_type FROM plot_resources WHERE plot_id = ?";
+
+        try (Connection conn = db.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setLong(1, plotId); // setLong
+
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    int x = rs.getInt("x");
+                    int z = rs.getInt("z");
+                    String typeStr = rs.getString("resource_type");
+
+                    try {
+                        MatterColor color = MatterColor.valueOf(typeStr);
+                        resources.put(new GridPosition(x, 0, z), color);
+                    } catch (IllegalArgumentException e) {
+                        System.err.println("âš ï¸ Risorsa ignota nel DB: " + typeStr);
+                    }
+                }
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+        return resources;
     }
 }
 
@@ -1096,24 +1161,72 @@ public class Chromator extends ProcessorMachine {
     public Chromator(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata) {
         super(dbId, ownerId, pos, typeId, metadata);
         this.dimensions = new Vector3Int(2, 1, 1);
-        inputBuffer.insertIntoSlot(0, null);
-        inputBuffer.insertIntoSlot(1, null);
+        if (inputBuffer.getItemInSlot(0) == null) inputBuffer.insertIntoSlot(0, null);
+        if (inputBuffer.getItemInSlot(1) == null) inputBuffer.insertIntoSlot(1, null);
     }
 
     @Override
-    public boolean insertItem(MatterPayload item) {
+    public boolean insertItem(MatterPayload item, GridPosition fromPos) {
+        if (fromPos == null) return false;
+        int targetSlot = getSlotForPosition(fromPos);
+        if (targetSlot == -1) return false;
+
         boolean isDye = (item.color() != MatterColor.RAW);
-        return inputBuffer.insertIntoSlot(isDye ? 1 : 0, item);
+        if (targetSlot == 0 && isDye) return false;
+        if (targetSlot == 1 && !isDye) return false;
+
+        return insertIntoBuffer(targetSlot, item);
+    }
+
+    // --- FIX OUTPUT POSITION ---
+    @Override
+    protected GridPosition getOutputPosition() {
+        int x = pos.x();
+        int y = pos.y();
+        int z = pos.z();
+
+        // Restituisce il vicino del "Blocco Sinistro" rispetto alla faccia anteriore
+        return switch (orientation) {
+            // NORD: Fronte Ã¨ Z-min. Sinistra Ã¨ X (Ovest). Output deve essere a (x, z-1).
+            case NORTH -> new GridPosition(x, y, z - 1);
+
+            // SUD: Fronte Ã¨ Z-max. Sinistra Ã¨ X+1 (Est). Output deve essere a (x+1, z+1).
+            case SOUTH -> new GridPosition(x + 1, y, z + 1);
+
+            // EST: Fronte Ã¨ X-max. Sinistra Ã¨ Z (Nord). Output deve essere a (x+1, z).
+            case EAST -> new GridPosition(x + 1, y, z);
+
+            // OVEST: Fronte Ã¨ X-min. Sinistra Ã¨ Z+1 (Sud). Output deve essere a (x-1, z+1).
+            case WEST -> new GridPosition(x - 1, y, z + 1);
+
+            default -> pos;
+        };
+    }
+
+    private int getSlotForPosition(GridPosition senderPos) {
+        // ... (Stessa logica di prima) ...
+        int x = pos.x(); int y = pos.y(); int z = pos.z();
+        GridPosition slot0Pos = null, slot1Pos = null;
+        switch (orientation) {
+            case NORTH: slot0Pos = new GridPosition(x, y, z + 1); slot1Pos = new GridPosition(x + 1, y, z + 1); break;
+            case SOUTH: slot0Pos = new GridPosition(x + 1, y, z - 1); slot1Pos = new GridPosition(x, y, z - 1); break;
+            case EAST:  slot0Pos = new GridPosition(x - 1, y, z); slot1Pos = new GridPosition(x - 1, y, z + 1); break;
+            case WEST:  slot0Pos = new GridPosition(x + 1, y, z + 1); slot1Pos = new GridPosition(x + 1, y, z); break;
+            default: return -1;
+        }
+        if (senderPos.equals(slot0Pos)) return 0;
+        if (senderPos.equals(slot1Pos)) return 1;
+        return -1;
     }
 
     @Override
     public void tick(long currentTick) {
         super.tryEjectItem(currentTick);
-
         if (currentRecipe != null) {
             if (currentTick >= finishTick) completeProcessing();
             return;
         }
+        if (outputBuffer.getCount() >= MAX_OUTPUT_STACK) return;
 
         int countShape = inputBuffer.getCountInSlot(0);
         int countDye = inputBuffer.getCountInSlot(1);
@@ -1121,19 +1234,10 @@ public class Chromator extends ProcessorMachine {
         if (countShape > 0 && countDye > 0) {
             MatterPayload inputShape = inputBuffer.getItemInSlot(0);
             MatterPayload inputDye = inputBuffer.getItemInSlot(1);
-
             inputBuffer.decreaseSlot(0, 1);
             inputBuffer.decreaseSlot(1, 1);
-
             MatterPayload result = new MatterPayload(inputShape.shape(), inputDye.color());
-
-            this.currentRecipe = new com.matterworks.core.domain.matter.Recipe(
-                    "chroma_op",
-                    java.util.List.of(inputShape, inputDye),
-                    result,
-                    2.0f,
-                    0
-            );
+            this.currentRecipe = new com.matterworks.core.domain.matter.Recipe("chroma_op", java.util.List.of(inputShape, inputDye), result, 2.0f, 0);
             this.finishTick = currentTick + 40;
             saveState();
             System.out.println("ðŸŽ¨ Chromator: Mix " + inputShape.shape() + " + " + inputDye.color());
@@ -1161,39 +1265,75 @@ public class ColorMixer extends ProcessorMachine {
     public ColorMixer(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata) {
         super(dbId, ownerId, pos, typeId, metadata);
         this.dimensions = new Vector3Int(2, 1, 1);
-        inputBuffer.insertIntoSlot(0, null);
-        inputBuffer.insertIntoSlot(1, null);
+        if (inputBuffer.getItemInSlot(0) == null) inputBuffer.insertIntoSlot(0, null);
+        if (inputBuffer.getItemInSlot(1) == null) inputBuffer.insertIntoSlot(1, null);
     }
 
     @Override
-    public boolean insertItem(MatterPayload item) {
+    public boolean insertItem(MatterPayload item, GridPosition fromPos) {
+        if (fromPos == null) return false;
         if (item.color() == MatterColor.RAW) return false;
 
-        MatterPayload slot0 = inputBuffer.getItemInSlot(0);
-        MatterPayload slot1 = inputBuffer.getItemInSlot(1);
+        int targetSlot = getSlotForPosition(fromPos);
+        if (targetSlot == -1) return false;
 
-        // Controllo UnicitÃ 
-        if (slot0 == null || slot0.color() == item.color()) {
-            if (slot1 != null && slot1.color() == item.color()) return false;
-            return inputBuffer.insertIntoSlot(0, item);
+        // FIX: Usa la costante MAX_INPUT_STACK (64)
+        if (inputBuffer.getCountInSlot(targetSlot) >= MAX_INPUT_STACK) return false;
+
+        return insertIntoBuffer(targetSlot, item);
+    }
+
+    @Override
+    protected GridPosition getOutputPosition() {
+        int x = pos.x();
+        int y = pos.y();
+        int z = pos.z();
+
+        // Restituisce il vicino del "Blocco Sinistro" rispetto alla faccia anteriore
+        return switch (orientation) {
+            // NORD: Fronte Ã¨ Z-min. Sinistra Ã¨ X (Ovest). Output deve essere a (x, z-1).
+            case NORTH -> new GridPosition(x, y, z - 1);
+
+            // SUD: Fronte Ã¨ Z-max. Sinistra Ã¨ X+1 (Est). Output deve essere a (x+1, z+1).
+            case SOUTH -> new GridPosition(x + 1, y, z + 1);
+
+            // EST: Fronte Ã¨ X-max. Sinistra Ã¨ Z (Nord). Output deve essere a (x+1, z).
+            case EAST -> new GridPosition(x + 1, y, z);
+
+            // OVEST: Fronte Ã¨ X-min. Sinistra Ã¨ Z+1 (Sud). Output deve essere a (x-1, z+1).
+            case WEST -> new GridPosition(x - 1, y, z + 1);
+
+            default -> pos;
+        };
+    }
+
+    private int getSlotForPosition(GridPosition senderPos) {
+        int x = pos.x();
+        int y = pos.y();
+        int z = pos.z();
+        GridPosition slot0Pos = null, slot1Pos = null;
+
+        switch (orientation) {
+            case NORTH: slot0Pos = new GridPosition(x, y, z + 1); slot1Pos = new GridPosition(x + 1, y, z + 1); break;
+            case SOUTH: slot0Pos = new GridPosition(x + 1, y, z - 1); slot1Pos = new GridPosition(x, y, z - 1); break;
+            case EAST:  slot0Pos = new GridPosition(x - 1, y, z); slot1Pos = new GridPosition(x - 1, y, z + 1); break;
+            case WEST:  slot0Pos = new GridPosition(x + 1, y, z + 1); slot1Pos = new GridPosition(x + 1, y, z); break;
+            default: return -1;
         }
 
-        if (slot1 == null || slot1.color() == item.color()) {
-            if (slot0 != null && slot0.color() == item.color()) return false;
-            return inputBuffer.insertIntoSlot(1, item);
-        }
-
-        return false;
+        if (senderPos.equals(slot0Pos)) return 0;
+        if (senderPos.equals(slot1Pos)) return 1;
+        return -1;
     }
 
     @Override
     public void tick(long currentTick) {
         super.tryEjectItem(currentTick);
-
         if (currentRecipe != null) {
             if (currentTick >= finishTick) completeProcessing();
             return;
         }
+        if (outputBuffer.getCount() >= MAX_OUTPUT_STACK) return;
 
         int count0 = inputBuffer.getCountInSlot(0);
         int count1 = inputBuffer.getCountInSlot(1);
@@ -1201,20 +1341,14 @@ public class ColorMixer extends ProcessorMachine {
         if (count0 > 0 && count1 > 0) {
             MatterPayload c1 = inputBuffer.getItemInSlot(0);
             MatterPayload c2 = inputBuffer.getItemInSlot(1);
+            if (c1.color() == c2.color()) return;
 
             inputBuffer.decreaseSlot(0, 1);
             inputBuffer.decreaseSlot(1, 1);
 
             MatterColor mixed = MatterColor.mix(c1.color(), c2.color());
-            MatterPayload result = new MatterPayload(MatterShape.SPHERE, mixed); // Liquido
-
-            this.currentRecipe = new com.matterworks.core.domain.matter.Recipe(
-                    "mix_" + mixed.name(),
-                    java.util.List.of(c1, c2),
-                    result,
-                    1.5f,
-                    0
-            );
+            MatterPayload result = new MatterPayload(MatterShape.SPHERE, mixed);
+            this.currentRecipe = new com.matterworks.core.domain.matter.Recipe("mix_" + mixed.name(), java.util.List.of(c1, c2), result, 1.5f, 0);
             this.finishTick = currentTick + 30;
             saveState();
             System.out.println("ðŸŒ€ Mixer: Mixing " + c1.color() + " + " + c2.color() + " -> " + mixed);
@@ -1254,10 +1388,7 @@ public class ConveyorBelt extends PlacedMachine {
     @Override
     public void tick(long currentTick) {
         if (currentItem == null) return;
-
-        if (arrivalTick == -1) {
-            arrivalTick = currentTick + TRANSPORT_TIME;
-        }
+        if (arrivalTick == -1) arrivalTick = currentTick + TRANSPORT_TIME;
 
         if (currentTick >= arrivalTick) {
             pushToNeighbor(currentTick);
@@ -1266,10 +1397,8 @@ public class ConveyorBelt extends PlacedMachine {
 
     public boolean insertItem(MatterPayload item, long currentTick) {
         if (this.currentItem != null) return false;
-
         this.currentItem = item;
         this.arrivalTick = currentTick + TRANSPORT_TIME;
-
         this.metadata.add("currentItem", item.serialize());
         markDirty();
         return true;
@@ -1285,23 +1414,23 @@ public class ConveyorBelt extends PlacedMachine {
                 pos.z() + dirVec.z()
         );
 
-        PlacedMachine neighbor = gridManager.getMachineAt(targetPos);
+        PlacedMachine neighbor = getNeighborAt(targetPos);
         boolean moved = false;
 
         if (neighbor instanceof ConveyorBelt nextBelt) {
             moved = nextBelt.insertItem(currentItem, currentTick);
         }
         else if (neighbor instanceof NexusMachine nexus) {
-            moved = nexus.insertItem(currentItem);
+            // FIX CRUCIALE: Passiamo 'this.pos' (la posizione del nastro)
+            // Il Nexus userÃ  questa coordinata per verificare se il nastro Ã¨ davanti a una porta valida.
+            moved = nexus.insertItem(currentItem, this.pos);
         }
-        // 2. AGGIUNGI QUESTO BLOCCO FONDAMENTALE
         else if (neighbor instanceof ProcessorMachine processor) {
-            // Il Chromator Ã¨ un ProcessorMachine
-            moved = processor.insertItem(currentItem);
+            // Anche i processori ora richiedono la posizione di origine
+            moved = processor.insertItem(currentItem, this.pos);
         }
 
         if (moved) {
-            // System.out.println("Belt -> Consegnato a " + neighbor.getTypeId());
             this.currentItem = null;
             this.arrivalTick = -1;
             this.metadata.remove("currentItem");
@@ -1312,13 +1441,8 @@ public class ConveyorBelt extends PlacedMachine {
     @Override
     public JsonObject serialize() {
         super.serialize();
-        if (currentItem != null) {
-            // Se c'Ã¨ un item, SCRIVILO nel metadata
-            this.metadata.add("currentItem", currentItem.serialize());
-        } else {
-            // Se non c'Ã¨, RIMUOVI la chiave vecchia (altrimenti rimane il fantasma)
-            this.metadata.remove("currentItem");
-        }
+        if (currentItem != null) this.metadata.add("currentItem", currentItem.serialize());
+        else this.metadata.remove("currentItem");
         return this.metadata;
     }
 }
@@ -1358,6 +1482,7 @@ public class DrillMachine extends PlacedMachine {
         int capacity = CoreConfig.getInt("machine.inventory.capacity", 64);
         this.outputBuffer = new MachineInventory(capacity);
 
+        // Caricamento Dati
         if (this.metadata != null) {
             if (this.metadata.has("items")) {
                 this.outputBuffer.loadState(this.metadata);
@@ -1374,8 +1499,7 @@ public class DrillMachine extends PlacedMachine {
 
     public void setResourceToMine(MatterColor resource) {
         this.resourceToMine = resource;
-        this.metadata.addProperty("mining_resource", resource.name());
-        markDirty();
+        saveInternalState(); // Salva subito
     }
 
     @Override
@@ -1392,38 +1516,55 @@ public class DrillMachine extends PlacedMachine {
     }
 
     private void produceItem() {
-        // MODIFICA: Se Ã¨ RAW Ã¨ un CUBO, altrimenti Ã¨ NULL (Liquido/Colore puro)
         MatterShape shape = (this.resourceToMine == MatterColor.RAW) ? MatterShape.CUBE : null;
-
         MatterPayload newItem = new MatterPayload(shape, this.resourceToMine);
 
         if (outputBuffer.insert(newItem)) {
-            // System.out.println("Drill -> MINED " + this.resourceToMine + ". Buffer: " + outputBuffer.getCount());
-            this.metadata = outputBuffer.serialize();
-            this.metadata.addProperty("mining_resource", resourceToMine.name());
-            markDirty();
+            saveInternalState(); // Usa il metodo sicuro
         }
     }
 
     private void tryEjectItem(long currentTick) {
         if (outputBuffer.isEmpty()) return;
-        if (gridManager == null) return;
 
+        // FIX: Usa getNeighborAt per trovare il nastro del proprietario corretto
+        // (Assumendo che tu abbia applicato la patch Multi-Tenant precedente)
         Vector3Int dir = orientation.toVector();
         GridPosition targetPos = new GridPosition(pos.x() + dir.x(), pos.y() + dir.y(), pos.z() + dir.z());
 
-        PlacedMachine neighbor = gridManager.getMachineAt(targetPos);
+        // Se non hai ancora il metodo getNeighborAt nella classe padre, usa:
+        // PlacedMachine neighbor = gridManager.getMachineAt(this.ownerId, targetPos);
+        PlacedMachine neighbor = getNeighborAt(targetPos);
+
         if (neighbor instanceof ConveyorBelt belt) {
             MatterPayload item = outputBuffer.extractFirst();
             if (item != null) {
                 if (belt.insertItem(item, currentTick)) {
-                    this.metadata = outputBuffer.serialize();
-                    markDirty();
+                    saveInternalState(); // FIX: Usa il metodo sicuro invece di sovrascrivere
                 } else {
-                    outputBuffer.insert(item);
+                    outputBuffer.insert(item); // Rollback se il nastro Ã¨ pieno
                 }
             }
         }
+    }
+
+    /**
+     * Metodo centrale per aggiornare i metadati senza perdere pezzi.
+     * Unisce lo stato dell'inventario con la configurazione della risorsa.
+     */
+    private void saveInternalState() {
+        // 1. Ottieni il JSON dell'inventario
+        JsonObject invState = outputBuffer.serialize();
+
+        // 2. Fai il merge dentro this.metadata invece di sovrascriverlo brutalmente
+        this.metadata.add("items", invState.get("items"));
+        this.metadata.add("capacity", invState.get("capacity"));
+
+        // 3. Assicura che la risorsa sia sempre salvata
+        this.metadata.addProperty("mining_resource", resourceToMine.name());
+
+        // 4. Marca per il salvataggio DB
+        markDirty();
     }
 }
 
@@ -1467,14 +1608,11 @@ public class NexusMachine extends PlacedMachine {
 
     private final MachineInventory storage;
     private long nextSaleTick = -1;
-    private static final int SALE_INTERVAL = 10; // Vende ogni 0.5s (veloce)
+    private static final int SALE_INTERVAL = 10;
 
     public NexusMachine(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata) {
         super(dbId, ownerId, typeId, pos, metadata);
-        // Dimensioni interne di sicurezza (vengono sovrascritte dal Registry comunque)
         this.dimensions = new Vector3Int(3, 3, 3);
-
-        // Inventario capiente (100 slot)
         this.storage = new MachineInventory(100);
 
         if (this.metadata.has("items")) {
@@ -1482,14 +1620,10 @@ public class NexusMachine extends PlacedMachine {
         }
     }
 
-
     @Override
     public void tick(long currentTick) {
         if (storage.isEmpty()) return;
-
-        if (nextSaleTick == -1) {
-            nextSaleTick = currentTick + SALE_INTERVAL;
-        }
+        if (nextSaleTick == -1) nextSaleTick = currentTick + SALE_INTERVAL;
 
         if (currentTick >= nextSaleTick) {
             sellNextItem();
@@ -1498,10 +1632,24 @@ public class NexusMachine extends PlacedMachine {
     }
 
     /**
-     * Metodo chiamato dai Nastri per inserire roba qui.
+     * Metodo legacy (non dovrebbe essere usato dai nastri, ma per sicurezza)
      */
     public boolean insertItem(MatterPayload item) {
-        System.out.println("Nexus: Ricevuto item " + item.shape()); // <--- DEBUG
+        return false; // Il Nexus ora richiede una posizione di origine!
+    }
+
+    /**
+     * NUOVO: Inserimento con validazione geometrica rigorosa.
+     */
+    public boolean insertItem(MatterPayload item, GridPosition fromPos) {
+        if (item.shape() == null) return false; // Rifiuta liquidi/dye
+        if (fromPos == null) return false;
+
+        // Validazione Porta: Deve entrare da una delle 6 porte centrali
+        if (!isValidInputPort(fromPos)) {
+            return false;
+        }
+
         boolean success = storage.insert(item);
         if (success) {
             this.metadata = storage.serialize();
@@ -1510,23 +1658,44 @@ public class NexusMachine extends PlacedMachine {
         return success;
     }
 
+    private boolean isValidInputPort(GridPosition from) {
+        int x = pos.x();
+        int y = pos.y();
+        int z = pos.z();
+
+        // Coordinate relative (delta)
+        int dx = from.x() - x;
+        int dy = from.y() - y;
+        int dz = from.z() - z;
+
+        // Il Nexus accetta input solo ai livelli Y=0 e Y=1 (relativi alla base)
+        if (dy < 0 || dy > 1) return false;
+
+        // Logica Porte Centrali (Il Nexus Ã¨ 3x3, centro Ã¨ offset 1)
+        // Nord (z-1) -> Entra in (1, y, 0) -> Delta da origine: x=1, z=-1
+        if (dx == 1 && dz == -1) return true;
+        // Sud (z+3) -> Entra in (1, y, 2) -> Delta da origine: x=1, z=3
+        if (dx == 1 && dz == 3) return true;
+        // Ovest (x-1) -> Entra in (0, y, 1) -> Delta da origine: x=-1, z=1
+        if (dx == -1 && dz == 1) return true;
+        // Est (x+3) -> Entra in (2, y, 1) -> Delta da origine: x=3, z=1
+        if (dx == 3 && dz == 1) return true;
+
+        return false;
+    }
+
     private void sellNextItem() {
         if (gridManager == null) return;
-
-        // Recupera il MarketManager dal contesto
         MarketManager market = gridManager.getMarketManager();
         if (market == null) return;
 
         MatterPayload itemToSell = storage.extractFirst();
-
         if (itemToSell != null) {
-            market.sellItem(itemToSell, this.ownerId);
-
+            market.sellItem(itemToSell, this.getOwnerId());
             this.metadata = storage.serialize();
             markDirty();
         }
     }
-
 }
 
 
@@ -1551,7 +1720,7 @@ public abstract class PlacedMachine implements IGridComponent {
     protected String typeId;
     protected GridPosition pos;
     protected Direction orientation;
-    protected Vector3Int dimensions; // Dimensioni BASE
+    protected Vector3Int dimensions;
     protected JsonObject metadata;
     protected GridManager gridManager;
     protected boolean isDirty = false;
@@ -1571,7 +1740,6 @@ public abstract class PlacedMachine implements IGridComponent {
         this.dimensions = new Vector3Int(1, 1, 1);
     }
 
-    // --- FIX ROTAZIONE FISICA ---
     @Override
     public Vector3Int getDimensions() {
         if (orientation == Direction.EAST || orientation == Direction.WEST) {
@@ -1580,17 +1748,36 @@ public abstract class PlacedMachine implements IGridComponent {
         return dimensions;
     }
 
+    // --- NUOVO METODO HELPER PER I VICINI ---
+    protected PlacedMachine getNeighborAt(GridPosition targetPos) {
+        if (gridManager == null) return null;
+        // Chiede al GM la macchina in quella posizione MA nello stesso universo (ownerId)
+        return gridManager.getMachineAt(this.ownerId, targetPos);
+    }
+
     public void setOrientation(Direction orientation) {
         this.orientation = orientation;
         this.metadata.addProperty("orientation", orientation.name());
         markDirty();
     }
+    public Direction getNeighborDirection(GridPosition neighborPos) {
+        int dx = neighborPos.x() - this.pos.x();
+        int dy = neighborPos.y() - this.pos.y();
+        int dz = neighborPos.z() - this.pos.z();
 
-    // --- METODI MANCANTI AGGIUNTI QUI ---
+        if (dx == 1) return Direction.EAST;
+        if (dx == -1) return Direction.WEST;
+        if (dz == 1) return Direction.SOUTH;
+        if (dz == -1) return Direction.NORTH;
+        if (dy == 1) return Direction.UP;
+        if (dy == -1) return Direction.DOWN;
+
+        return null; // Non adiacente
+    }
+
     public UUID getOwnerId() { return ownerId; }
     public void cleanDirty() { this.isDirty = false; }
 
-    // --- METODI STANDARD ---
     public GridPosition getPos() { return pos; }
     public String getTypeId() { return typeId; }
     public Direction getOrientation() { return orientation; }
@@ -1626,22 +1813,22 @@ import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.domain.inventory.MachineInventory;
 import com.matterworks.core.domain.matter.MatterPayload;
 import com.matterworks.core.domain.matter.Recipe;
-import com.matterworks.core.domain.matter.RecipeRegistry;
 
-import java.util.Collections;
 import java.util.UUID;
 
 public abstract class ProcessorMachine extends PlacedMachine {
 
     protected final MachineInventory inputBuffer;
     protected final MachineInventory outputBuffer;
-
     protected Recipe currentRecipe;
     protected long finishTick = -1;
 
+    protected static final int MAX_INPUT_STACK = 64;
+    protected static final int MAX_OUTPUT_STACK = 64;
+
     public ProcessorMachine(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata) {
         super(dbId, ownerId, typeId, pos, metadata);
-        this.inputBuffer = new MachineInventory(2); // Default a 2 per sicurezza
+        this.inputBuffer = new MachineInventory(2);
         this.outputBuffer = new MachineInventory(1);
 
         if (this.metadata.has("input")) this.inputBuffer.loadState(this.metadata.getAsJsonObject("input"));
@@ -1650,16 +1837,19 @@ public abstract class ProcessorMachine extends PlacedMachine {
 
     @Override
     public void tick(long currentTick) {
-        // 1. Output Logistico
         tryEjectItem(currentTick);
-
-        // 2. Logica di Processamento (Base)
-        // Le sottoclassi possono fare Override se vogliono logiche custom (come il Chromator)
         processRecipe(currentTick);
     }
 
-    public boolean insertItem(MatterPayload item) {
-        if (inputBuffer.insert(item)) {
+    public boolean insertItem(MatterPayload item) { return false; }
+    public abstract boolean insertItem(MatterPayload item, GridPosition fromPos);
+
+    // NUOVO METODO ASTRATTO: Ogni macchina deve dire esattamente DOVE sputa l'output
+    protected abstract GridPosition getOutputPosition();
+
+    protected boolean insertIntoBuffer(int slotIndex, MatterPayload item) {
+        if (inputBuffer.getCountInSlot(slotIndex) >= MAX_INPUT_STACK) return false;
+        if (inputBuffer.insertIntoSlot(slotIndex, item)) {
             saveState();
             return true;
         }
@@ -1667,17 +1857,10 @@ public abstract class ProcessorMachine extends PlacedMachine {
     }
 
     protected void processRecipe(long currentTick) {
+        if (outputBuffer.getCount() >= MAX_OUTPUT_STACK) return;
         if (currentRecipe != null) {
-            if (currentTick >= finishTick) {
-                completeProcessing();
-            }
-            return;
+            if (currentTick >= finishTick) completeProcessing();
         }
-
-        if (inputBuffer.isEmpty()) return;
-
-        // Logica Standard (1 input -> 1 output)
-        // Il Chromator farÃ  Override di questo metodo per gestire 2 input.
     }
 
     protected void completeProcessing() {
@@ -1689,33 +1872,31 @@ public abstract class ProcessorMachine extends PlacedMachine {
         }
     }
 
-    // --- FIX QUI: cambiato da private a protected ---
     protected void tryEjectItem(long currentTick) {
         if (outputBuffer.isEmpty()) return;
         if (gridManager == null) return;
 
-        Vector3Int dir = orientation.toVector();
-        GridPosition targetPos = new GridPosition(pos.x() + dir.x(), pos.y() + dir.y(), pos.z() + dir.z());
+        // FIX: Usa la posizione specifica calcolata dalla sottoclasse
+        GridPosition targetPos = getOutputPosition();
+        if (targetPos == null) return;
 
-        PlacedMachine neighbor = gridManager.getMachineAt(targetPos);
+        PlacedMachine neighbor = getNeighborAt(targetPos);
 
         if (neighbor instanceof ConveyorBelt belt) {
             MatterPayload item = outputBuffer.extractFirst();
             if (item != null) {
-                if (belt.insertItem(item, currentTick)) {
-                    saveState();
-                } else {
-                    outputBuffer.insert(item); // Rollback
-                }
+                // Passiamo 'this.pos' (o meglio, la posizione precisa dell'output sarebbe ideale, ma this.pos va bene per ora)
+                if (belt.insertItem(item, currentTick)) saveState();
+                else outputBuffer.insert(item);
             }
         } else if (neighbor instanceof NexusMachine nexus) {
             MatterPayload item = outputBuffer.extractFirst();
             if (item != null) {
-                if (nexus.insertItem(item)) {
-                    saveState();
-                } else {
-                    outputBuffer.insert(item);
-                }
+                // Nexus requires strict fromPos checking now.
+                // We pass the output position as the "source"
+                GridPosition outputSource = getOutputPosition().add(orientation.opposite().toVector());
+                if (nexus.insertItem(item, outputSource)) saveState();
+                else outputBuffer.insert(item);
             }
         }
     }
@@ -2058,35 +2239,75 @@ FILE: MarketManager.java
 --------------------------------
 package com.matterworks.core.domain.shop;
 
+import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.matter.MatterPayload;
+import com.matterworks.core.domain.matter.MatterShape;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.ports.IRepository;
 
+import java.util.HashMap;
+import java.util.Map;
 import java.util.UUID;
 
 public class MarketManager {
 
     private final IRepository repository;
+    private final Map<MatterColor, Double> basePrices;
 
     public MarketManager(IRepository repository) {
         this.repository = repository;
+        this.basePrices = new HashMap<>();
+        initializePrices();
+    }
+
+    private void initializePrices() {
+        // Prezzi Base per Colore
+        basePrices.put(MatterColor.RAW, 1.0);
+
+        // Colori Primari (Lavorati)
+        basePrices.put(MatterColor.RED, 5.0);
+        basePrices.put(MatterColor.BLUE, 5.0);
+        basePrices.put(MatterColor.YELLOW, 5.0);
+
+        // Colori Secondari (Mixati - Valgono molto di piÃ¹)
+        basePrices.put(MatterColor.PURPLE, 25.0);
+        basePrices.put(MatterColor.ORANGE, 25.0);
+        basePrices.put(MatterColor.GREEN, 25.0);
+
+        // Colore Finale
+        basePrices.put(MatterColor.WHITE, 100.0);
     }
 
     public void sellItem(MatterPayload item, UUID sellerId) {
-        // Logica semplice: 10$ per ogni cubo. In futuro useremo il ValueCalculator.
-        double value = 10.0;
+        if (item == null) return;
 
-        // Carichiamo il profilo (Sincrono per ora, in produzione useremmo cache/async)
+        double value = calculateValue(item);
+
+        // Carichiamo il profilo, aggiorniamo i soldi e salviamo subito
         PlayerProfile player = repository.loadPlayerProfile(sellerId);
 
         if (player != null) {
             player.modifyMoney(value);
             repository.savePlayerProfile(player);
 
-            System.out.println("ðŸ’° MARKET: Venduto " + item.shape() + " (" + item.color() + ") per " + value + "$ -> Saldo: " + player.getMoney());
+            System.out.println("ðŸ’° MARKET: Venduto " + item.shape() + " (" + item.color() + ") per $" + String.format("%.2f", value));
+            System.out.println("   [Saldo Attuale: $" + String.format("%.2f", player.getMoney()) + "]");
         } else {
-            System.err.println("âŒ MARKET: Player non trovato per la vendita!");
+            System.err.println("âŒ MARKET: Errore critico - Player non trovato " + sellerId);
         }
+    }
+
+    private double calculateValue(MatterPayload item) {
+        // 1. Prezzo base del colore
+        double base = basePrices.getOrDefault(item.color(), 0.5);
+
+        // 2. Moltiplicatore forma (complessitÃ )
+        double multiplier = 1.0;
+        if (item.shape() == MatterShape.SPHERE) multiplier = 1.5;   // Liquidi/Sfere valgono di piÃ¹
+        if (item.shape() == MatterShape.PYRAMID) multiplier = 2.0;  // Cristalli
+        if (item.isComplex()) multiplier *= 1.2;                    // Bonus effetti (shiny, etc.)
+
+        return base * multiplier;
     }
 }
 
@@ -2140,10 +2361,13 @@ FILE: MariaDBAdapter.java
 --------------------------------
 package com.matterworks.core.infrastructure;
 
+import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.database.DatabaseManager;
 import com.matterworks.core.database.dao.PlayerDAO;
 import com.matterworks.core.database.dao.PlotDAO;
+import com.matterworks.core.database.dao.PlotResourceDAO;
 import com.matterworks.core.domain.machines.PlacedMachine;
+import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.model.PlotObject;
 import com.matterworks.core.ports.IRepository;
@@ -2152,6 +2376,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 public class MariaDBAdapter implements IRepository {
@@ -2159,53 +2384,54 @@ public class MariaDBAdapter implements IRepository {
     private final DatabaseManager dbManager;
     private final PlayerDAO playerDAO;
     private final PlotDAO plotDAO;
+    private final PlotResourceDAO resourceDAO;
 
     public MariaDBAdapter(DatabaseManager dbManager) {
         this.dbManager = dbManager;
         this.playerDAO = new PlayerDAO(dbManager);
         this.plotDAO = new PlotDAO(dbManager);
+        this.resourceDAO = new PlotResourceDAO(dbManager);
     }
 
-    @Override
-    public PlayerProfile loadPlayerProfile(UUID uuid) {
-        return playerDAO.load(uuid);
+    // --- NUOVO METODO: RESET TOTALE ---
+    public void clearPlotData(UUID ownerId) {
+        Long plotId = plotDAO.findPlotIdByOwner(ownerId);
+        if (plotId == null) return;
+
+        try (Connection conn = dbManager.getConnection()) {
+            // 1. Cancella tutte le macchine
+            try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM plot_machines WHERE plot_id = ?")) {
+                stmt.setLong(1, plotId);
+                stmt.executeUpdate();
+            }
+            // 2. Cancella tutte le risorse (cosÃ¬ al riavvio vengono rigenerate)
+            try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM plot_resources WHERE plot_id = ?")) {
+                stmt.setLong(1, plotId);
+                stmt.executeUpdate();
+            }
+            System.out.println("ðŸ”¥ WIPE COMPLETO per Plot ID " + plotId);
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
     }
 
-    @Override
-    public void savePlayerProfile(PlayerProfile profile) {
-        playerDAO.save(profile);
-    }
+    // ... (Il resto dei metodi rimane invariato: getPlotId, saveResource, loadResources, loadPlotMachines, etc.) ...
 
-    @Override
-    public List<PlotObject> loadPlotMachines(UUID ownerId) {
-        return plotDAO.loadMachines(ownerId);
-    }
-
-    @Override
-    public Long createMachine(UUID ownerId, PlacedMachine machine) {
+    public Long getPlotId(UUID ownerId) { return plotDAO.findPlotIdByOwner(ownerId); }
+    public void saveResource(Long plotId, int x, int z, MatterColor type) { resourceDAO.addResource(plotId, x, z, type); }
+    public Map<GridPosition, MatterColor> loadResources(Long plotId) { return resourceDAO.loadResources(plotId); }
+    @Override public PlayerProfile loadPlayerProfile(UUID uuid) { return playerDAO.load(uuid); }
+    @Override public void savePlayerProfile(PlayerProfile profile) { playerDAO.save(profile); }
+    @Override public List<PlotObject> loadPlotMachines(UUID ownerId) { return plotDAO.loadMachines(ownerId); }
+    @Override public Long createMachine(UUID ownerId, PlacedMachine machine) {
         String jsonMeta = machine.serialize().toString();
-        // Chiama il nuovo metodo nel DAO
-        return plotDAO.insertMachine(
-                ownerId,
-                machine.getTypeId(),
-                machine.getPos().x(),
-                machine.getPos().y(),
-                machine.getPos().z(),
-                jsonMeta
-        );
+        return plotDAO.insertMachine(ownerId, machine.getTypeId(), machine.getPos().x(), machine.getPos().y(), machine.getPos().z(), jsonMeta);
     }
-
-    @Override
-    public void deleteMachine(Long dbId) {
-        plotDAO.removeMachine(dbId);
-    }
-
-    @Override
-    public void updateMachinesMetadata(List<PlacedMachine> machines) {
+    @Override public void deleteMachine(Long dbId) { plotDAO.removeMachine(dbId); }
+    @Override public void updateMachinesMetadata(List<PlacedMachine> machines) {
         if (machines == null || machines.isEmpty()) return;
         String sql = "UPDATE plot_machines SET metadata = ? WHERE id = ?";
-        try (Connection conn = dbManager.getConnection();
-             PreparedStatement stmt = conn.prepareStatement(sql)) {
+        try (Connection conn = dbManager.getConnection(); PreparedStatement stmt = conn.prepareStatement(sql)) {
             for (PlacedMachine pm : machines) {
                 if (pm.getDbId() == null) continue;
                 stmt.setString(1, pm.serialize().toString());
@@ -2213,9 +2439,7 @@ public class MariaDBAdapter implements IRepository {
                 stmt.addBatch();
             }
             stmt.executeBatch();
-        } catch (SQLException e) {
-            e.printStackTrace();
-        }
+        } catch (SQLException e) { e.printStackTrace(); }
     }
 }
 
@@ -2290,12 +2514,10 @@ public class FactoryPanel extends JPanel {
         });
     }
 
-    // --- API MANCANTI AGGIUNTE QUI ---
     public void setLayer(int y) { this.currentLayer = y; repaint(); }
-    public int getCurrentLayer() { return currentLayer; } // <--- ERA MANCANTE
-
+    public int getCurrentLayer() { return currentLayer; }
     public void setTool(String toolId) { this.currentTool = toolId; repaint(); }
-    public String getCurrentToolName() { return currentTool != null ? currentTool : "None"; } // <--- ERA MANCANTE
+    public String getCurrentToolName() { return currentTool != null ? currentTool : "None"; }
 
     public void rotate() {
         switch(currentOrientation) {
@@ -2307,7 +2529,7 @@ public class FactoryPanel extends JPanel {
         if (onStateChange != null) onStateChange.run();
         repaint();
     }
-    public String getCurrentOrientationName() { return currentOrientation.name(); } // <--- ERA MANCANTE
+    public String getCurrentOrientationName() { return currentOrientation.name(); }
 
     private void updateMousePos(int x, int y) {
         int gx = toGridX(x);
@@ -2323,16 +2545,10 @@ public class FactoryPanel extends JPanel {
         if (mouseHoverPos == null) return;
         if (SwingUtilities.isLeftMouseButton(e)) {
             if (currentTool != null) {
-                boolean success = gridManager.placeMachine(playerUuid, mouseHoverPos, currentTool);
-                if (success) {
-                    // Importante: Ruotiamo subito se l'orientamento scelto non Ã¨ Default
-                    if (currentOrientation != Direction.NORTH) {
-                        gridManager.rotateMachine(mouseHoverPos, currentOrientation);
-                    }
-                }
+                gridManager.placeMachine(playerUuid, mouseHoverPos, currentTool, currentOrientation);
             }
         } else if (SwingUtilities.isRightMouseButton(e)) {
-            gridManager.removeComponent(mouseHoverPos);
+            gridManager.removeComponent(playerUuid, mouseHoverPos);
         }
     }
 
@@ -2349,7 +2565,7 @@ public class FactoryPanel extends JPanel {
     }
 
     private void drawTerrainResources(Graphics2D g) {
-        Map<GridPosition, MatterColor> resources = gridManager.getTerrainResources();
+        Map<GridPosition, MatterColor> resources = gridManager.getTerrainResources(playerUuid);
         for (Map.Entry<GridPosition, MatterColor> entry : resources.entrySet()) {
             GridPosition pos = entry.getKey();
             MatterColor type = entry.getValue();
@@ -2384,7 +2600,7 @@ public class FactoryPanel extends JPanel {
     }
 
     private void drawMachines(Graphics2D g) {
-        Map<GridPosition, PlacedMachine> machines = gridManager.getSnapshot();
+        Map<GridPosition, PlacedMachine> machines = gridManager.getSnapshot(playerUuid);
         for (PlacedMachine m : machines.values()) {
             int machineY = m.getPos().y();
             int machineHeight = m.getDimensions().y();
@@ -2429,7 +2645,11 @@ public class FactoryPanel extends JPanel {
         g.setColor(getColorForType(m.getTypeId()));
         g.fillRect(x + 2, z + 2, w - 4, h - 4);
 
-        if (m.getTypeId().equals("chromator") || m.getTypeId().equals("color_mixer")) {
+        // --- LOGICA PORTE SPECIFICA ---
+        if (m.getTypeId().equals("nexus_core")) {
+            drawNexusPorts(g, m, x, z, w, h);
+        }
+        else if (m.getTypeId().equals("chromator") || m.getTypeId().equals("color_mixer")) {
             drawPorts(g, m, x, z, w, h);
         } else {
             drawStandardPorts(g, m, x, z, w, h);
@@ -2443,6 +2663,29 @@ public class FactoryPanel extends JPanel {
             g.setColor(Color.WHITE);
             if (pos.y() == currentLayer) g.drawString("NEXUS", x + 10, z + 20);
         }
+    }
+
+    // --- NUOVO METODO: PORTE DEL NEXUS ---
+    // Disegna porte di ingresso (BLU) su tutti i lati per i primi 2 livelli.
+    private void drawNexusPorts(Graphics2D g, PlacedMachine m, int x, int z, int w, int h) {
+        int machineBaseY = m.getPos().y();
+        int relativeY = currentLayer - machineBaseY;
+
+        // Se siamo al livello 0 o 1 del Nexus (base o centro), disegna porte
+        if (relativeY >= 0 && relativeY <= 1) {
+            g.setColor(Color.BLUE);
+            int pSize = 8;
+
+            // Porta Nord
+            g.fillRect(x + w/2 - pSize/2, z, pSize, pSize);
+            // Porta Sud
+            g.fillRect(x + w/2 - pSize/2, z + h - pSize, pSize, pSize);
+            // Porta Ovest
+            g.fillRect(x, z + h/2 - pSize/2, pSize, pSize);
+            // Porta Est
+            g.fillRect(x + w - pSize, z + h/2 - pSize/2, pSize, pSize);
+        }
+        // Nessun Output (Verde)
     }
 
     private void drawBeltItem(Graphics2D g, ConveyorBelt belt, int x, int z) {
@@ -2493,26 +2736,42 @@ public class FactoryPanel extends JPanel {
         Direction dir = m.getOrientation();
         Point out = null, in1 = null, in2 = null;
 
+        // Dimensioni macchina in pixel
+        // w e h sono giÃ  ruotati (es. NORTH: w=2 celle, h=1 cella)
+
+        int cell = CELL_SIZE;
+
         switch (dir) {
             case NORTH:
-                out = new Point(x + w/2 - pSize/2, z);
-                in1 = new Point(x + w/4 - pSize/2, z + h - pSize);
-                in2 = new Point(x + (w*3)/4 - pSize/2, z + h - pSize);
+                // Out: Blocco Sinistro (0,0) -> Lato Nord
+                out = new Point(x + cell/2 - pSize/2, z);
+                // In: Lato Sud (z+h)
+                in1 = new Point(x + cell/2 - pSize/2, z + h - pSize); // Blocco Sinistro
+                in2 = new Point(x + (cell*3)/2 - pSize/2, z + h - pSize); // Blocco Destro
                 break;
+
             case SOUTH:
-                out = new Point(x + w/2 - pSize/2, z + h - pSize);
-                in1 = new Point(x + (w*3)/4 - pSize/2, z);
-                in2 = new Point(x + w/4 - pSize/2, z);
+                // Out: Blocco Sinistro (Guardando Sud, Ã¨ a dx nello schermo) -> (1,0) -> Lato Sud
+                out = new Point(x + (cell*3)/2 - pSize/2, z + h - pSize);
+                // In: Lato Nord
+                in1 = new Point(x + (cell*3)/2 - pSize/2, z);
+                in2 = new Point(x + cell/2 - pSize/2, z);
                 break;
+
             case EAST:
-                out = new Point(x + w - pSize, z + h/2 - pSize/2);
-                in1 = new Point(x, z + h/4 - pSize/2);
-                in2 = new Point(x, z + (h*3)/4 - pSize/2);
+                // Out: Blocco Sinistro (Guardando Est, Ã¨ sopra) -> (0,0) -> Lato Est
+                out = new Point(x + w - pSize, z + cell/2 - pSize/2);
+                // In: Lato Ovest
+                in1 = new Point(x, z + cell/2 - pSize/2);
+                in2 = new Point(x, z + (cell*3)/2 - pSize/2);
                 break;
+
             case WEST:
-                out = new Point(x, z + h/2 - pSize/2);
-                in1 = new Point(x + w - pSize, z + (h*3)/4 - pSize/2);
-                in2 = new Point(x + w - pSize, z + h/4 - pSize/2);
+                // Out: Blocco Sinistro (Guardando Ovest, Ã¨ sotto) -> (0,1) -> Lato Ovest
+                out = new Point(x, z + (cell*3)/2 - pSize/2);
+                // In: Lato Est
+                in1 = new Point(x + w - pSize, z + (cell*3)/2 - pSize/2);
+                in2 = new Point(x + w - pSize, z + cell/2 - pSize/2);
                 break;
         }
 
@@ -2592,13 +2851,12 @@ public class MatterWorksGUI extends JFrame {
         setSize(1280, 900);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setLocationRelativeTo(null);
-
         setLayout(new BorderLayout());
 
         // INFO LABELS
         lblTool = createLabel("TOOL: Drill");
         lblOrient = createLabel("DIR: NORTH");
-        lblLayer = createLabel("LAYER Y: 64");
+        lblLayer = createLabel("LAYER Y: 0");
         lblLayer.setForeground(Color.CYAN);
 
         lblMoney = new JLabel("MONEY: $---");
@@ -2608,31 +2866,32 @@ public class MatterWorksGUI extends JFrame {
         // GRID PANEL
         panel = new FactoryPanel(gridManager, registry, playerUuid, this::updateLabels);
 
-        // BUTTONS
+        // --- LEFT TOOLBAR ---
         JPanel leftTools = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
         leftTools.setOpaque(false);
 
         JButton btnDrill = createButton("â› Drill", e -> setTool("drill_mk1"));
         JButton btnBelt = createButton("â¨  Belt", e -> setTool("conveyor_belt"));
-        // NUOVO BOTTONE CHROMATOR
         JButton btnChromator = createButton("ðŸŽ¨ Chromator", e -> setTool("chromator"));
-        btnChromator.setBackground(new Color(255, 140, 0)); // Arancione
+        btnChromator.setBackground(new Color(255, 140, 0));
         btnChromator.setForeground(Color.BLACK);
-
+        JButton btnMixer = createButton("ðŸŒ€ Mixer", e -> setTool("color_mixer"));
+        btnMixer.setBackground(new Color(0, 200, 200));
+        btnMixer.setForeground(Color.BLACK);
         JButton btnNexus = createButton("ðŸ”® Nexus", e -> setTool("nexus_core"));
+        btnNexus.setBackground(new Color(100, 0, 150));
+        btnNexus.setForeground(Color.WHITE);
 
         JSeparator sep1 = new JSeparator(SwingConstants.VERTICAL); sep1.setPreferredSize(new Dimension(5, 25));
-
         JButton btnLayerUp = createButton("â¬† Layer UP", e -> changeLayer(1));
         JButton btnLayerDown = createButton("â¬‡ Layer DOWN", e -> changeLayer(-1));
-
         JSeparator sep2 = new JSeparator(SwingConstants.VERTICAL); sep2.setPreferredSize(new Dimension(5, 25));
-
         JButton btnRotate = createButton("â†» Rotate (R)", e -> panel.rotate());
 
         leftTools.add(btnDrill);
         leftTools.add(btnBelt);
-        leftTools.add(btnChromator); // Aggiunto qui
+        leftTools.add(btnChromator);
+        leftTools.add(btnMixer);
         leftTools.add(btnNexus);
         leftTools.add(sep1);
         leftTools.add(btnLayerDown);
@@ -2640,21 +2899,42 @@ public class MatterWorksGUI extends JFrame {
         leftTools.add(sep2);
         leftTools.add(btnRotate);
 
-        // SYSTEM BUTTONS
-        JPanel rightSystem = new JPanel(new FlowLayout(FlowLayout.RIGHT, 15, 0));
+        // --- RIGHT SYSTEM BUTTONS ---
+        JPanel rightSystem = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 0));
         rightSystem.setOpaque(false);
 
+        // SAVE
         JButton btnSave = createButton("ðŸ’¾ SAVE", e -> {
             onSave.run();
             JOptionPane.showMessageDialog(this, "Salvataggio Completato!", "Sistema", JOptionPane.INFORMATION_MESSAGE);
         });
-        JButton btnMixer = createButton("ðŸŒ€ Mixer", e -> setTool("color_mixer"));
-        btnMixer.setBackground(new Color(0, 200, 200));
-        leftTools.add(btnMixer);
         btnSave.setBackground(new Color(0, 100, 200));
 
+        // NUOVO: RESET BUTTON
+        JButton btnReset = createButton("âš ï¸ RESET", e -> {
+            int choice = JOptionPane.showConfirmDialog(this,
+                    "Sei sicuro di voler RESETTARE tutto?\nCancellerÃ  tutte le macchine e cambierÃ  posizione alle vene.\nNon si puÃ² annullare.",
+                    "Conferma Reset",
+                    JOptionPane.YES_NO_OPTION,
+                    JOptionPane.WARNING_MESSAGE);
+
+            if (choice == JOptionPane.YES_OPTION) {
+                gridManager.resetUserPlot(playerUuid);
+                // Aspetta un attimo per dare tempo al DB di resettare
+                Timer t = new Timer(500, x -> {
+                    panel.repaint();
+                    JOptionPane.showMessageDialog(this, "Plot resettato e vene rigenerate!", "Reset", JOptionPane.INFORMATION_MESSAGE);
+                });
+                t.setRepeats(false);
+                t.start();
+            }
+        });
+        btnReset.setBackground(new Color(200, 0, 0));
+
         rightSystem.add(lblMoney);
+        rightSystem.add(Box.createHorizontalStrut(20));
         rightSystem.add(btnSave);
+        rightSystem.add(btnReset); // Aggiunto qui
 
         // LAYOUT ASSEMBLY
         JPanel topContainer = new JPanel(new BorderLayout());
@@ -2719,7 +2999,6 @@ public class MatterWorksGUI extends JFrame {
         return btn;
     }
 
-
     private JLabel createLabel(String text) {
         JLabel lbl = new JLabel(text);
         lbl.setForeground(Color.WHITE);
@@ -2740,10 +3019,10 @@ import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.domain.factory.MachineFactory;
 import com.matterworks.core.domain.machines.BlockRegistry;
 import com.matterworks.core.domain.machines.DrillMachine;
-import com.matterworks.core.domain.machines.IGridComponent;
 import com.matterworks.core.domain.machines.PlacedMachine;
 import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.shop.MarketManager;
+import com.matterworks.core.infrastructure.MariaDBAdapter;
 import com.matterworks.core.model.PlotObject;
 import com.matterworks.core.ports.IRepository;
 import com.matterworks.core.ports.IWorldAccess;
@@ -2760,52 +3039,107 @@ public class GridManager {
     private final BlockRegistry blockRegistry;
     private final MarketManager marketManager;
 
-    private final Map<GridPosition, IGridComponent> globalGrid = new ConcurrentHashMap<>();
-    private final List<PlacedMachine> tickingMachines = new ArrayList<>();
+    private final Map<UUID, Map<GridPosition, PlacedMachine>> playerGrids = new ConcurrentHashMap<>();
+    private final Map<UUID, Map<GridPosition, MatterColor>> playerResources = new ConcurrentHashMap<>();
+    private final List<PlacedMachine> tickingMachines = Collections.synchronizedList(new ArrayList<>());
     private final ExecutorService ioExecutor = Executors.newVirtualThreadPerTaskExecutor();
-    private final Map<GridPosition, MatterColor> terrainResources = new ConcurrentHashMap<>();
 
     public GridManager(IRepository repository, IWorldAccess worldAdapter, BlockRegistry registry) {
         this.repository = repository;
         this.worldAdapter = worldAdapter;
         this.blockRegistry = registry;
         this.marketManager = new MarketManager(repository);
-        generateMockTerrain();
     }
 
-    private void generateMockTerrain() {
-        System.out.println("ðŸŒ Generazione Vene Risorse (Mock)...");
-        terrainResources.put(new GridPosition(10, 0, 10), MatterColor.RAW);
-        terrainResources.put(new GridPosition(10, 0, 9), MatterColor.RAW);
-        terrainResources.put(new GridPosition(11, 0, 10), MatterColor.RED);
-        terrainResources.put(new GridPosition(12, 0, 10), MatterColor.BLUE);
-    }
+    // --- NUOVO METODO RESET ---
+    public void resetUserPlot(UUID ownerId) {
+        ioExecutor.submit(() -> {
+            System.out.println("âš ï¸ RESET RICHIESTO PER " + ownerId);
 
-    public Map<GridPosition, MatterColor> getTerrainResources() {
-        return Collections.unmodifiableMap(terrainResources);
+            // 1. Pulisce memoria
+            unloadPlot(ownerId);
+
+            // 2. Pulisce DB (Macchine + Risorse)
+            if (repository instanceof MariaDBAdapter dbAdapter) {
+                dbAdapter.clearPlotData(ownerId);
+            }
+
+            // 3. Ricarica (Questo innescherÃ  la generazione di nuove risorse RANDOM)
+            loadPlotFromDB(ownerId);
+        });
     }
 
     public void loadPlotFromDB(UUID ownerId) {
         ioExecutor.submit(() -> {
             try {
+                unloadPlot(ownerId);
+                if (repository instanceof MariaDBAdapter dbAdapter) {
+                    Long plotId = dbAdapter.getPlotId(ownerId);
+                    if (plotId != null) {
+                        Map<GridPosition, MatterColor> resources = dbAdapter.loadResources(plotId);
+
+                        // SE VUOTO (Nuovo Plot o Appena Resettato) -> GENERA RISORSE
+                        if (resources.isEmpty()) {
+                            System.out.println("ðŸŒ Generazione NUOVE risorse per Plot " + plotId);
+                            generateDefaultResources(dbAdapter, plotId, resources);
+                        }
+
+                        playerResources.put(ownerId, resources);
+                        System.out.println("ðŸ’Ž Risorse caricate: " + resources.size() + " vene.");
+                    }
+                }
+
+                // Carica macchine (dopo reset sarÃ  vuoto)
                 List<PlotObject> dtos = repository.loadPlotMachines(ownerId);
                 for (PlotObject dto : dtos) {
                     PlacedMachine machine = MachineFactory.createFromModel(dto, ownerId);
-                    if (machine != null) {
-                        internalAddMachine(machine);
-                    }
+                    if (machine != null) internalAddMachine(ownerId, machine);
                 }
-                System.out.println("âœ… Plot loaded for " + ownerId + ": " + dtos.size() + " machines.");
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
+            } catch (Exception e) { e.printStackTrace(); }
         });
     }
 
-    public boolean placeMachine(UUID ownerId, GridPosition pos, String typeId) {
-        Vector3Int dim = blockRegistry.getDimensions(typeId);
+    // AGGIORNATO: Generazione Randomica ("Re-enroll")
+    private void generateDefaultResources(MariaDBAdapter db, Long plotId, Map<GridPosition, MatterColor> cache) {
+        Random rnd = new Random();
 
-        if (!isAreaClear(pos, dim)) {
+        // 2-3 Vene di RAW
+        for (int i = 0; i < 3; i++) {
+            createResource(db, plotId, cache, rnd.nextInt(15) + 2, 0, rnd.nextInt(15) + 2, MatterColor.RAW);
+        }
+        // 1 Vena ROSSA
+        createResource(db, plotId, cache, rnd.nextInt(15) + 2, 0, rnd.nextInt(15) + 2, MatterColor.RED);
+        // 1 Vena BLU
+        createResource(db, plotId, cache, rnd.nextInt(15) + 2, 0, rnd.nextInt(15) + 2, MatterColor.BLUE);
+    }
+
+    private void createResource(MariaDBAdapter db, Long plotId, Map<GridPosition, MatterColor> cache, int x, int y, int z, MatterColor type) {
+        // Evita sovrapposizioni nella generazione random
+        if (cache.containsKey(new GridPosition(x, y, z))) return;
+
+        db.saveResource(plotId, x, z, type);
+        cache.put(new GridPosition(x, y, z), type);
+    }
+
+    private void unloadPlot(UUID ownerId) {
+        playerGrids.remove(ownerId);
+        playerResources.remove(ownerId);
+        synchronized (tickingMachines) {
+            tickingMachines.removeIf(m -> m.getOwnerId().equals(ownerId));
+        }
+    }
+
+    // ... (Il resto dei metodi placeMachine, internalAddMachine, etc. RIMANE UGUALE) ...
+    // Assicurati di copiare i metodi esistenti dal file precedente.
+
+    public boolean placeMachine(UUID ownerId, GridPosition pos, String typeId, Direction orientation) {
+        Vector3Int baseDim = blockRegistry.getDimensions(typeId);
+        Vector3Int effectiveDim = baseDim;
+        if (orientation == Direction.EAST || orientation == Direction.WEST) {
+            effectiveDim = new Vector3Int(baseDim.z(), baseDim.y(), baseDim.x());
+        }
+
+        if (!isAreaClear(ownerId, pos, effectiveDim)) {
             System.out.println("âš ï¸ Area ostruita per " + typeId + " a " + pos);
             return false;
         }
@@ -2813,114 +3147,121 @@ public class GridManager {
         MatterColor resourceUnderDrill = null;
         if (typeId.equals("drill_mk1")) {
             if (pos.y() != 0) return false;
-            resourceUnderDrill = terrainResources.get(pos);
-            if (resourceUnderDrill == null) return false;
+            Map<GridPosition, MatterColor> myResources = playerResources.get(ownerId);
+            if (myResources != null) resourceUnderDrill = myResources.get(pos);
+            if (resourceUnderDrill == null) {
+                System.out.println("âš ï¸ Nessuna risorsa sotto la trivella a " + pos);
+                return false;
+            }
         }
 
         PlotObject newDto = new PlotObject(null, null, pos.x(), pos.y(), pos.z(), typeId, null);
         PlacedMachine newMachine = MachineFactory.createFromModel(newDto, ownerId);
-
         if (newMachine == null) return false;
 
+        newMachine.setOrientation(orientation);
         if (newMachine instanceof DrillMachine drill && resourceUnderDrill != null) {
             drill.setResourceToMine(resourceUnderDrill);
         }
 
-        // 1. Aggiungi alla memoria
-        internalAddMachine(newMachine);
+        internalAddMachine(ownerId, newMachine);
         newMachine.onPlace(worldAdapter);
 
-        // 2. SALVATAGGIO DB IMMEDIATO (Insert)
         Long dbId = repository.createMachine(ownerId, newMachine);
         if (dbId != null) {
             newMachine.setDbId(dbId);
-            System.out.println("ðŸ’¾ DB: Nuova macchina salvata ID: " + dbId);
-        } else {
-            System.err.println("âŒ DB: Fallito salvataggio macchina!");
         }
 
         return true;
     }
 
-    public boolean rotateMachine(GridPosition pos, Direction newDir) {
-        PlacedMachine machine = getMachineAt(pos);
-        if (machine == null) return false;
+    private void internalAddMachine(UUID ownerId, PlacedMachine machine) {
+        machine.setGridContext(this);
+        Map<GridPosition, PlacedMachine> myGrid = playerGrids.computeIfAbsent(ownerId, k -> new ConcurrentHashMap<>());
+        Vector3Int dim = machine.getDimensions();
+        GridPosition origin = machine.getPos();
+        for (int x = 0; x < dim.x(); x++) {
+            for (int y = 0; y < dim.y(); y++) {
+                for (int z = 0; z < dim.z(); z++) {
+                    myGrid.put(new GridPosition(origin.x() + x, origin.y() + y, origin.z() + z), machine);
+                }
+            }
+        }
+        tickingMachines.add(machine);
+    }
 
+    public PlacedMachine getMachineAt(UUID ownerId, GridPosition pos) {
+        Map<GridPosition, PlacedMachine> myGrid = playerGrids.get(ownerId);
+        return myGrid != null ? myGrid.get(pos) : null;
+    }
+
+    public boolean isAreaClear(UUID ownerId, GridPosition origin, Vector3Int dim) {
+        Map<GridPosition, PlacedMachine> myGrid = playerGrids.get(ownerId);
+        if (myGrid == null) return true;
+        for (int x = 0; x < dim.x(); x++) {
+            for (int y = 0; y < dim.y(); y++) {
+                for (int z = 0; z < dim.z(); z++) {
+                    if (myGrid.containsKey(new GridPosition(origin.x() + x, origin.y() + y, origin.z() + z))) return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    public boolean rotateMachine(GridPosition pos, Direction newDir, UUID ownerId) {
+        PlacedMachine machine = getMachineAt(ownerId, pos);
+        if (machine == null) return false;
         Direction oldDir = machine.getOrientation();
         if (oldDir == newDir) return true;
-
-        removeFromGridMap(machine);
+        removeFromGridMap(ownerId, machine);
         machine.setOrientation(newDir);
         Vector3Int newDim = machine.getDimensions();
-
-        if (isAreaClear(pos, newDim)) {
-            addToGridMap(machine);
+        if (isAreaClear(ownerId, pos, newDim)) {
+            addToGridMap(ownerId, machine);
             return true;
         } else {
             machine.setOrientation(oldDir);
-            addToGridMap(machine);
-            System.out.println("âš ï¸ Rotazione bloccata: Collisione.");
+            addToGridMap(ownerId, machine);
             return false;
         }
     }
 
-    public void removeComponent(GridPosition pos) {
-        PlacedMachine target = getMachineAt(pos);
+    public void removeComponent(UUID ownerId, GridPosition pos) {
+        PlacedMachine target = getMachineAt(ownerId, pos);
         if (target == null) return;
-
         if (target.getDbId() != null) repository.deleteMachine(target.getDbId());
-        removeFromGridMap(target);
+        removeFromGridMap(ownerId, target);
         synchronized (tickingMachines) { tickingMachines.remove(target); }
         target.onRemove();
     }
 
-    private void internalAddMachine(PlacedMachine machine) {
-        machine.setGridContext(this);
-        addToGridMap(machine);
-        synchronized (tickingMachines) { tickingMachines.add(machine); }
-    }
-
-    private void addToGridMap(PlacedMachine m) {
+    private void addToGridMap(UUID ownerId, PlacedMachine m) {
+        Map<GridPosition, PlacedMachine> grid = playerGrids.get(ownerId);
+        if (grid == null) return;
         Vector3Int dim = m.getDimensions();
         GridPosition origin = m.getPos();
         for (int x = 0; x < dim.x(); x++) {
             for (int y = 0; y < dim.y(); y++) {
                 for (int z = 0; z < dim.z(); z++) {
-                    globalGrid.put(new GridPosition(origin.x() + x, origin.y() + y, origin.z() + z), m);
+                    grid.put(new GridPosition(origin.x() + x, origin.y() + y, origin.z() + z), m);
                 }
             }
         }
     }
 
-    private void removeFromGridMap(PlacedMachine m) {
+    private void removeFromGridMap(UUID ownerId, PlacedMachine m) {
+        Map<GridPosition, PlacedMachine> grid = playerGrids.get(ownerId);
+        if (grid == null) return;
         Vector3Int dim = m.getDimensions();
         GridPosition origin = m.getPos();
         for (int x = 0; x < dim.x(); x++) {
             for (int y = 0; y < dim.y(); y++) {
                 for (int z = 0; z < dim.z(); z++) {
-                    globalGrid.remove(new GridPosition(origin.x() + x, origin.y() + y, origin.z() + z));
+                    grid.remove(new GridPosition(origin.x() + x, origin.y() + y, origin.z() + z));
                 }
             }
         }
     }
-
-    public boolean isAreaClear(GridPosition origin, Vector3Int dim) {
-        for (int x = 0; x < dim.x(); x++) {
-            for (int y = 0; y < dim.y(); y++) {
-                for (int z = 0; z < dim.z(); z++) {
-                    if (globalGrid.containsKey(new GridPosition(origin.x() + x, origin.y() + y, origin.z() + z))) return false;
-                }
-            }
-        }
-        return true;
-    }
-
-    public PlacedMachine getMachineAt(GridPosition pos) {
-        IGridComponent comp = globalGrid.get(pos);
-        return (comp instanceof PlacedMachine pm) ? pm : null;
-    }
-
-    public MarketManager getMarketManager() { return marketManager; }
 
     public void tick(long currentTick) {
         List<PlacedMachine> snapshot;
@@ -2928,13 +3269,22 @@ public class GridManager {
         snapshot.forEach(m -> m.tick(currentTick));
     }
 
-    public Map<GridPosition, PlacedMachine> getSnapshot() {
-        Map<GridPosition, PlacedMachine> uniqueMachines = new HashMap<>();
-        synchronized (tickingMachines) {
-            for (PlacedMachine m : tickingMachines) uniqueMachines.put(m.getPos(), m);
-        }
-        return Collections.unmodifiableMap(uniqueMachines);
+    public Map<GridPosition, PlacedMachine> getSnapshot(UUID ownerId) {
+        Map<GridPosition, PlacedMachine> grid = playerGrids.get(ownerId);
+        return grid != null ? new HashMap<>(grid) : Collections.emptyMap();
     }
+
+    public Map<GridPosition, PlacedMachine> getAllMachinesSnapshot() {
+        Map<GridPosition, PlacedMachine> all = new HashMap<>();
+        for(var map : playerGrids.values()) { all.putAll(map); }
+        return all;
+    }
+
+    public Map<GridPosition, MatterColor> getTerrainResources(UUID ownerId) {
+        return playerResources.getOrDefault(ownerId, Collections.emptyMap());
+    }
+
+    public MarketManager getMarketManager() { return marketManager; }
 }
 
 
@@ -2943,6 +3293,9 @@ FILE: WorldIntegrityValidator.java
 --------------------------------
 package com.matterworks.core.managers;
 
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import com.matterworks.core.common.Direction;
 import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.database.DatabaseManager;
@@ -2954,10 +3307,6 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.*;
 
-/**
- * Servizio di Diagnostica all'Avvio.
- * Verifica che le nuove dimensioni nel DB non creino collisioni con piazzamenti esistenti.
- */
 public class WorldIntegrityValidator {
 
     private final DatabaseManager db;
@@ -2968,22 +3317,14 @@ public class WorldIntegrityValidator {
         this.registry = registry;
     }
 
-    /**
-     * Esegue la scansione completa.
-     * @return true se il mondo Ã¨ valido, false se ci sono conflitti critici.
-     */
     public boolean validateWorldIntegrity() {
         System.out.println("ðŸ” Esecuzione Validazione IntegritÃ  Mondo...");
-
-        // 1. Carica TUTTE le macchine dal DB (Query grezza per velocitÃ )
         Map<Long, List<PlotObject>> machinesByPlot = loadAllMachines();
         boolean hasConflicts = false;
 
-        // 2. Itera Plot per Plot (Le collisioni avvengono solo dentro lo stesso plot)
         for (Map.Entry<Long, List<PlotObject>> entry : machinesByPlot.entrySet()) {
             Long plotId = entry.getKey();
             List<PlotObject> machines = entry.getValue();
-
             if (!validatePlot(plotId, machines)) {
                 hasConflicts = true;
             }
@@ -2991,38 +3332,54 @@ public class WorldIntegrityValidator {
 
         if (hasConflicts) {
             System.err.println("âŒ VALIDAZIONE FALLITA: Trovati conflitti di sovrapposizione!");
-            System.err.println("   Il server potrebbe avviarsi con macchine compenetrate.");
         } else {
             System.out.println("âœ… IntegritÃ  Mondo Verificata: Nessuna collisione rilevata.");
         }
-
         return !hasConflicts;
     }
 
     private boolean validatePlot(Long plotId, List<PlotObject> machines) {
-        // Usiamo un Set per tracciare le posizioni occupate in questo plot
-        Set<GridPosition> occupiedPositions = new HashSet<>();
+        // Mappa: Posizione -> ID Macchina (per sapere CHI occupa cosa)
+        Map<GridPosition, Long> occupiedCells = new HashMap<>();
         boolean plotValid = true;
 
         for (PlotObject machine : machines) {
             String typeId = machine.getTypeId();
-            Vector3Int dim = registry.getDimensions(typeId); // Qui usa le dimensioni NUOVE dal DB
+            Vector3Int baseDim = registry.getDimensions(typeId);
+
+            // --- FIX: CALCOLO DIMENSIONI REALI (ROTAZIONE) ---
+            Vector3Int effectiveDim = baseDim;
+            try {
+                // Leggiamo la rotazione dai metadati grezzi
+                if (machine.getMetaData() != null && machine.getMetaData().has("orientation")) {
+                    String orStr = machine.getMetaData().get("orientation").getAsString();
+                    Direction dir = Direction.valueOf(orStr);
+                    if (dir == Direction.EAST || dir == Direction.WEST) {
+                        effectiveDim = new Vector3Int(baseDim.z(), baseDim.y(), baseDim.x());
+                    }
+                }
+            } catch (Exception e) {
+                // Fallback a dimensioni base se json corrotto
+            }
 
             GridPosition origin = new GridPosition(machine.getX(), machine.getY(), machine.getZ());
 
-            // Simuliamo l'occupazione spaziale
-            for (int x = 0; x < dim.x(); x++) {
-                for (int y = 0; y < dim.y(); y++) {
-                    for (int z = 0; z < dim.z(); z++) {
+            for (int x = 0; x < effectiveDim.x(); x++) {
+                for (int y = 0; y < effectiveDim.y(); y++) {
+                    for (int z = 0; z < effectiveDim.z(); z++) {
                         GridPosition pos = new GridPosition(origin.x() + x, origin.y() + y, origin.z() + z);
 
-                        if (occupiedPositions.contains(pos)) {
-                            System.err.println("   âš ï¸ CONFLITTO nel Plot ID " + plotId + ":");
-                            System.err.println("      Macchina '" + typeId + "' a " + origin);
-                            System.err.println("      Invade lo spazio giÃ  occupato a " + pos);
-                            plotValid = false;
+                        if (occupiedCells.containsKey(pos)) {
+                            Long otherId = occupiedCells.get(pos);
+                            // Se ID diverso, Ã¨ conflitto
+                            if (!otherId.equals(machine.getId())) {
+                                System.err.println("   âš ï¸ CONFLITTO nel Plot ID " + plotId + ":");
+                                System.err.println("      Macchina A (ID " + machine.getId() + ") " + typeId + " a " + origin);
+                                System.err.println("      Macchina B (ID " + otherId + ") occupa giÃ  " + pos);
+                                plotValid = false;
+                            }
                         } else {
-                            occupiedPositions.add(pos);
+                            occupiedCells.put(pos, machine.getId());
                         }
                     }
                 }
@@ -3033,7 +3390,8 @@ public class WorldIntegrityValidator {
 
     private Map<Long, List<PlotObject>> loadAllMachines() {
         Map<Long, List<PlotObject>> result = new HashMap<>();
-        String sql = "SELECT * FROM plot_objects"; // Carica tutto (in produzione usare paginazione se enorme)
+        // FIX: Carichiamo anche i metadati per la rotazione!
+        String sql = "SELECT id, plot_id, x, y, z, type_id, metadata FROM plot_machines";
 
         try (Connection conn = db.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql);
@@ -3045,6 +3403,9 @@ public class WorldIntegrityValidator {
                 obj.setPlotId(rs.getLong("plot_id"));
                 obj.setPosition(rs.getInt("x"), rs.getInt("y"), rs.getInt("z"));
                 obj.setTypeId(rs.getString("type_id"));
+
+                String metaStr = rs.getString("metadata");
+                if (metaStr != null) obj.setMetaDataFromString(metaStr);
 
                 result.computeIfAbsent(obj.getPlotId(), k -> new ArrayList<>()).add(obj);
             }
@@ -3276,7 +3637,7 @@ FILE: GridSaverService.java
 --------------------------------
 package com.matterworks.core.synchronization;
 
-import com.matterworks.core.common.GridPosition; // <--- IMPORT AGGIUNTO
+import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.domain.machines.PlacedMachine;
 import com.matterworks.core.managers.GridManager;
 import com.matterworks.core.ports.IRepository;
@@ -3297,10 +3658,10 @@ public class GridSaverService {
     }
 
     public void autoSaveTask() {
-        // Recupera tutte le macchine
-        Map<GridPosition, PlacedMachine> allMachines = gridManager.getSnapshot();
+        // FIX: Usa getAllMachinesSnapshot() invece di getSnapshot()
+        // Questo recupera le macchine di TUTTI i giocatori per salvarle.
+        Map<GridPosition, PlacedMachine> allMachines = gridManager.getAllMachinesSnapshot();
 
-        // Filtra quelle "sporche" (modificate)
         List<PlacedMachine> dirtyMachines = allMachines.values().stream()
                 .filter(PlacedMachine::isDirty)
                 .distinct()
@@ -3308,7 +3669,6 @@ public class GridSaverService {
 
         if (dirtyMachines.isEmpty()) return;
 
-        // Raggruppa per Proprietario (Plot)
         Map<UUID, List<PlacedMachine>> machinesByOwner = dirtyMachines.stream()
                 .collect(Collectors.groupingBy(PlacedMachine::getOwnerId));
 
@@ -3316,12 +3676,7 @@ public class GridSaverService {
 
         for (Map.Entry<UUID, List<PlacedMachine>> entry : machinesByOwner.entrySet()) {
             List<PlacedMachine> toSave = entry.getValue();
-
-            // Salva nel DB (aggiorna metadati)
-            // ORA IL METODO ESISTE NELL'INTERFACCIA
             repository.updateMachinesMetadata(toSave);
-
-            // Pulisce il flag dirty
             toSave.forEach(PlacedMachine::cleanDirty);
         }
     }
