@@ -1,7 +1,7 @@
 package com.matterworks.core.database.dao;
 
 import com.matterworks.core.database.DatabaseManager;
-import com.matterworks.core.database.UuidUtils; // Importante
+import com.matterworks.core.database.UuidUtils;
 import com.matterworks.core.domain.player.PlayerProfile;
 
 import java.sql.Connection;
@@ -14,13 +14,14 @@ public class PlayerDAO {
 
     private final DatabaseManager db;
 
-    // UUID è BINARY(16) nel DB
+    // UPDATE: Aggiunto 'rank' alla query
     private static final String UPSERT_SQL = """
-        INSERT INTO players (uuid, username, money) 
-        VALUES (?, ?, ?)
+        INSERT INTO players (uuid, username, money, rank) 
+        VALUES (?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE 
             username = VALUES(username),
             money = VALUES(money),
+            rank = VALUES(rank),
             last_login = CURRENT_TIMESTAMP
     """;
 
@@ -34,10 +35,10 @@ public class PlayerDAO {
         try (Connection conn = db.getConnection();
              PreparedStatement ps = conn.prepareStatement(UPSERT_SQL)) {
 
-            // FIX: Usiamo setBytes invece di setString
             ps.setBytes(1, UuidUtils.asBytes(p.getPlayerId()));
             ps.setString(2, p.getUsername());
             ps.setDouble(3, p.getMoney());
+            ps.setString(4, p.getRank().name()); // Salva Enum come Stringa
 
             ps.executeUpdate();
 
@@ -50,22 +51,29 @@ public class PlayerDAO {
         try (Connection conn = db.getConnection();
              PreparedStatement ps = conn.prepareStatement(SELECT_SQL)) {
 
-            // FIX: Usiamo setBytes per la ricerca
             ps.setBytes(1, UuidUtils.asBytes(uuid));
 
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) {
-                    // FIX: Ricostruiamo l'UUID dai byte (anche se l'abbiamo già passato, è buona pratica)
-                    // In questo caso usiamo l'UUID passato per creare l'oggetto
                     PlayerProfile p = new PlayerProfile(uuid);
                     p.setUsername(rs.getString("username"));
                     p.setMoney(rs.getDouble("money"));
+
+                    // Carica Rank (con fallback se null)
+                    String rankStr = rs.getString("rank");
+                    if (rankStr != null) {
+                        try {
+                            p.setRank(PlayerProfile.PlayerRank.valueOf(rankStr));
+                        } catch (IllegalArgumentException e) {
+                            p.setRank(PlayerProfile.PlayerRank.PLAYER);
+                        }
+                    }
                     return p;
                 }
             }
         } catch (SQLException e) {
             e.printStackTrace();
         }
-        return null;
+        return null; // Non trovato
     }
 }

@@ -1,24 +1,45 @@
 package com.matterworks.core.ports;
 
 import com.matterworks.core.domain.machines.PlacedMachine;
+import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.model.PlotObject;
+import com.matterworks.core.common.GridPosition;
 
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 public interface IRepository {
 
+    // --- PLAYER & PROFILE ---
     PlayerProfile loadPlayerProfile(UUID uuid);
     void savePlayerProfile(PlayerProfile profile);
 
+    // --- PLOT DATA ---
     List<PlotObject> loadPlotMachines(UUID ownerId);
     Long createMachine(UUID ownerId, PlacedMachine machine);
     void deleteMachine(Long dbId);
+
+    // Aggiornamento batch dei metadati (per autosave)
     void updateMachinesMetadata(List<PlacedMachine> machines);
 
-    void clearPlotData(UUID ownerId); // Metodo aggiunto nel passo precedente
+    // Reset totale del plot
+    void clearPlotData(UUID ownerId);
+    Long getPlotId(UUID ownerId);
 
-    // --- NUOVO: CONTROLLO INVENTARIO PER BAILOUT ---
+    // --- RISORSE (VENE) ---
+    void saveResource(Long plotId, int x, int z, MatterColor type);
+    Map<GridPosition, MatterColor> loadResources(Long plotId);
+
+    // --- INVENTARIO (NUOVI METODI) ---
+    /**
+     * Restituisce la quantità di un item posseduta dal giocatore.
+     */
     int getInventoryItemCount(UUID ownerId, String itemId);
+
+    /**
+     * Modifica la quantità di un item (positivo = aggiungi, negativo = rimuovi).
+     */
+    void modifyInventoryItem(UUID ownerId, String itemId, int delta);
 }

@@ -2,7 +2,7 @@ package com.matterworks.core.infrastructure;
 
 import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.database.DatabaseManager;
-import com.matterworks.core.database.UuidUtils;
+import com.matterworks.core.database.dao.InventoryDAO; // Assicurati che esista!
 import com.matterworks.core.database.dao.PlayerDAO;
 import com.matterworks.core.database.dao.PlotDAO;
 import com.matterworks.core.database.dao.PlotResourceDAO;
@@ -14,7 +14,6 @@ import com.matterworks.core.ports.IRepository;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.List;
 import java.util.Map;
@@ -26,37 +25,31 @@ public class MariaDBAdapter implements IRepository {
     private final PlayerDAO playerDAO;
     private final PlotDAO plotDAO;
     private final PlotResourceDAO resourceDAO;
+    private final InventoryDAO inventoryDAO; // NUOVO
 
     public MariaDBAdapter(DatabaseManager dbManager) {
         this.dbManager = dbManager;
         this.playerDAO = new PlayerDAO(dbManager);
         this.plotDAO = new PlotDAO(dbManager);
         this.resourceDAO = new PlotResourceDAO(dbManager);
+        this.inventoryDAO = new InventoryDAO(dbManager); // Inizializza
     }
 
-    // --- NUOVO: Conta oggetti nell'inventario ---
+    // --- IMPLEMENTAZIONE INVENTARIO ---
     @Override
     public int getInventoryItemCount(UUID ownerId, String itemId) {
-        String sql = "SELECT quantity FROM player_inventory WHERE player_uuid = ? AND item_id = ?";
-        try (Connection conn = dbManager.getConnection();
-             PreparedStatement stmt = conn.prepareStatement(sql)) {
-
-            stmt.setBytes(1, UuidUtils.asBytes(ownerId));
-            stmt.setString(2, itemId);
-
-            try (ResultSet rs = stmt.executeQuery()) {
-                if (rs.next()) return rs.getInt("quantity");
-            }
-        } catch (SQLException e) {
-            e.printStackTrace();
-        }
-        return 0;
+        return inventoryDAO.getItemCount(ownerId, itemId);
     }
 
-    // ... (Il resto dei metodi rimane invariato: clearPlotData, getPlotId, saveResource, etc.) ...
-    // Assicurati di mantenere tutto il codice precedente!
+    @Override
+    public void modifyInventoryItem(UUID ownerId, String itemId, int delta) {
+        inventoryDAO.modifyItemCount(ownerId, itemId, delta);
+    }
 
-    @Override public void clearPlotData(UUID ownerId) {
+    // --- ALTRI METODI ESISTENTI ---
+
+    @Override
+    public void clearPlotData(UUID ownerId) {
         Long plotId = plotDAO.findPlotIdByOwner(ownerId);
         if (plotId == null) return;
         try (Connection conn = dbManager.getConnection()) {
