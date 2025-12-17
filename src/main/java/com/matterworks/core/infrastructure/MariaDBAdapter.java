@@ -2,7 +2,7 @@ package com.matterworks.core.infrastructure;
 
 import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.database.DatabaseManager;
-import com.matterworks.core.database.dao.InventoryDAO; // Assicurati che esista!
+import com.matterworks.core.database.dao.InventoryDAO;
 import com.matterworks.core.database.dao.PlayerDAO;
 import com.matterworks.core.database.dao.PlotDAO;
 import com.matterworks.core.database.dao.PlotResourceDAO;
@@ -15,6 +15,7 @@ import com.matterworks.core.ports.IRepository;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -25,17 +26,31 @@ public class MariaDBAdapter implements IRepository {
     private final PlayerDAO playerDAO;
     private final PlotDAO plotDAO;
     private final PlotResourceDAO resourceDAO;
-    private final InventoryDAO inventoryDAO; // NUOVO
+    private final InventoryDAO inventoryDAO;
 
     public MariaDBAdapter(DatabaseManager dbManager) {
         this.dbManager = dbManager;
         this.playerDAO = new PlayerDAO(dbManager);
         this.plotDAO = new PlotDAO(dbManager);
         this.resourceDAO = new PlotResourceDAO(dbManager);
-        this.inventoryDAO = new InventoryDAO(dbManager); // Inizializza
+        this.inventoryDAO = new InventoryDAO(dbManager);
     }
 
-    // --- IMPLEMENTAZIONE INVENTARIO ---
+    // --- GETTER PER IL CORE ---
+    public DatabaseManager getDbManager() {
+        return dbManager;
+    }
+
+    // --- PLAYER & INVENTORY ---
+    @Override
+    public PlayerProfile loadPlayerProfile(UUID uuid) { return playerDAO.load(uuid); }
+
+    @Override
+    public void savePlayerProfile(PlayerProfile profile) { playerDAO.save(profile); }
+
+    @Override
+    public List<PlayerProfile> getAllPlayers() { return playerDAO.loadAll(); }
+
     @Override
     public int getInventoryItemCount(UUID ownerId, String itemId) {
         return inventoryDAO.getItemCount(ownerId, itemId);
@@ -46,35 +61,21 @@ public class MariaDBAdapter implements IRepository {
         inventoryDAO.modifyItemCount(ownerId, itemId, delta);
     }
 
-    // --- ALTRI METODI ESISTENTI ---
+    // --- PLOT MANAGEMENT ---
+    @Override
+    public List<PlotObject> loadPlotMachines(UUID ownerId) { return plotDAO.loadMachines(ownerId); }
 
     @Override
-    public void clearPlotData(UUID ownerId) {
-        Long plotId = plotDAO.findPlotIdByOwner(ownerId);
-        if (plotId == null) return;
-        try (Connection conn = dbManager.getConnection()) {
-            try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM plot_machines WHERE plot_id = ?")) {
-                stmt.setLong(1, plotId); stmt.executeUpdate();
-            }
-            try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM plot_resources WHERE plot_id = ?")) {
-                stmt.setLong(1, plotId); stmt.executeUpdate();
-            }
-            System.out.println("🔥 WIPE COMPLETO per Plot ID " + plotId);
-        } catch (SQLException e) { e.printStackTrace(); }
-    }
-
-    public Long getPlotId(UUID ownerId) { return plotDAO.findPlotIdByOwner(ownerId); }
-    public void saveResource(Long plotId, int x, int z, MatterColor type) { resourceDAO.addResource(plotId, x, z, type); }
-    public Map<GridPosition, MatterColor> loadResources(Long plotId) { return resourceDAO.loadResources(plotId); }
-    @Override public PlayerProfile loadPlayerProfile(UUID uuid) { return playerDAO.load(uuid); }
-    @Override public void savePlayerProfile(PlayerProfile profile) { playerDAO.save(profile); }
-    @Override public List<PlotObject> loadPlotMachines(UUID ownerId) { return plotDAO.loadMachines(ownerId); }
-    @Override public Long createMachine(UUID ownerId, PlacedMachine machine) {
+    public Long createMachine(UUID ownerId, PlacedMachine machine) {
         String jsonMeta = machine.serialize().toString();
         return plotDAO.insertMachine(ownerId, machine.getTypeId(), machine.getPos().x(), machine.getPos().y(), machine.getPos().z(), jsonMeta);
     }
-    @Override public void deleteMachine(Long dbId) { plotDAO.removeMachine(dbId); }
-    @Override public void updateMachinesMetadata(List<PlacedMachine> machines) {
+
+    @Override
+    public void deleteMachine(Long dbId) { plotDAO.removeMachine(dbId); }
+
+    @Override
+    public void updateMachinesMetadata(List<PlacedMachine> machines) {
         if (machines == null || machines.isEmpty()) return;
         String sql = "UPDATE plot_machines SET metadata = ? WHERE id = ?";
         try (Connection conn = dbManager.getConnection(); PreparedStatement stmt = conn.prepareStatement(sql)) {
@@ -87,4 +88,46 @@ public class MariaDBAdapter implements IRepository {
             stmt.executeBatch();
         } catch (SQLException e) { e.printStackTrace(); }
     }
+
+    @Override
+    public void clearPlotData(UUID ownerId) {
+        Long plotId = plotDAO.findPlotIdByOwner(ownerId);
+        if (plotId == null) return;
+        try (Connection conn = dbManager.getConnection()) {
+            try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM plot_machines WHERE plot_id = ?")) {
+                stmt.setLong(1, plotId); stmt.executeUpdate();
+            }
+            try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM plot_resources WHERE plot_id = ?")) {
+                stmt.setLong(1, plotId); stmt.executeUpdate();
+            }
+        } catch (SQLException e) { e.printStackTrace(); }
+    }
+    public double getSosThreshold() {
+        String sql = "SELECT sos_threshold FROM server_gamestate WHERE id = 1";
+        try (Connection conn = dbManager.getConnection();
+             java.sql.PreparedStatement ps = conn.prepareStatement(sql);
+             java.sql.ResultSet rs = ps.executeQuery()) {
+            if (rs.next()) return rs.getDouble("sos_threshold");
+        } catch (java.sql.SQLException e) { e.printStackTrace(); }
+        return 500.0; // Fallback
+    }
+
+    public Map<String, Integer> getFullInventory(UUID ownerId) {
+        Map<String, Integer> inventory = new HashMap<>();
+        String sql = "SELECT item_id, quantity FROM player_inventory WHERE player_uuid = ?";
+        try (Connection conn = dbManager.getConnection();
+             java.sql.PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setBytes(1, com.matterworks.core.database.UuidUtils.asBytes(ownerId));
+            try (java.sql.ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    inventory.put(rs.getString("item_id"), rs.getInt("quantity"));
+                }
+            }
+        } catch (java.sql.SQLException e) { e.printStackTrace(); }
+        return inventory;
+    }
+
+    @Override public Long getPlotId(UUID ownerId) { return plotDAO.findPlotIdByOwner(ownerId); }
+    @Override public void saveResource(Long plotId, int x, int z, MatterColor type) { resourceDAO.addResource(plotId, x, z, type); }
+    @Override public Map<GridPosition, MatterColor> loadResources(Long plotId) { return resourceDAO.loadResources(plotId); }
 }

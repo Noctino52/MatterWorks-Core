@@ -4,9 +4,7 @@ import com.matterworks.core.common.Direction;
 import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.domain.factory.MachineFactory;
-import com.matterworks.core.domain.machines.BlockRegistry;
-import com.matterworks.core.domain.machines.DrillMachine;
-import com.matterworks.core.domain.machines.PlacedMachine;
+import com.matterworks.core.domain.machines.*;
 import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.domain.shop.MarketManager;
@@ -39,288 +37,219 @@ public class GridManager {
         this.marketManager = new MarketManager(repository);
     }
 
-    // --- NUOVO: SISTEMA SHOP (Soldi -> Item) ---
+    private String log(UUID id) {
+        PlayerProfile p = repository.loadPlayerProfile(id);
+        return "[" + (p != null ? p.getUsername() : "Unknown") + "] ";
+    }
+
+    // --- FIX: METODO createNewPlayer ---
+    public PlayerProfile createNewPlayer(String username) {
+        UUID newUuid = UUID.randomUUID();
+        PlayerProfile p = new PlayerProfile(newUuid);
+        p.setUsername(username);
+        p.setMoney(1000.0);
+        p.setRank(PlayerProfile.PlayerRank.PLAYER);
+
+        repository.savePlayerProfile(p);
+
+        if (repository instanceof MariaDBAdapter adapter) {
+            Long plotId = new com.matterworks.core.database.dao.PlotDAO(adapter.getDbManager())
+                    .createPlot(newUuid, 1, 0, 0);
+
+            if (plotId != null) {
+                generateDefaultResources(adapter, plotId, new HashMap<>());
+                System.out.println("[System] Initialized plot and veins for: " + username);
+            }
+        }
+        return p;
+    }
+
+    // --- FIX: METODO attemptBailout (SOS) ---
+    public boolean attemptBailout(UUID ownerId) {
+        PlayerProfile player = repository.loadPlayerProfile(ownerId);
+        if (player == null || !(repository instanceof MariaDBAdapter adapter)) return false;
+
+        double threshold = adapter.getSosThreshold(); // Recupera da server_gamestate
+
+        // Verifica se il giocatore è effettivamente sotto la soglia di povertà
+        if (player.getMoney() < threshold) {
+            double refill = threshold - player.getMoney();
+            player.setMoney(threshold);
+            repository.savePlayerProfile(player);
+            System.out.println(log(ownerId) + "🚑 SOS APPROVATO: Saldo ripristinato a $" + threshold);
+            return true;
+        }
+        System.out.println(log(ownerId) + "❌ SOS NEGATO: Saldo già sopra la soglia.");
+        return false;
+    }
+
     public boolean buyItem(UUID playerId, String itemId, int amount) {
         var stats = blockRegistry.getStats(itemId);
-        double totalCost = stats.basePrice() * amount;
-
+        double cost = stats.basePrice() * amount;
         PlayerProfile p = repository.loadPlayerProfile(playerId);
         if (p == null) return false;
 
-        // Se Admin, compra gratis (opzionale, ma utile per debug)
-        if (!p.isAdmin() && p.getMoney() < totalCost) {
-            System.out.println("💸 Fondi insufficienti per " + amount + "x " + itemId);
+        if (!p.isAdmin() && p.getMoney() < cost) {
+            System.out.println(log(playerId) + "💸 Fondi insufficienti per lo shop.");
             return false;
         }
 
         if (!p.isAdmin()) {
-            p.modifyMoney(-totalCost);
+            p.modifyMoney(-cost);
             repository.savePlayerProfile(p);
         }
-
-        // Aggiungi all'inventario
         repository.modifyInventoryItem(playerId, itemId, amount);
-        System.out.println("🛒 SHOP: " + playerId + " ha comprato " + amount + "x " + itemId);
+        System.out.println(log(playerId) + "🛒 Acquisto: " + amount + "x " + itemId);
         return true;
     }
 
-    // --- PIAZZAMENTO CON CONTROLLO INVENTARIO ---
+    public void resetUserPlot(UUID ownerId) {
+        ioExecutor.submit(() -> {
+            System.out.println(log(ownerId) + "⚠️ Reset totale del plot richiesto.");
+            unloadPlot(ownerId);
+            if (repository instanceof MariaDBAdapter db) db.clearPlotData(ownerId);
+            loadPlotFromDB(ownerId);
+        });
+    }
+
     public boolean placeMachine(UUID ownerId, GridPosition pos, String typeId, Direction orientation) {
-        // 1. Check Profilo e Rango
         PlayerProfile player = repository.loadPlayerProfile(ownerId);
         if (player == null) return false;
-        boolean isAdmin = player.isAdmin();
 
-        // 2. Check Inventario (Se NON Admin)
-        if (!isAdmin) {
-            int count = repository.getInventoryItemCount(ownerId, typeId);
-            if (count <= 0) {
-                System.out.println("🎒 Inventario vuoto! Ti serve: " + typeId);
+        // Requisito: Trivelle solo su vene [cite: 673-674]
+        if (typeId.equals("drill_mk1")) {
+            Map<GridPosition, MatterColor> res = playerResources.get(ownerId);
+            if (res == null || !res.containsKey(pos)) {
+                System.out.println(log(ownerId) + "🚫 Fallito: Trivella piazzata fuori vena a " + pos);
                 return false;
             }
         }
 
-        // 3. Collisioni e Logica
-        var stats = blockRegistry.getStats(typeId);
-        Vector3Int baseDim = stats.dimensions();
-        Vector3Int effectiveDim = baseDim;
-        if (orientation == Direction.EAST || orientation == Direction.WEST) {
-            effectiveDim = new Vector3Int(baseDim.z(), baseDim.y(), baseDim.x());
-        }
-
-        if (!isAreaClear(ownerId, pos, effectiveDim)) {
-            System.out.println("⚠️ Area ostruita per " + typeId + " a " + pos);
+        boolean isAdmin = player.isAdmin();
+        if (!isAdmin && repository.getInventoryItemCount(ownerId, typeId) <= 0) {
+            System.out.println(log(ownerId) + "🎒 Fallito: Inventario vuoto.");
             return false;
         }
 
-        MatterColor resourceUnderDrill = null;
-        if (typeId.equals("drill_mk1")) {
-            if (pos.y() != 0) return false;
-            Map<GridPosition, MatterColor> myResources = playerResources.get(ownerId);
-            if (myResources != null) resourceUnderDrill = myResources.get(pos);
-            if (resourceUnderDrill == null) return false;
-        }
+        var stats = blockRegistry.getStats(typeId);
+        Vector3Int dim = stats.dimensions();
+        Vector3Int effDim = (orientation == Direction.EAST || orientation == Direction.WEST) ? new Vector3Int(dim.z(), dim.y(), dim.x()) : dim;
 
-        // 4. Consumo Item (Se NON Admin)
-        if (!isAdmin) {
-            repository.modifyInventoryItem(ownerId, typeId, -1);
-            System.out.println("🔻 Inventario: Usato 1x " + typeId);
-        } else {
-            System.out.println("🛡️ Admin Bypass: Piazzato " + typeId + " gratis.");
-        }
+        if (!isAreaClear(ownerId, pos, effDim)) return false;
 
-        // 5. Creazione e Salvataggio
-        PlotObject newDto = new PlotObject(null, null, pos.x(), pos.y(), pos.z(), typeId, null);
-        PlacedMachine newMachine = MachineFactory.createFromModel(newDto, ownerId);
-        if (newMachine == null) return false; // Should reimburse if failed later, but here is safe
+        if (!isAdmin) repository.modifyInventoryItem(ownerId, typeId, -1);
 
-        newMachine.setOrientation(orientation);
-        if (newMachine instanceof DrillMachine drill && resourceUnderDrill != null) {
-            drill.setResourceToMine(resourceUnderDrill);
-        }
+        PlotObject dto = new PlotObject(null, null, pos.x(), pos.y(), pos.z(), typeId, null);
+        PlacedMachine m = MachineFactory.createFromModel(dto, ownerId);
+        if (m == null) return false;
 
-        internalAddMachine(ownerId, newMachine);
-        newMachine.onPlace(worldAdapter);
+        m.setOrientation(orientation);
+        if (m instanceof DrillMachine drill) drill.setResourceToMine(playerResources.get(ownerId).get(pos));
 
-        Long dbId = repository.createMachine(ownerId, newMachine);
-        if (dbId != null) newMachine.setDbId(dbId);
-
+        internalAddMachine(ownerId, m);
+        m.onPlace(worldAdapter);
+        repository.createMachine(ownerId, m);
+        System.out.println(log(ownerId) + "✅ Piazzato " + typeId + " a " + pos);
         return true;
     }
 
-    // --- RIMOZIONE CON RESTITUZIONE ITEM ---
+    // --- METODI DI SUPPORTO (Snapshots, Market, Inventory) ---
+    public MarketManager getMarketManager() { return marketManager; }
+    public Map<GridPosition, PlacedMachine> getAllMachinesSnapshot() {
+        Map<GridPosition, PlacedMachine> all = new HashMap<>();
+        for (var map : playerGrids.values()) all.putAll(map);
+        return all;
+    }
+
+    // ... (loadPlotFromDB, internalAddMachine, generateDefaultResources rimangono identici)
+    public void loadPlotFromDB(UUID ownerId) {
+        ioExecutor.submit(() -> {
+            try {
+                unloadPlot(ownerId);
+                if (repository instanceof MariaDBAdapter db) {
+                    Long pid = db.getPlotId(ownerId);
+                    if (pid != null) {
+                        Map<GridPosition, MatterColor> res = db.loadResources(pid);
+                        if (res.isEmpty()) generateDefaultResources(db, pid, res);
+                        playerResources.put(ownerId, res);
+                    }
+                }
+                List<PlotObject> dtos = repository.loadPlotMachines(ownerId);
+                for(PlotObject d : dtos) {
+                    PlacedMachine m = MachineFactory.createFromModel(d, ownerId);
+                    if(m!=null) internalAddMachine(ownerId, m);
+                }
+            } catch(Exception e) { e.printStackTrace(); }
+        });
+    }
+
+    private void generateDefaultResources(MariaDBAdapter db, Long plotId, Map<GridPosition, MatterColor> cache) {
+        Random rnd = new Random();
+        for (int i = 0; i < 3; i++) createResource(db, plotId, cache, rnd.nextInt(15)+2, 0, rnd.nextInt(15)+2, MatterColor.RAW);
+        createResource(db, plotId, cache, rnd.nextInt(15)+2, 0, rnd.nextInt(15)+2, MatterColor.RED);
+        createResource(db, plotId, cache, rnd.nextInt(15)+2, 0, rnd.nextInt(15)+2, MatterColor.BLUE);
+    }
+
+    private void createResource(MariaDBAdapter db, Long pid, Map<GridPosition, MatterColor> c, int x, int y, int z, MatterColor t) {
+        if(c.containsKey(new GridPosition(x,y,z))) return;
+        db.saveResource(pid, x, z, t); c.put(new GridPosition(x,y,z), t);
+    }
+
+    private void unloadPlot(UUID id) {
+        playerGrids.remove(id); playerResources.remove(id);
+        synchronized(tickingMachines) { tickingMachines.removeIf(m -> m.getOwnerId().equals(id)); }
+    }
+
+    private void internalAddMachine(UUID id, PlacedMachine m) {
+        m.setGridContext(this);
+        Map<GridPosition, PlacedMachine> grid = playerGrids.computeIfAbsent(id, k->new ConcurrentHashMap<>());
+        Vector3Int dim = m.getDimensions(); GridPosition o = m.getPos();
+        for(int x=0;x<dim.x();x++) for(int y=0;y<dim.y();y++) for(int z=0;z<dim.z();z++)
+            grid.put(new GridPosition(o.x()+x, o.y()+y, o.z()+z), m);
+        tickingMachines.add(m);
+    }
+
     public void removeComponent(UUID ownerId, GridPosition pos) {
         PlacedMachine target = getMachineAt(ownerId, pos);
         if (target == null) return;
-
-        // Restituisci SEMPRE l'item (anche agli admin, non fa male)
         repository.modifyInventoryItem(ownerId, target.getTypeId(), 1);
-        System.out.println("🎒 Recuperato: 1x " + target.getTypeId());
-
         if (target.getDbId() != null) repository.deleteMachine(target.getDbId());
         removeFromGridMap(ownerId, target);
         synchronized (tickingMachines) { tickingMachines.remove(target); }
         target.onRemove();
     }
 
-    // --- BAILOUT (SOS) ---
-    public boolean attemptBailout(UUID ownerId) {
-        PlayerProfile player = repository.loadPlayerProfile(ownerId);
-        if (player == null || player.getMoney() >= 500.0) return false;
-
-        int drills = countAsset(ownerId, "drill_mk1");
-        int belts  = countAsset(ownerId, "conveyor_belt");
-        int nexus  = countAsset(ownerId, "nexus_core");
-
-        if (drills < 1 || belts < 2 || nexus < 1) {
-            System.out.println("🚑 BAILOUT APPROVATO: Giocatore bloccato. Erogazione fondi...");
-            player.modifyMoney(500.0);
-            repository.savePlayerProfile(player);
-            return true;
-        }
-        return false;
-    }
-
-    private int countAsset(UUID ownerId, String typeId) {
-        int worldCount = 0;
-        Map<GridPosition, PlacedMachine> grid = playerGrids.get(ownerId);
-        if (grid != null) {
-            worldCount = (int) grid.values().stream().filter(m -> m.getTypeId().equals(typeId)).count();
-        }
-        int invCount = repository.getInventoryItemCount(ownerId, typeId);
-        return worldCount + invCount;
-    }
-
-    // ... (METODI STANDARD DI GESTIONE GRID - COPIARE DAL VECCHIO FILE) ...
-    // resetUserPlot, loadPlotFromDB, generateDefaultResources, internalAddMachine, etc.
-
-    public void resetUserPlot(UUID ownerId) {
-        ioExecutor.submit(() -> {
-            unloadPlot(ownerId);
-            if (repository instanceof MariaDBAdapter dbAdapter) dbAdapter.clearPlotData(ownerId);
-            loadPlotFromDB(ownerId);
-        });
-    }
-
-    public void loadPlotFromDB(UUID ownerId) {
-        ioExecutor.submit(() -> {
-            try {
-                unloadPlot(ownerId);
-                if (repository instanceof MariaDBAdapter dbAdapter) {
-                    Long plotId = dbAdapter.getPlotId(ownerId);
-                    if (plotId != null) {
-                        Map<GridPosition, MatterColor> resources = dbAdapter.loadResources(plotId);
-                        if (resources.isEmpty()) generateDefaultResources(dbAdapter, plotId, resources);
-                        playerResources.put(ownerId, resources);
-                    }
-                }
-                List<PlotObject> dtos = repository.loadPlotMachines(ownerId);
-                for (PlotObject dto : dtos) {
-                    PlacedMachine machine = MachineFactory.createFromModel(dto, ownerId);
-                    if (machine != null) internalAddMachine(ownerId, machine);
-                }
-            } catch (Exception e) { e.printStackTrace(); }
-        });
-    }
-
-    private void generateDefaultResources(MariaDBAdapter db, Long plotId, Map<GridPosition, MatterColor> cache) {
-        Random rnd = new Random();
-        for (int i = 0; i < 3; i++) createResource(db, plotId, cache, rnd.nextInt(15) + 2, 0, rnd.nextInt(15) + 2, MatterColor.RAW);
-        createResource(db, plotId, cache, rnd.nextInt(15) + 2, 0, rnd.nextInt(15) + 2, MatterColor.RED);
-        createResource(db, plotId, cache, rnd.nextInt(15) + 2, 0, rnd.nextInt(15) + 2, MatterColor.BLUE);
-    }
-
-    private void createResource(MariaDBAdapter db, Long plotId, Map<GridPosition, MatterColor> cache, int x, int y, int z, MatterColor type) {
-        if (cache.containsKey(new GridPosition(x, y, z))) return;
-        db.saveResource(plotId, x, z, type);
-        cache.put(new GridPosition(x, y, z), type);
-    }
-
-    private void unloadPlot(UUID ownerId) {
-        playerGrids.remove(ownerId);
-        playerResources.remove(ownerId);
-        synchronized (tickingMachines) { tickingMachines.removeIf(m -> m.getOwnerId().equals(ownerId)); }
-    }
-
-    private void internalAddMachine(UUID ownerId, PlacedMachine machine) {
-        machine.setGridContext(this);
-        Map<GridPosition, PlacedMachine> myGrid = playerGrids.computeIfAbsent(ownerId, k -> new ConcurrentHashMap<>());
-        Vector3Int dim = machine.getDimensions();
-        GridPosition origin = machine.getPos();
-        for (int x = 0; x < dim.x(); x++) {
-            for (int y = 0; y < dim.y(); y++) {
-                for (int z = 0; z < dim.z(); z++) {
-                    myGrid.put(new GridPosition(origin.x() + x, origin.y() + y, origin.z() + z), machine);
-                }
-            }
-        }
-        tickingMachines.add(machine);
-    }
-
-    private void addToGridMap(UUID ownerId, PlacedMachine m) {
-        Map<GridPosition, PlacedMachine> grid = playerGrids.get(ownerId);
+    private void removeFromGridMap(UUID id, PlacedMachine m) {
+        Map<GridPosition, PlacedMachine> grid = playerGrids.get(id);
         if (grid == null) return;
-        Vector3Int dim = m.getDimensions();
-        GridPosition origin = m.getPos();
-        for (int x = 0; x < dim.x(); x++) {
-            for (int y = 0; y < dim.y(); y++) {
-                for (int z = 0; z < dim.z(); z++) {
-                    grid.put(new GridPosition(origin.x() + x, origin.y() + y, origin.z() + z), m);
-                }
-            }
-        }
+        Vector3Int dim = m.getDimensions(); GridPosition o = m.getPos();
+        for(int x=0;x<dim.x();x++) for(int y=0;y<dim.y();y++) for(int z=0;z<dim.z();z++)
+            grid.remove(new GridPosition(o.x()+x, o.y()+y, o.z()+z));
     }
 
-    private void removeFromGridMap(UUID ownerId, PlacedMachine m) {
-        Map<GridPosition, PlacedMachine> grid = playerGrids.get(ownerId);
-        if (grid == null) return;
-        Vector3Int dim = m.getDimensions();
-        GridPosition origin = m.getPos();
-        for (int x = 0; x < dim.x(); x++) {
-            for (int y = 0; y < dim.y(); y++) {
-                for (int z = 0; z < dim.z(); z++) {
-                    grid.remove(new GridPosition(origin.x() + x, origin.y() + y, origin.z() + z));
-                }
-            }
-        }
+    public PlacedMachine getMachineAt(UUID id, GridPosition pos) {
+        Map<GridPosition, PlacedMachine> g = playerGrids.get(id);
+        return g!=null ? g.get(pos) : null;
     }
 
-    public PlacedMachine getMachineAt(UUID ownerId, GridPosition pos) {
-        Map<GridPosition, PlacedMachine> myGrid = playerGrids.get(ownerId);
-        return myGrid != null ? myGrid.get(pos) : null;
-    }
-
-    public boolean isAreaClear(UUID ownerId, GridPosition origin, Vector3Int dim) {
-        Map<GridPosition, PlacedMachine> myGrid = playerGrids.get(ownerId);
-        if (myGrid == null) return true;
-        for (int x = 0; x < dim.x(); x++) {
-            for (int y = 0; y < dim.y(); y++) {
-                for (int z = 0; z < dim.z(); z++) {
-                    if (myGrid.containsKey(new GridPosition(origin.x() + x, origin.y() + y, origin.z() + z))) return false;
-                }
-            }
-        }
+    public boolean isAreaClear(UUID id, GridPosition o, Vector3Int dim) {
+        Map<GridPosition, PlacedMachine> g = playerGrids.get(id);
+        if(g==null) return true;
+        for(int x=0;x<dim.x();x++) for(int y=0;y<dim.y();y++) for(int z=0;z<dim.z();z++)
+            if(g.containsKey(new GridPosition(o.x()+x, o.y()+y, o.z()+z))) return false;
         return true;
     }
 
-    public boolean rotateMachine(GridPosition pos, Direction newDir, UUID ownerId) {
-        PlacedMachine machine = getMachineAt(ownerId, pos);
-        if (machine == null) return false;
-        Direction oldDir = machine.getOrientation();
-        if (oldDir == newDir) return true;
-        removeFromGridMap(ownerId, machine);
-        machine.setOrientation(newDir);
-        Vector3Int newDim = machine.getDimensions();
-        if (isAreaClear(ownerId, pos, newDim)) {
-            addToGridMap(ownerId, machine);
-            return true;
-        } else {
-            machine.setOrientation(oldDir);
-            addToGridMap(ownerId, machine);
-            return false;
-        }
+    public void tick(long t) {
+        List<PlacedMachine> snap; synchronized(tickingMachines){ snap = new ArrayList<>(tickingMachines); }
+        snap.forEach(m -> m.tick(t));
     }
 
-    public void tick(long currentTick) {
-        List<PlacedMachine> snapshot;
-        synchronized (tickingMachines) { snapshot = new ArrayList<>(tickingMachines); }
-        snapshot.forEach(m -> m.tick(currentTick));
+    public Map<GridPosition, PlacedMachine> getSnapshot(UUID id) {
+        Map<GridPosition, PlacedMachine> g = playerGrids.get(id);
+        return g!=null?new HashMap<>(g):Collections.emptyMap();
     }
 
-    public Map<GridPosition, PlacedMachine> getSnapshot(UUID ownerId) {
-        Map<GridPosition, PlacedMachine> grid = playerGrids.get(ownerId);
-        return grid != null ? new HashMap<>(grid) : Collections.emptyMap();
-    }
-
-    public Map<GridPosition, PlacedMachine> getAllMachinesSnapshot() {
-        Map<GridPosition, PlacedMachine> all = new HashMap<>();
-        for(var map : playerGrids.values()) { all.putAll(map); }
-        return all;
-    }
-
-    public Map<GridPosition, MatterColor> getTerrainResources(UUID ownerId) {
-        return playerResources.getOrDefault(ownerId, Collections.emptyMap());
-    }
-
-    public MarketManager getMarketManager() { return marketManager; }
+    public Map<GridPosition, MatterColor> getTerrainResources(UUID id) { return playerResources.getOrDefault(id, Collections.emptyMap()); }
+    public BlockRegistry getBlockRegistry() { return blockRegistry; }
 }

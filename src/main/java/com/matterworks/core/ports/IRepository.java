@@ -5,6 +5,7 @@ import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.model.PlotObject;
 import com.matterworks.core.common.GridPosition;
+import com.matterworks.core.domain.player.PlayerProfile;
 
 import java.util.List;
 import java.util.Map;
@@ -42,4 +43,5 @@ public interface IRepository {
      * Modifica la quantità di un item (positivo = aggiungi, negativo = rimuovi).
      */
     void modifyInventoryItem(UUID ownerId, String itemId, int delta);
+    java.util.List<PlayerProfile> getAllPlayers();
 }

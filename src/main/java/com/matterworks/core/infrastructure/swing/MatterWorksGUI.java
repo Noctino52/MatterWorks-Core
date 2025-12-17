@@ -1,231 +1,266 @@
 package com.matterworks.core.infrastructure.swing;
 
 import com.matterworks.core.domain.machines.BlockRegistry;
+import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.managers.GridManager;
+import com.matterworks.core.ports.IRepository;
 
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
+import java.util.List;
 import java.util.UUID;
-import java.util.function.Supplier;
 
 public class MatterWorksGUI extends JFrame {
 
-    private final FactoryPanel panel;
-    private final JLabel lblTool;
-    private final JLabel lblOrient;
-    private final JLabel lblLayer;
-    private final JLabel lblMoney;
     private final GridManager gridManager;
-    private final UUID playerUuid;
+    private final BlockRegistry registry;
+    private final IRepository repository;
+    private final Runnable onSave;
 
-    public MatterWorksGUI(GridManager gridManager, BlockRegistry registry, UUID playerUuid, Runnable onSave, Supplier<Double> moneyProvider) {
-        this.gridManager = gridManager;
-        this.playerUuid = playerUuid;
+    private final FactoryPanel factoryPanel;
+    private final JPanel inventoryContainer;
 
-        setTitle("MatterWorks Architect (Java 25)");
-        setSize(1280, 900);
+    private JComboBox<Object> playerSelector;
+    private JLabel lblMoney;
+    private JLabel lblTool;
+    private JLabel lblOrient;
+    private JLabel lblLayer;
+    private JLabel lblPlotId;
+
+    private UUID currentPlayerUuid;
+
+    public MatterWorksGUI(GridManager gm, BlockRegistry reg, UUID initialUuid,
+                          Runnable onSave, java.util.function.Supplier<Double> moneyProvider,
+                          IRepository repo) {
+
+        this.gridManager = gm;
+        this.registry = reg;
+        this.repository = repo;
+        this.currentPlayerUuid = initialUuid;
+        this.onSave = onSave;
+
+        this.factoryPanel = new FactoryPanel(gm, reg, currentPlayerUuid, this::updateLabels);
+        this.inventoryContainer = new JPanel(new BorderLayout());
+
+        setTitle("MatterWorks Architect - Multi-User Management");
+        setSize(1600, 950);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setLocationRelativeTo(null);
         setLayout(new BorderLayout());
 
-        // INFO LABELS
-        lblTool = createLabel("TOOL: Drill");
-        lblOrient = createLabel("DIR: NORTH");
-        lblLayer = createLabel("LAYER Y: 0");
-        lblLayer.setForeground(Color.CYAN);
+        // --- 1. HEADER: Selezione Player ---
+        JPanel headerPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 20, 10));
+        headerPanel.setBackground(new Color(45, 45, 48));
 
-        lblMoney = new JLabel("MONEY: $---");
-        lblMoney.setFont(new Font("Monospaced", Font.BOLD, 16));
-        lblMoney.setForeground(Color.GREEN);
+        playerSelector = new JComboBox<>();
+        refreshPlayerList();
+        playerSelector.addActionListener(e -> handlePlayerSwitch());
 
-        // GRID PANEL
-        panel = new FactoryPanel(gridManager, registry, playerUuid, this::updateLabels);
+        lblMoney = createLabel("MONEY: $---", Color.GREEN, 16);
 
-        // --- LEFT TOOLBAR ---
-        JPanel leftTools = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
-        leftTools.setOpaque(false);
+        headerPanel.add(new JLabel("ACTIVE USER:") {{ setForeground(Color.WHITE); }});
+        headerPanel.add(playerSelector);
+        headerPanel.add(lblMoney);
 
-        // Bottoni con ID item per acquisto rapido
-        JButton btnDrill = createButton("⛏ Drill", "drill_mk1", e -> setTool("drill_mk1"));
-        JButton btnBelt = createButton("⨠ Belt", "conveyor_belt", e -> setTool("conveyor_belt"));
+        // --- 2. TOOLBAR: Costruzione ---
+        JPanel leftToolbar = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
+        leftToolbar.setOpaque(false);
 
-        JButton btnChromator = createButton("🎨 Chromator", "chromator", e -> setTool("chromator"));
-        btnChromator.setBackground(new Color(255, 140, 0));
-        btnChromator.setForeground(Color.BLACK);
+        leftToolbar.add(createToolButton("⛏ Drill", "drill_mk1", e -> setTool("drill_mk1")));
+        leftToolbar.add(createToolButton("⨠ Belt", "conveyor_belt", e -> setTool("conveyor_belt")));
+        leftToolbar.add(createToolButton("🎨 Chromator", "chromator", e -> setTool("chromator")));
+        leftToolbar.add(createToolButton("🌀 Mixer", "color_mixer", e -> setTool("color_mixer")));
+        leftToolbar.add(createToolButton("🔮 Nexus", "nexus_core", e -> setTool("nexus_core")));
 
-        JButton btnMixer = createButton("🌀 Mixer", "color_mixer", e -> setTool("color_mixer"));
-        btnMixer.setBackground(new Color(0, 200, 200));
-        btnMixer.setForeground(Color.BLACK);
+        leftToolbar.add(new JSeparator(SwingConstants.VERTICAL) {{ setPreferredSize(new Dimension(5, 25)); }});
+        leftToolbar.add(createSimpleButton("⬇ DOWN", e -> changeLayer(-1)));
+        leftToolbar.add(createSimpleButton("⬆ UP", e -> changeLayer(1)));
 
-        JButton btnNexus = createButton("🔮 Nexus", "nexus_core", e -> setTool("nexus_core"));
-        btnNexus.setBackground(new Color(100, 0, 150));
-        btnNexus.setForeground(Color.WHITE);
-
-        JSeparator sep1 = new JSeparator(SwingConstants.VERTICAL); sep1.setPreferredSize(new Dimension(5, 25));
-        JButton btnLayerUp = createButtonSimple("⬆ Layer UP", e -> changeLayer(1));
-        JButton btnLayerDown = createButtonSimple("⬇ Layer DOWN", e -> changeLayer(-1));
-        JSeparator sep2 = new JSeparator(SwingConstants.VERTICAL); sep2.setPreferredSize(new Dimension(5, 25));
-        JButton btnRotate = createButtonSimple("↻ Rotate (R)", e -> panel.rotate());
-
-        leftTools.add(btnDrill);
-        leftTools.add(btnBelt);
-        leftTools.add(btnChromator);
-        leftTools.add(btnMixer);
-        leftTools.add(btnNexus);
-        leftTools.add(sep1);
-        leftTools.add(btnLayerDown);
-        leftTools.add(btnLayerUp);
-        leftTools.add(sep2);
-        leftTools.add(btnRotate);
-
-        // --- RIGHT SYSTEM BUTTONS ---
+        // --- 3. SYSTEM BAR: SOS, Save e il ripristinato RESET ---
         JPanel rightSystem = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 0));
         rightSystem.setOpaque(false);
 
-        JButton btnSave = createButtonSimple("💾 SAVE", e -> {
+        // Bottone SOS (Bailout) [cite: 630]
+        JButton btnSOS = createSimpleButton("🆘 SOS", e -> {
+            if (gridManager.attemptBailout(currentPlayerUuid)) {
+                JOptionPane.showMessageDialog(this, "Richiesta SOS approvata! Saldo ripristinato.");
+            } else {
+                JOptionPane.showMessageDialog(this, "SOS Negato: Hai asset o fondi a sufficienza.", "Info", JOptionPane.WARNING_MESSAGE);
+            }
+        });
+        btnSOS.setBackground(new Color(220, 150, 0));
+
+        // Bottone SAVE [cite: 628]
+        JButton btnSave = createSimpleButton("💾 SAVE", e -> {
             onSave.run();
-            JOptionPane.showMessageDialog(this, "Salvataggio Completato!", "Sistema", JOptionPane.INFORMATION_MESSAGE);
+            JOptionPane.showMessageDialog(this, "Salvataggio completato correttamente.");
         });
         btnSave.setBackground(new Color(0, 100, 200));
 
-        JButton btnBailout = createButtonSimple("🆘 SOS", e -> {
-            boolean success = gridManager.attemptBailout(playerUuid);
-            if (success) JOptionPane.showMessageDialog(this, "Richiesta approvata! +500$ accreditati.", "MatterWorks Bailout", JOptionPane.INFORMATION_MESSAGE);
-            else JOptionPane.showMessageDialog(this, "Richiesta negata.\nHai già asset sufficienti.", "MatterWorks Bailout", JOptionPane.ERROR_MESSAGE);
-        });
-        btnBailout.setBackground(new Color(220, 150, 0));
-        btnBailout.setForeground(Color.BLACK);
-
-        JButton btnReset = createButtonSimple("⚠️ RESET", e -> {
+        // Bottone RESET (Re-integrato) [cite: 629-633]
+        JButton btnReset = createSimpleButton("⚠️ RESET", e -> {
             int choice = JOptionPane.showConfirmDialog(this,
-                    "Sei sicuro di voler RESETTARE tutto?\nCancellerà tutte le macchine e cambierà posizione alle vene.\nNon si può annullare.",
-                    "Conferma Reset", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+                    "Sei sicuro di voler RESETTARE tutto?\nCancellerà le macchine e rigenererà le vene.\nL'azione è irreversibile.",
+                    "Conferma Reset Plot",
+                    JOptionPane.YES_NO_OPTION,
+                    JOptionPane.ERROR_MESSAGE);
 
             if (choice == JOptionPane.YES_OPTION) {
-                gridManager.resetUserPlot(playerUuid);
-                Timer t = new Timer(500, x -> {
-                    panel.repaint();
-                    JOptionPane.showMessageDialog(this, "Plot resettato e vene rigenerate!", "Reset", JOptionPane.INFORMATION_MESSAGE);
+                gridManager.resetUserPlot(currentPlayerUuid); // Riutilizzo della funzione backend [cite: 651-653]
+                Timer t = new Timer(600, x -> {
+                    factoryPanel.repaint();
+                    JOptionPane.showMessageDialog(this, "Plot resettato con successo!");
                 });
                 t.setRepeats(false);
                 t.start();
             }
         });
-        btnReset.setBackground(new Color(200, 0, 0));
+        btnReset.setBackground(new Color(180, 0, 0));
 
-        rightSystem.add(lblMoney);
-        rightSystem.add(Box.createHorizontalStrut(10));
-        rightSystem.add(btnBailout);
+        rightSystem.add(btnSOS);
         rightSystem.add(btnSave);
         rightSystem.add(btnReset);
 
-        // LAYOUT
+        // Assemblaggio Top
         JPanel topContainer = new JPanel(new BorderLayout());
-        topContainer.setBackground(new Color(45, 45, 48));
-        topContainer.setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
-        topContainer.add(leftTools, BorderLayout.WEST);
-        topContainer.add(rightSystem, BorderLayout.EAST);
+        topContainer.add(headerPanel, BorderLayout.NORTH);
 
-        JPanel infoPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 20, 5));
-        infoPanel.setBackground(new Color(60, 60, 65));
-        infoPanel.add(lblTool);
-        infoPanel.add(lblOrient);
-        infoPanel.add(lblLayer);
+        JPanel midToolbar = new JPanel(new BorderLayout());
+        midToolbar.setBackground(new Color(60, 60, 65));
+        midToolbar.add(leftToolbar, BorderLayout.WEST);
+        midToolbar.add(rightSystem, BorderLayout.EAST);
+        topContainer.add(midToolbar, BorderLayout.SOUTH);
 
-        JPanel northGroup = new JPanel(new BorderLayout());
-        northGroup.add(topContainer, BorderLayout.NORTH);
-        northGroup.add(infoPanel, BorderLayout.SOUTH);
+        // --- 4. STATUS BAR (Plot ID in basso a destra) ---
+        JPanel statusPanel = new JPanel(new BorderLayout());
+        statusPanel.setBackground(new Color(35, 35, 35));
 
-        add(northGroup, BorderLayout.NORTH);
-        add(panel, BorderLayout.CENTER);
+        JPanel leftStatus = new JPanel(new FlowLayout(FlowLayout.LEFT, 20, 5));
+        leftStatus.setOpaque(false);
+        lblTool = createLabel("TOOL: Drill", Color.WHITE, 12);
+        lblOrient = createLabel("DIR: NORTH", Color.WHITE, 12);
+        lblLayer = createLabel("LAYER: 0", Color.CYAN, 12);
+        leftStatus.add(lblTool); leftStatus.add(lblOrient); leftStatus.add(lblLayer);
 
-        // TIMERS
-        new Timer(50, e -> panel.repaint()).start();
-        new Timer(1000, e -> {
-            double m = moneyProvider.get();
-            lblMoney.setText(String.format("MONEY: $%,.2f", m));
-        }).start();
+        JPanel rightStatus = new JPanel(new FlowLayout(FlowLayout.RIGHT, 20, 5));
+        rightStatus.setOpaque(false);
+        lblPlotId = createLabel("PLOT ID: #---", Color.LIGHT_GRAY, 12);
+        rightStatus.add(lblPlotId);
+
+        statusPanel.add(leftStatus, BorderLayout.WEST);
+        statusPanel.add(rightStatus, BorderLayout.EAST);
+
+        updateInventoryView();
+
+        add(topContainer, BorderLayout.NORTH);
+        add(factoryPanel, BorderLayout.CENTER);
+        add(inventoryContainer, BorderLayout.EAST);
+        add(statusPanel, BorderLayout.SOUTH);
+
+        // Timers aggiornamento UI
+        new Timer(50, e -> factoryPanel.repaint()).start();
+        new Timer(1000, e -> updateEconomyLabels()).start();
 
         setVisible(true);
-        panel.requestFocusInWindow();
+        factoryPanel.requestFocusInWindow();
         updateLabels();
     }
 
-    private void setTool(String toolId) {
-        panel.setTool(toolId);
-        updateLabels();
-    }
-
-    private void changeLayer(int delta) {
-        int newY = panel.getCurrentLayer() + delta;
-        if (newY < 0) newY = 0;
-        panel.setLayer(newY);
-        updateLabels();
-    }
-
-    private void updateLabels() {
-        if (lblTool != null && panel != null) {
-            lblTool.setText("TOOL: " + panel.getCurrentToolName());
-            lblOrient.setText("DIR: " + panel.getCurrentOrientationName());
-            lblLayer.setText("LAYER Y: " + panel.getCurrentLayer());
+    private void handlePlayerSwitch() {
+        Object sel = playerSelector.getSelectedItem();
+        if (sel instanceof PlayerProfile p) {
+            this.currentPlayerUuid = p.getPlayerId();
+            factoryPanel.setPlayerUuid(currentPlayerUuid);
+            gridManager.loadPlotFromDB(currentPlayerUuid);
+            updateInventoryView();
+            updateLabels();
+        } else if ("--- ADD NEW PLAYER ---".equals(sel)) {
+            String n = JOptionPane.showInputDialog(this, "Nome nuovo giocatore:");
+            if (n != null && !n.isBlank()) {
+                gridManager.createNewPlayer(n);
+                refreshPlayerList();
+            }
         }
     }
 
-    // Bottone "Intelligente" con Click Destro per Shop
-    private JButton createButton(String text, String itemId, java.awt.event.ActionListener setToolAction) {
-        JButton btn = new JButton(text);
-        btn.setFocusable(false);
+    private void refreshPlayerList() {
+        playerSelector.removeAllItems();
+        List<PlayerProfile> all = repository.getAllPlayers();
+        for (PlayerProfile p : all) playerSelector.addItem(p);
+        playerSelector.addItem("--- ADD NEW PLAYER ---");
 
-        // Click Sinistro: Seleziona Tool
-        btn.addActionListener(setToolAction);
+        for (int i = 0; i < playerSelector.getItemCount(); i++) {
+            if (playerSelector.getItemAt(i) instanceof PlayerProfile p && p.getPlayerId().equals(currentPlayerUuid)) {
+                playerSelector.setSelectedIndex(i);
+                break;
+            }
+        }
+    }
 
-        // Click Destro: Compra 1 unità
+    private void updateInventoryView() {
+        inventoryContainer.removeAll();
+        inventoryContainer.add(new InventoryDebugPanel(repository, currentPlayerUuid, gridManager), BorderLayout.CENTER);
+        inventoryContainer.revalidate();
+        inventoryContainer.repaint();
+    }
+
+    private void updateEconomyLabels() {
+        PlayerProfile p = repository.loadPlayerProfile(currentPlayerUuid);
+        if (p != null) {
+            lblMoney.setText(String.format("MONEY: $%,.2f [%s]", p.getMoney(), p.getRank()));
+            lblMoney.setForeground(p.isAdmin() ? new Color(255, 215, 0) : Color.GREEN);
+
+            Long pid = repository.getPlotId(currentPlayerUuid);
+            lblPlotId.setText("PLOT ID: #" + (pid != null ? pid : "---"));
+        }
+    }
+
+    private void updateLabels() {
+        if (lblTool != null) {
+            lblTool.setText("TOOL: " + factoryPanel.getCurrentToolName());
+            lblOrient.setText("DIR: " + factoryPanel.getCurrentOrientationName());
+            lblLayer.setText("LAYER: " + factoryPanel.getCurrentLayer());
+        }
+    }
+
+    private void setTool(String id) { factoryPanel.setTool(id); updateLabels(); }
+
+    private void changeLayer(int delta) {
+        int newY = Math.max(0, factoryPanel.getCurrentLayer() + delta);
+        factoryPanel.setLayer(newY);
+        updateLabels();
+    }
+
+    private JButton createToolButton(String text, String itemId, java.awt.event.ActionListener action) {
+        JButton btn = createSimpleButton(text, action);
         btn.addMouseListener(new MouseAdapter() {
             @Override
             public void mouseClicked(MouseEvent e) {
                 if (SwingUtilities.isRightMouseButton(e)) {
-                    boolean bought = gridManager.buyItem(playerUuid, itemId, 1);
-                    if (bought) {
-                        // Feedback visivo temporaneo
-                        Color original = btn.getBackground();
-                        btn.setBackground(Color.GREEN);
-                        Timer t = new Timer(200, x -> btn.setBackground(original));
-                        t.setRepeats(false); t.start();
-                    } else {
-                        Toolkit.getDefaultToolkit().beep();
-                        JOptionPane.showMessageDialog(btn, "Soldi insufficienti per comprare " + itemId, "Shop", JOptionPane.ERROR_MESSAGE);
-                    }
+                    gridManager.buyItem(currentPlayerUuid, itemId, 1);
                 }
             }
         });
-
-        btn.setBackground(new Color(70, 70, 70));
-        btn.setForeground(Color.WHITE);
-        btn.setFont(new Font("SansSerif", Font.PLAIN, 12));
-        btn.setBorder(BorderFactory.createEmptyBorder(5, 10, 5, 10));
-        // Tooltip per spiegare i controlli
-        btn.setToolTipText("SX: Seleziona | DX: Compra 1x");
         return btn;
     }
 
-    // Bottone Semplice per azioni senza item (Reset, Save, Layer)
-    private JButton createButtonSimple(String text, java.awt.event.ActionListener action) {
+    private JButton createSimpleButton(String text, java.awt.event.ActionListener action) {
         JButton btn = new JButton(text);
         btn.setFocusable(false);
         btn.addActionListener(action);
         btn.setBackground(new Color(70, 70, 70));
         btn.setForeground(Color.WHITE);
         btn.setFont(new Font("SansSerif", Font.PLAIN, 12));
-        btn.setBorder(BorderFactory.createEmptyBorder(5, 10, 5, 10));
+        btn.setBorder(BorderFactory.createEmptyBorder(5, 12, 5, 12));
         return btn;
     }
 
-    private JLabel createLabel(String text) {
+    private JLabel createLabel(String text, Color color, int size) {
         JLabel lbl = new JLabel(text);
-        lbl.setForeground(Color.WHITE);
-        lbl.setFont(new Font("Monospaced", Font.BOLD, 14));
+        lbl.setForeground(color);
+        lbl.setFont(new Font("Monospaced", Font.BOLD, size));
         return lbl;
     }
 }

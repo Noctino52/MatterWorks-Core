@@ -8,6 +8,8 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 
 public class PlayerDAO {
@@ -75,5 +77,23 @@ public class PlayerDAO {
             e.printStackTrace();
         }
         return null; // Non trovato
+    }
+
+    public List<PlayerProfile> loadAll() {
+        List<PlayerProfile> players = new ArrayList<>();
+        String sql = "SELECT * FROM players";
+        try (java.sql.Connection conn = db.getConnection();
+             java.sql.PreparedStatement ps = conn.prepareStatement(sql);
+             java.sql.ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                PlayerProfile p = new PlayerProfile(UuidUtils.asUuid(rs.getBytes("uuid")));
+                p.setUsername(rs.getString("username"));
+                p.setMoney(rs.getDouble("money"));
+                String rankStr = rs.getString("rank");
+                if (rankStr != null) p.setRank(PlayerProfile.PlayerRank.valueOf(rankStr));
+                players.add(p);
+            }
+        } catch (java.sql.SQLException e) { e.printStackTrace(); }
+        return players;
     }
 }

@@ -26,14 +26,12 @@ public class Main {
 
     public static void main(String[] args) throws InterruptedException {
         System.out.println("🏭 MatterWorks Core Starting...");
-
         CoreConfig.load();
 
         String url = "jdbc:mariadb://dev.matterworks.org:3306/matterworks_core?allowPublicKeyRetrieval=true&useSSL=false";
         DatabaseManager dbManager = new DatabaseManager(url, "Noctino52", "Yy72s7mRnVs3");
 
         IWorldAccess world = new MockWorld();
-
         MachineDefinitionDAO defDao = new MachineDefinitionDAO(dbManager);
         BlockRegistry blockRegistry = new BlockRegistry(world, defDao);
         blockRegistry.loadFromDatabase();
@@ -75,7 +73,8 @@ public class Main {
                         () -> {
                             PlayerProfile p = repository.loadPlayerProfile(playerUuid);
                             return (p != null) ? p.getMoney() : 0.0;
-                        }
+                        },
+                        repository // Passiamo il repository per leggere l'inventario
                 );
             });
         }
@@ -98,11 +97,20 @@ public class Main {
 
     private static void ensurePlayerExists(DatabaseManager db, UUID uuid) {
         PlayerDAO playerDao = new PlayerDAO(db);
-        if (playerDao.load(uuid) == null) {
-            PlayerProfile p = new PlayerProfile(uuid);
+        PlayerProfile p = playerDao.load(uuid);
+
+        if (p == null) {
+            p = new PlayerProfile(uuid);
             p.setUsername("Noctino_Dev");
             p.setMoney(1000.0);
+            p.setRank(PlayerProfile.PlayerRank.ADMIN); // DEFAULT ADMIN per test
             playerDao.save(p);
+        } else {
+            // FIX: Forza l'aggiornamento a ADMIN se esiste già
+            // (Utile perché nel DB sei probabilmente salvato come PLAYER)
+            p.setRank(PlayerProfile.PlayerRank.ADMIN);
+            playerDao.save(p);
+            System.out.println("👑 Rango impostato ad ADMIN per " + uuid);
         }
     }
 

@@ -1,13 +1,12 @@
 package com.matterworks.core.managers;
 
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
-import com.matterworks.core.common.Direction;
 import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.database.DatabaseManager;
 import com.matterworks.core.domain.machines.BlockRegistry;
+import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.model.PlotObject;
+import com.matterworks.core.infrastructure.MariaDBAdapter;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -25,100 +24,83 @@ public class WorldIntegrityValidator {
     }
 
     public boolean validateWorldIntegrity() {
-        System.out.println("🔍 Esecuzione Validazione Integrità Mondo...");
+        System.out.println("🔍 [System] Avvio Validazione Integrità...");
         Map<Long, List<PlotObject>> machinesByPlot = loadAllMachines();
-        boolean hasConflicts = false;
+        Map<Long, Map<GridPosition, MatterColor>> resourcesByPlot = loadAllResources();
 
-        for (Map.Entry<Long, List<PlotObject>> entry : machinesByPlot.entrySet()) {
+        List<String> errorLog = new ArrayList<>();
+
+        for (var entry : machinesByPlot.entrySet()) {
             Long plotId = entry.getKey();
             List<PlotObject> machines = entry.getValue();
-            if (!validatePlot(plotId, machines)) {
-                hasConflicts = true;
+            Map<GridPosition, MatterColor> resources = resourcesByPlot.getOrDefault(plotId, Collections.emptyMap());
+
+            // 1. Check Sovrapposizioni [cite: 713, 720]
+            validateOverlaps(plotId, machines, errorLog);
+
+            // 2. Check Trivelle su Vene
+            for (PlotObject m : machines) {
+                if (m.getTypeId().equals("drill_mk1")) {
+                    GridPosition pos = new GridPosition(m.getX(), m.getY(), m.getZ());
+                    if (!resources.containsKey(pos)) {
+                        errorLog.add("❌ Plot " + plotId + ": Trivella (ID " + m.getId() + ") piazzata nel vuoto a " + pos);
+                    }
+                }
             }
         }
 
-        if (hasConflicts) {
-            System.err.println("❌ VALIDAZIONE FALLITA: Trovati conflitti di sovrapposizione!");
+        if (errorLog.isEmpty()) {
+            System.out.println("✅ [System] Integrità verificata: 0 conflitti.");
+            return true;
         } else {
-            System.out.println("✅ Integrità Mondo Verificata: Nessuna collisione rilevata.");
+            if (errorLog.size() > 100) {
+                System.err.println("🚨 [System] ATTENZIONE: Rilevate " + errorLog.size() + " collisioni nel mondo! (Troppe per la lista)");
+            } else {
+                System.err.println("🚨 [System] RILEVATE COLLISIONI:");
+                errorLog.forEach(System.err::println);
+            }
+            return false;
         }
-        return !hasConflicts;
     }
 
-    private boolean validatePlot(Long plotId, List<PlotObject> machines) {
-        // Mappa: Posizione -> ID Macchina (per sapere CHI occupa cosa)
-        Map<GridPosition, Long> occupiedCells = new HashMap<>();
-        boolean plotValid = true;
-
-        for (PlotObject machine : machines) {
-            String typeId = machine.getTypeId();
-            Vector3Int baseDim = registry.getDimensions(typeId);
-
-            // --- FIX: CALCOLO DIMENSIONI REALI (ROTAZIONE) ---
-            Vector3Int effectiveDim = baseDim;
-            try {
-                // Leggiamo la rotazione dai metadati grezzi
-                if (machine.getMetaData() != null && machine.getMetaData().has("orientation")) {
-                    String orStr = machine.getMetaData().get("orientation").getAsString();
-                    Direction dir = Direction.valueOf(orStr);
-                    if (dir == Direction.EAST || dir == Direction.WEST) {
-                        effectiveDim = new Vector3Int(baseDim.z(), baseDim.y(), baseDim.x());
-                    }
+    private void validateOverlaps(Long plotId, List<PlotObject> machines, List<String> errorLog) {
+        Map<GridPosition, Long> occupied = new HashMap<>();
+        for (PlotObject m : machines) {
+            Vector3Int dim = registry.getDimensions(m.getTypeId());
+            for (int x=0; x<dim.x(); x++) for (int y=0; y<dim.y(); y++) for (int z=0; z<dim.z(); z++) {
+                GridPosition p = new GridPosition(m.getX()+x, m.getY()+y, m.getZ()+z);
+                if (occupied.containsKey(p)) {
+                    errorLog.add("⚠️ Plot " + plotId + ": Conflitto a " + p + " tra ID " + m.getId() + " e ID " + occupied.get(p));
                 }
-            } catch (Exception e) {
-                // Fallback a dimensioni base se json corrotto
-            }
-
-            GridPosition origin = new GridPosition(machine.getX(), machine.getY(), machine.getZ());
-
-            for (int x = 0; x < effectiveDim.x(); x++) {
-                for (int y = 0; y < effectiveDim.y(); y++) {
-                    for (int z = 0; z < effectiveDim.z(); z++) {
-                        GridPosition pos = new GridPosition(origin.x() + x, origin.y() + y, origin.z() + z);
-
-                        if (occupiedCells.containsKey(pos)) {
-                            Long otherId = occupiedCells.get(pos);
-                            // Se ID diverso, è conflitto
-                            if (!otherId.equals(machine.getId())) {
-                                System.err.println("   ⚠️ CONFLITTO nel Plot ID " + plotId + ":");
-                                System.err.println("      Macchina A (ID " + machine.getId() + ") " + typeId + " a " + origin);
-                                System.err.println("      Macchina B (ID " + otherId + ") occupa già " + pos);
-                                plotValid = false;
-                            }
-                        } else {
-                            occupiedCells.put(pos, machine.getId());
-                        }
-                    }
-                }
+                occupied.put(p, m.getId());
             }
         }
-        return plotValid;
     }
 
+    // ... (loadAllMachines e loadAllResources rimangono uguali alla versione precedente)
     private Map<Long, List<PlotObject>> loadAllMachines() {
         Map<Long, List<PlotObject>> result = new HashMap<>();
-        // FIX: Carichiamo anche i metadati per la rotazione!
-        String sql = "SELECT id, plot_id, x, y, z, type_id, metadata FROM plot_machines";
-
-        try (Connection conn = db.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql);
-             ResultSet rs = ps.executeQuery()) {
-
+        String sql = "SELECT id, plot_id, x, y, z, type_id FROM plot_machines";
+        try (Connection conn = db.getConnection(); PreparedStatement ps = conn.prepareStatement(sql); ResultSet rs = ps.executeQuery()) {
             while (rs.next()) {
-                PlotObject obj = new PlotObject();
-                obj.setId(rs.getLong("id"));
-                obj.setPlotId(rs.getLong("plot_id"));
-                obj.setPosition(rs.getInt("x"), rs.getInt("y"), rs.getInt("z"));
-                obj.setTypeId(rs.getString("type_id"));
-
-                String metaStr = rs.getString("metadata");
-                if (metaStr != null) obj.setMetaDataFromString(metaStr);
-
+                PlotObject obj = new PlotObject(rs.getLong("id"), rs.getLong("plot_id"), rs.getInt("x"), rs.getInt("y"), rs.getInt("z"), rs.getString("type_id"), null);
                 result.computeIfAbsent(obj.getPlotId(), k -> new ArrayList<>()).add(obj);
             }
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
+        } catch (Exception e) { e.printStackTrace(); }
+        return result;
+    }
+
+    private Map<Long, Map<GridPosition, MatterColor>> loadAllResources() {
+        Map<Long, Map<GridPosition, MatterColor>> result = new HashMap<>();
+        String sql = "SELECT plot_id, x, z, resource_type FROM plot_resources";
+        try (Connection conn = db.getConnection(); PreparedStatement ps = conn.prepareStatement(sql); ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                long pid = rs.getLong("plot_id");
+                GridPosition pos = new GridPosition(rs.getInt("x"), 0, rs.getInt("z"));
+                MatterColor color = MatterColor.valueOf(rs.getString("resource_type"));
+                result.computeIfAbsent(pid, k -> new HashMap<>()).put(pos, color);
+            }
+        } catch (Exception e) { e.printStackTrace(); }
         return result;
     }
 }

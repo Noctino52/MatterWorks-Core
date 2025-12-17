@@ -6,7 +6,6 @@ import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.domain.machines.BlockRegistry;
 import com.matterworks.core.domain.machines.ConveyorBelt;
-import com.matterworks.core.domain.machines.NexusMachine;
 import com.matterworks.core.domain.machines.PlacedMachine;
 import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.managers.GridManager;
@@ -21,7 +20,7 @@ public class FactoryPanel extends JPanel {
 
     private final GridManager gridManager;
     private final BlockRegistry registry;
-    private final UUID playerUuid;
+    private UUID playerUuid;
 
     private final int CELL_SIZE = 40;
     private final int OFFSET_X = 50;
@@ -44,27 +43,19 @@ public class FactoryPanel extends JPanel {
 
         this.addMouseMotionListener(new MouseMotionAdapter() {
             @Override
-            public void mouseMoved(MouseEvent e) {
-                updateMousePos(e.getX(), e.getY());
-                repaint();
-            }
+            public void mouseMoved(MouseEvent e) { updateMousePos(e.getX(), e.getY()); repaint(); }
         });
         this.addMouseListener(new MouseAdapter() {
             @Override
-            public void mouseClicked(MouseEvent e) {
-                requestFocusInWindow();
-                handleMouseClick(e);
-                repaint();
-            }
+            public void mouseClicked(MouseEvent e) { requestFocusInWindow(); handleMouseClick(e); repaint(); }
         });
         this.addKeyListener(new KeyAdapter() {
             @Override
-            public void keyPressed(KeyEvent e) {
-                if (e.getKeyCode() == KeyEvent.VK_R) rotate();
-            }
+            public void keyPressed(KeyEvent e) { if (e.getKeyCode() == KeyEvent.VK_R) rotate(); }
         });
     }
 
+    public void setPlayerUuid(UUID uuid) { this.playerUuid = uuid; repaint(); }
     public void setLayer(int y) { this.currentLayer = y; repaint(); }
     public int getCurrentLayer() { return currentLayer; }
     public void setTool(String toolId) { this.currentTool = toolId; repaint(); }
@@ -80,11 +71,12 @@ public class FactoryPanel extends JPanel {
         if (onStateChange != null) onStateChange.run();
         repaint();
     }
+
     public String getCurrentOrientationName() { return currentOrientation.name(); }
 
     private void updateMousePos(int x, int y) {
-        int gx = toGridX(x);
-        int gz = toGridY(y);
+        int gx = (x - OFFSET_X) / CELL_SIZE;
+        int gz = (y - OFFSET_Y) / CELL_SIZE;
         if (gx >= 0 && gx <= 20 && gz >= 0 && gz <= 20) {
             this.mouseHoverPos = new GridPosition(gx, currentLayer, gz);
         } else {
@@ -95,9 +87,7 @@ public class FactoryPanel extends JPanel {
     private void handleMouseClick(MouseEvent e) {
         if (mouseHoverPos == null) return;
         if (SwingUtilities.isLeftMouseButton(e)) {
-            if (currentTool != null) {
-                gridManager.placeMachine(playerUuid, mouseHoverPos, currentTool, currentOrientation);
-            }
+            gridManager.placeMachine(playerUuid, mouseHoverPos, currentTool, currentOrientation);
         } else if (SwingUtilities.isRightMouseButton(e)) {
             gridManager.removeComponent(playerUuid, mouseHoverPos);
         }
@@ -120,20 +110,10 @@ public class FactoryPanel extends JPanel {
         for (Map.Entry<GridPosition, MatterColor> entry : resources.entrySet()) {
             GridPosition pos = entry.getKey();
             MatterColor type = entry.getValue();
-            int x = toScreenX(pos.x());
-            int z = toScreenY(pos.z());
-
-            Color c = switch(type) {
-                case RAW -> new Color(100, 100, 100, 100);
-                case RED -> new Color(200, 0, 0, 100);
-                case BLUE -> new Color(0, 0, 200, 100);
-                case YELLOW -> new Color(200, 200, 0, 100);
-                default -> new Color(255, 255, 255, 50);
-            };
-            g.setColor(c);
+            int x = OFFSET_X + (pos.x() * CELL_SIZE);
+            int z = OFFSET_Y + (pos.z() * CELL_SIZE);
+            g.setColor(getColorFromStr(type.name(), 100));
             g.fillRect(x, z, CELL_SIZE, CELL_SIZE);
-            g.setColor(c.darker());
-            g.drawRect(x, z, CELL_SIZE, CELL_SIZE);
             g.setColor(Color.WHITE);
             g.setFont(new Font("SansSerif", Font.PLAIN, 9));
             g.drawString(type.name(), x + 2, z + 12);
@@ -143,207 +123,152 @@ public class FactoryPanel extends JPanel {
     private void drawGrid(Graphics2D g) {
         g.setColor(new Color(50, 50, 50));
         for (int i = 0; i <= 20; i++) {
-            g.drawLine(toScreenX(i), toScreenY(0), toScreenX(i), toScreenY(20));
-            g.drawLine(toScreenX(0), toScreenY(i), toScreenX(20), toScreenY(i));
+            g.drawLine(OFFSET_X + (i * CELL_SIZE), OFFSET_Y, OFFSET_X + (i * CELL_SIZE), OFFSET_Y + (20 * CELL_SIZE));
+            g.drawLine(OFFSET_X, OFFSET_Y + (i * CELL_SIZE), OFFSET_X + (20 * CELL_SIZE), OFFSET_Y + (i * CELL_SIZE));
         }
-        g.setColor(new Color(60, 60, 60));
-        g.drawString("LAYER Y = " + currentLayer, 10, getHeight() - 10);
     }
 
     private void drawMachines(Graphics2D g) {
         Map<GridPosition, PlacedMachine> machines = gridManager.getSnapshot(playerUuid);
         for (PlacedMachine m : machines.values()) {
-            int machineY = m.getPos().y();
-            int machineHeight = m.getDimensions().y();
-            if (currentLayer >= machineY && currentLayer < machineY + machineHeight) {
-                drawSingleMachine(g, m, false);
+            if (currentLayer >= m.getPos().y() && currentLayer < m.getPos().y() + m.getDimensions().y()) {
+                drawSingleMachine(g, m);
             }
         }
     }
 
-    private void drawGhost(Graphics2D g) {
-        if (mouseHoverPos == null || currentTool == null) return;
-        Vector3Int dimBase = registry.getDimensions(currentTool);
-
-        boolean isRotated = (currentOrientation == Direction.EAST || currentOrientation == Direction.WEST);
-        int w = (isRotated ? dimBase.z() : dimBase.x()) * CELL_SIZE;
-        int h = (isRotated ? dimBase.x() : dimBase.z()) * CELL_SIZE;
-
-        Composite original = g.getComposite();
-        g.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.5f));
-
-        int x = toScreenX(mouseHoverPos.x());
-        int z = toScreenY(mouseHoverPos.z());
-
-        g.setColor(getColorForType(currentTool));
-        g.fillRect(x, z, w, h);
-        g.setColor(Color.WHITE);
-        g.drawRect(x, z, w, h);
-
-        drawDirectionArrow(g, x, z, w, h, currentOrientation);
-        g.setComposite(original);
-    }
-
-    private void drawSingleMachine(Graphics2D g, PlacedMachine m, boolean isGhost) {
-        GridPosition pos = m.getPos();
-        Vector3Int dim = m.getDimensions();
-
-        int x = toScreenX(pos.x());
-        int z = toScreenY(pos.z());
-        int w = dim.x() * CELL_SIZE;
-        int h = dim.z() * CELL_SIZE;
+    private void drawSingleMachine(Graphics2D g, PlacedMachine m) {
+        int x = OFFSET_X + (m.getPos().x() * CELL_SIZE);
+        int z = OFFSET_Y + (m.getPos().z() * CELL_SIZE);
+        int w = m.getDimensions().x() * CELL_SIZE;
+        int h = m.getDimensions().z() * CELL_SIZE;
 
         g.setColor(getColorForType(m.getTypeId()));
         g.fillRect(x + 2, z + 2, w - 4, h - 4);
 
-        // --- LOGICA PORTE SPECIFICA ---
         if (m.getTypeId().equals("nexus_core")) {
             drawNexusPorts(g, m, x, z, w, h);
-        }
-        else if (m.getTypeId().equals("chromator") || m.getTypeId().equals("color_mixer")) {
-            drawPorts(g, m, x, z, w, h);
+        } else if (m.getTypeId().equals("chromator") || m.getTypeId().equals("color_mixer")) {
+            drawProcessorPorts(g, m, x, z, w, h);
         } else {
             drawStandardPorts(g, m, x, z, w, h);
         }
 
+        if (m instanceof ConveyorBelt belt) drawBeltItem(g, belt, x, z);
         drawDirectionArrow(g, x, z, w, h, m.getOrientation());
+    }
 
-        if (m instanceof ConveyorBelt belt) {
-            drawBeltItem(g, belt, x, z);
-        } else if (m instanceof NexusMachine) {
-            g.setColor(Color.WHITE);
-            if (pos.y() == currentLayer) g.drawString("NEXUS", x + 10, z + 20);
+    private void drawStandardPorts(Graphics2D g, PlacedMachine m, int x, int z, int w, int h) {
+        int p = 8;
+        Point out = null, in = null;
+        switch (m.getOrientation()) {
+            case NORTH -> { out = new Point(x + w/2 - p/2, z); in = new Point(x + w/2 - p/2, z + h - p); }
+            case SOUTH -> { out = new Point(x + w/2 - p/2, z + h - p); in = new Point(x + w/2 - p/2, z); }
+            case EAST  -> { out = new Point(x + w - p, z + h/2 - p/2); in = new Point(x, z + h/2 - p/2); }
+            case WEST  -> { out = new Point(x, z + h/2 - p/2); in = new Point(x + w - p, z + h/2 - p/2); }
+        }
+        if (out != null) drawPort(g, out, Color.GREEN);
+        if (in != null && !m.getTypeId().equals("drill_mk1")) drawPort(g, in, Color.BLUE);
+    }
+
+    private void drawNexusPorts(Graphics2D g, PlacedMachine m, int x, int z, int w, int h) {
+        if (currentLayer - m.getPos().y() <= 1) {
+            int p = 8;
+            drawPort(g, new Point(x + w/2 - p/2, z), Color.BLUE);
+            drawPort(g, new Point(x + w/2 - p/2, z + h - p), Color.BLUE);
+            drawPort(g, new Point(x, z + h/2 - p/2), Color.BLUE);
+            drawPort(g, new Point(x + w - p, z + h/2 - p/2), Color.BLUE);
         }
     }
 
-    // --- NUOVO METODO: PORTE DEL NEXUS ---
-    // Disegna porte di ingresso (BLU) su tutti i lati per i primi 2 livelli.
-    private void drawNexusPorts(Graphics2D g, PlacedMachine m, int x, int z, int w, int h) {
-        int machineBaseY = m.getPos().y();
-        int relativeY = currentLayer - machineBaseY;
+    private void drawProcessorPorts(Graphics2D g, PlacedMachine m, int x, int z, int w, int h) {
+        int p = 8; int c = CELL_SIZE;
+        boolean isChroma = m.getTypeId().equals("chromator");
+        Color colS0 = isChroma ? Color.CYAN : Color.BLUE; // S0: Material/Input1
+        Color colS1 = isChroma ? Color.MAGENTA : Color.BLUE; // S1: Color/Input2
 
-        // Se siamo al livello 0 o 1 del Nexus (base o centro), disegna porte
-        if (relativeY >= 0 && relativeY <= 1) {
-            g.setColor(Color.BLUE);
-            int pSize = 8;
-
-            // Porta Nord
-            g.fillRect(x + w/2 - pSize/2, z, pSize, pSize);
-            // Porta Sud
-            g.fillRect(x + w/2 - pSize/2, z + h - pSize, pSize, pSize);
-            // Porta Ovest
-            g.fillRect(x, z + h/2 - pSize/2, pSize, pSize);
-            // Porta Est
-            g.fillRect(x + w - pSize, z + h/2 - pSize/2, pSize, pSize);
+        switch (m.getOrientation()) {
+            case NORTH -> {
+                drawPort(g, new Point(x + c/2 - p/2, z), Color.GREEN); // Out
+                drawPort(g, new Point(x + c/2 - p/2, z + h - p), colS0); // In 0
+                drawPort(g, new Point(x + (c*3)/2 - p/2, z + h - p), colS1); // In 1
+            }
+            case SOUTH -> {
+                drawPort(g, new Point(x + (c*3)/2 - p/2, z + h - p), Color.GREEN);
+                drawPort(g, new Point(x + (c*3)/2 - p/2, z), colS0);
+                drawPort(g, new Point(x + c/2 - p/2, z), colS1);
+            }
+            case EAST -> {
+                drawPort(g, new Point(x + w - p, z + c/2 - p/2), Color.GREEN);
+                drawPort(g, new Point(x, z + c/2 - p/2), colS0);
+                drawPort(g, new Point(x, z + (c*3)/2 - p/2), colS1);
+            }
+            case WEST -> {
+                drawPort(g, new Point(x, z + (c*3)/2 - p/2), Color.GREEN);
+                drawPort(g, new Point(x + w - p, z + (c*3)/2 - p/2), colS0);
+                drawPort(g, new Point(x + w - p, z + c/2 - p/2), colS1);
+            }
         }
-        // Nessun Output (Verde)
+    }
+
+    private void drawPort(Graphics2D g, Point pt, Color color) {
+        g.setColor(color);
+        g.fillRect(pt.x, pt.y, 8, 8);
+        g.setColor(Color.WHITE);
+        g.drawRect(pt.x, pt.y, 8, 8);
     }
 
     private void drawBeltItem(Graphics2D g, ConveyorBelt belt, int x, int z) {
         JsonObject meta = belt.serialize();
         if (meta.has("currentItem")) {
-            JsonObject itemJson = meta.getAsJsonObject("currentItem");
-            String shapeStr = null;
-            String colorStr = "RAW";
-
-            try {
-                if (itemJson.has("shape") && !itemJson.get("shape").isJsonNull()) {
-                    shapeStr = itemJson.get("shape").getAsString();
-                }
-                if (itemJson.has("color")) colorStr = itemJson.get("color").getAsString();
-            } catch(Exception ignored) {}
-
-            Color itemColor = switch(colorStr) {
-                case "RAW" -> new Color(180, 180, 180);
-                case "RED" -> new Color(220, 50, 50);
-                case "BLUE" -> new Color(50, 80, 255);
-                case "YELLOW" -> new Color(255, 220, 0);
-                case "GREEN" -> new Color(50, 200, 50);
-                case "ORANGE" -> new Color(255, 140, 0);
-                case "PURPLE" -> new Color(160, 32, 240);
-                default -> Color.MAGENTA;
-            };
-
-            int itemSize = 20;
-            int ix = x + (CELL_SIZE - itemSize) / 2;
-            int iz = z + (CELL_SIZE - itemSize) / 2;
-
-            g.setColor(itemColor);
-
-            if ("CUBE".equals(shapeStr)) {
-                g.fillRect(ix, iz, itemSize, itemSize);
-                g.setColor(Color.WHITE);
-                g.drawRect(ix, iz, itemSize, itemSize);
-            } else {
-                g.fillOval(ix, iz, itemSize, itemSize);
-                g.setColor(Color.WHITE);
-                g.drawOval(ix, iz, itemSize, itemSize);
-            }
+            JsonObject item = meta.getAsJsonObject("currentItem");
+            String colorStr = item.has("color") ? item.get("color").getAsString() : "RAW";
+            String shapeStr = (item.has("shape") && !item.get("shape").isJsonNull()) ? item.get("shape").getAsString() : "LIQUID";
+            g.setColor(getColorFromStr(colorStr, 255));
+            int size = 18; int pad = (CELL_SIZE - size) / 2;
+            if ("CUBE".equals(shapeStr)) g.fillRect(x + pad, z + pad, size, size);
+            else g.fillOval(x + pad, z + pad, size, size);
+            g.setColor(Color.WHITE); g.drawRect(x + pad, z + pad, size, size);
         }
     }
 
-    private void drawPorts(Graphics2D g, PlacedMachine m, int x, int z, int w, int h) {
-        int pSize = 8;
-        Direction dir = m.getOrientation();
-        Point out = null, in1 = null, in2 = null;
+    private void drawGhost(Graphics2D g) {
+        if (mouseHoverPos == null || currentTool == null) return;
+        Vector3Int dim = registry.getDimensions(currentTool);
+        if (currentOrientation == Direction.EAST || currentOrientation == Direction.WEST) {
+            dim = new Vector3Int(dim.z(), dim.y(), dim.x());
+        }
+        g.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.4f));
+        int x = OFFSET_X + (mouseHoverPos.x() * CELL_SIZE);
+        int z = OFFSET_Y + (mouseHoverPos.z() * CELL_SIZE);
+        g.setColor(getColorForType(currentTool));
+        g.fillRect(x, z, dim.x() * CELL_SIZE, dim.z() * CELL_SIZE);
+        g.setColor(Color.WHITE);
+        g.drawRect(x, z, dim.x() * CELL_SIZE, dim.z() * CELL_SIZE);
+        drawDirectionArrow(g, x, z, dim.x() * CELL_SIZE, dim.z() * CELL_SIZE, currentOrientation);
+        g.setComposite(AlphaComposite.SrcOver);
+    }
 
-        // Dimensioni macchina in pixel
-        // w e h sono già ruotati (es. NORTH: w=2 celle, h=1 cella)
-
-        int cell = CELL_SIZE;
-
+    private void drawDirectionArrow(Graphics2D g, int x, int y, int w, int h, Direction dir) {
+        g.setColor(Color.YELLOW);
+        int cx = x + w / 2; int cy = y + h / 2;
         switch (dir) {
-            case NORTH:
-                // Out: Blocco Sinistro (0,0) -> Lato Nord
-                out = new Point(x + cell/2 - pSize/2, z);
-                // In: Lato Sud (z+h)
-                in1 = new Point(x + cell/2 - pSize/2, z + h - pSize); // Blocco Sinistro
-                in2 = new Point(x + (cell*3)/2 - pSize/2, z + h - pSize); // Blocco Destro
-                break;
-
-            case SOUTH:
-                // Out: Blocco Sinistro (Guardando Sud, è a dx nello schermo) -> (1,0) -> Lato Sud
-                out = new Point(x + (cell*3)/2 - pSize/2, z + h - pSize);
-                // In: Lato Nord
-                in1 = new Point(x + (cell*3)/2 - pSize/2, z);
-                in2 = new Point(x + cell/2 - pSize/2, z);
-                break;
-
-            case EAST:
-                // Out: Blocco Sinistro (Guardando Est, è sopra) -> (0,0) -> Lato Est
-                out = new Point(x + w - pSize, z + cell/2 - pSize/2);
-                // In: Lato Ovest
-                in1 = new Point(x, z + cell/2 - pSize/2);
-                in2 = new Point(x, z + (cell*3)/2 - pSize/2);
-                break;
-
-            case WEST:
-                // Out: Blocco Sinistro (Guardando Ovest, è sotto) -> (0,1) -> Lato Ovest
-                out = new Point(x, z + (cell*3)/2 - pSize/2);
-                // In: Lato Est
-                in1 = new Point(x + w - pSize, z + (cell*3)/2 - pSize/2);
-                in2 = new Point(x + w - pSize, z + cell/2 - pSize/2);
-                break;
-        }
-
-        if (out != null) {
-            g.setColor(Color.GREEN); g.fillRect(out.x, out.y, pSize, pSize);
-            g.setColor(Color.BLUE);  g.fillRect(in1.x, in1.y, pSize, pSize);
-            g.setColor(Color.BLUE);  g.fillRect(in2.x, in2.y, pSize, pSize);
+            case NORTH -> g.fillOval(cx - 3, y + 2, 6, 6);
+            case SOUTH -> g.fillOval(cx - 3, y + h - 8, 6, 6);
+            case EAST -> g.fillOval(x + w - 8, cy - 3, 6, 6);
+            case WEST -> g.fillOval(x + 2, cy - 3, 6, 6);
         }
     }
 
-    private void drawStandardPorts(Graphics2D g, PlacedMachine m, int x, int z, int w, int h) {
-        int pSize = 8;
-        Point out = null, in = null;
-        switch (m.getOrientation()) {
-            case NORTH -> { out = new Point(x + w/2 - pSize/2, z); in = new Point(x + w/2 - pSize/2, z + h - pSize); }
-            case SOUTH -> { out = new Point(x + w/2 - pSize/2, z + h - pSize); in = new Point(x + w/2 - pSize/2, z); }
-            case EAST  -> { out = new Point(x + w - pSize, z + h/2 - pSize/2); in = new Point(x, z + h/2 - pSize/2); }
-            case WEST  -> { out = new Point(x, z + h/2 - pSize/2); in = new Point(x + w - pSize, z + h/2 - pSize/2); }
-        }
-        if (out != null) { g.setColor(Color.GREEN); g.fillRect(out.x, out.y, pSize, pSize); }
-        if (in != null && !m.getTypeId().equals("drill_mk1")) { g.setColor(Color.BLUE); g.fillRect(in.x, in.y, pSize, pSize); }
+    private Color getColorFromStr(String c, int alpha) {
+        return switch(c) {
+            case "RED" -> new Color(200, 0, 0, alpha);
+            case "BLUE" -> new Color(0, 0, 200, alpha);
+            case "YELLOW" -> new Color(200, 200, 0, alpha);
+            case "PURPLE" -> new Color(160, 32, 240, alpha);
+            case "GREEN" -> new Color(0, 200, 0, alpha);
+            default -> new Color(120, 120, 120, alpha);
+        };
     }
 
     private Color getColorForType(String type) {
@@ -356,21 +281,4 @@ public class FactoryPanel extends JPanel {
             default -> Color.RED;
         };
     }
-
-    private void drawDirectionArrow(Graphics2D g, int x, int y, int w, int h, Direction dir) {
-        g.setColor(Color.YELLOW);
-        int cx = x + w / 2;
-        int cy = y + h / 2;
-        switch (dir) {
-            case NORTH -> g.fillOval(cx - 3, y + 2, 6, 6);
-            case SOUTH -> g.fillOval(cx - 3, y + h - 8, 6, 6);
-            case EAST ->  g.fillOval(x + w - 8, cy - 3, 6, 6);
-            case WEST ->  g.fillOval(x + 2, cy - 3, 6, 6);
-        }
-    }
-
-    private int toScreenX(int gridX) { return OFFSET_X + (gridX * CELL_SIZE); }
-    private int toScreenY(int gridZ) { return OFFSET_Y + (gridZ * CELL_SIZE); }
-    private int toGridX(int screenX) { return (screenX - OFFSET_X) / CELL_SIZE; }
-    private int toGridY(int screenY) { return (screenY - OFFSET_Y) / CELL_SIZE; }
 }
