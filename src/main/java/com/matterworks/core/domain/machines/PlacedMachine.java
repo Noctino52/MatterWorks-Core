@@ -16,7 +16,7 @@ public abstract class PlacedMachine implements IGridComponent {
     protected String typeId;
     protected GridPosition pos;
     protected Direction orientation;
-    protected Vector3Int dimensions; // Dimensioni BASE
+    protected Vector3Int dimensions;
     protected JsonObject metadata;
     protected GridManager gridManager;
     protected boolean isDirty = false;
@@ -36,7 +36,6 @@ public abstract class PlacedMachine implements IGridComponent {
         this.dimensions = new Vector3Int(1, 1, 1);
     }
 
-    // --- FIX ROTAZIONE FISICA ---
     @Override
     public Vector3Int getDimensions() {
         if (orientation == Direction.EAST || orientation == Direction.WEST) {
@@ -45,17 +44,36 @@ public abstract class PlacedMachine implements IGridComponent {
         return dimensions;
     }
 
+    // --- NUOVO METODO HELPER PER I VICINI ---
+    protected PlacedMachine getNeighborAt(GridPosition targetPos) {
+        if (gridManager == null) return null;
+        // Chiede al GM la macchina in quella posizione MA nello stesso universo (ownerId)
+        return gridManager.getMachineAt(this.ownerId, targetPos);
+    }
+
     public void setOrientation(Direction orientation) {
         this.orientation = orientation;
         this.metadata.addProperty("orientation", orientation.name());
         markDirty();
     }
+    public Direction getNeighborDirection(GridPosition neighborPos) {
+        int dx = neighborPos.x() - this.pos.x();
+        int dy = neighborPos.y() - this.pos.y();
+        int dz = neighborPos.z() - this.pos.z();
 
-    // --- METODI MANCANTI AGGIUNTI QUI ---
+        if (dx == 1) return Direction.EAST;
+        if (dx == -1) return Direction.WEST;
+        if (dz == 1) return Direction.SOUTH;
+        if (dz == -1) return Direction.NORTH;
+        if (dy == 1) return Direction.UP;
+        if (dy == -1) return Direction.DOWN;
+
+        return null; // Non adiacente
+    }
+
     public UUID getOwnerId() { return ownerId; }
     public void cleanDirty() { this.isDirty = false; }
 
-    // --- METODI STANDARD ---
     public GridPosition getPos() { return pos; }
     public String getTypeId() { return typeId; }
     public Direction getOrientation() { return orientation; }

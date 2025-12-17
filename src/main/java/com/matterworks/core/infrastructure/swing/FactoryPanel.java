@@ -65,12 +65,10 @@ public class FactoryPanel extends JPanel {
         });
     }
 
-    // --- API MANCANTI AGGIUNTE QUI ---
     public void setLayer(int y) { this.currentLayer = y; repaint(); }
-    public int getCurrentLayer() { return currentLayer; } // <--- ERA MANCANTE
-
+    public int getCurrentLayer() { return currentLayer; }
     public void setTool(String toolId) { this.currentTool = toolId; repaint(); }
-    public String getCurrentToolName() { return currentTool != null ? currentTool : "None"; } // <--- ERA MANCANTE
+    public String getCurrentToolName() { return currentTool != null ? currentTool : "None"; }
 
     public void rotate() {
         switch(currentOrientation) {
@@ -82,7 +80,7 @@ public class FactoryPanel extends JPanel {
         if (onStateChange != null) onStateChange.run();
         repaint();
     }
-    public String getCurrentOrientationName() { return currentOrientation.name(); } // <--- ERA MANCANTE
+    public String getCurrentOrientationName() { return currentOrientation.name(); }
 
     private void updateMousePos(int x, int y) {
         int gx = toGridX(x);
@@ -98,16 +96,10 @@ public class FactoryPanel extends JPanel {
         if (mouseHoverPos == null) return;
         if (SwingUtilities.isLeftMouseButton(e)) {
             if (currentTool != null) {
-                boolean success = gridManager.placeMachine(playerUuid, mouseHoverPos, currentTool);
-                if (success) {
-                    // Importante: Ruotiamo subito se l'orientamento scelto non è Default
-                    if (currentOrientation != Direction.NORTH) {
-                        gridManager.rotateMachine(mouseHoverPos, currentOrientation);
-                    }
-                }
+                gridManager.placeMachine(playerUuid, mouseHoverPos, currentTool, currentOrientation);
             }
         } else if (SwingUtilities.isRightMouseButton(e)) {
-            gridManager.removeComponent(mouseHoverPos);
+            gridManager.removeComponent(playerUuid, mouseHoverPos);
         }
     }
 
@@ -124,7 +116,7 @@ public class FactoryPanel extends JPanel {
     }
 
     private void drawTerrainResources(Graphics2D g) {
-        Map<GridPosition, MatterColor> resources = gridManager.getTerrainResources();
+        Map<GridPosition, MatterColor> resources = gridManager.getTerrainResources(playerUuid);
         for (Map.Entry<GridPosition, MatterColor> entry : resources.entrySet()) {
             GridPosition pos = entry.getKey();
             MatterColor type = entry.getValue();
@@ -159,7 +151,7 @@ public class FactoryPanel extends JPanel {
     }
 
     private void drawMachines(Graphics2D g) {
-        Map<GridPosition, PlacedMachine> machines = gridManager.getSnapshot();
+        Map<GridPosition, PlacedMachine> machines = gridManager.getSnapshot(playerUuid);
         for (PlacedMachine m : machines.values()) {
             int machineY = m.getPos().y();
             int machineHeight = m.getDimensions().y();
@@ -204,7 +196,11 @@ public class FactoryPanel extends JPanel {
         g.setColor(getColorForType(m.getTypeId()));
         g.fillRect(x + 2, z + 2, w - 4, h - 4);
 
-        if (m.getTypeId().equals("chromator") || m.getTypeId().equals("color_mixer")) {
+        // --- LOGICA PORTE SPECIFICA ---
+        if (m.getTypeId().equals("nexus_core")) {
+            drawNexusPorts(g, m, x, z, w, h);
+        }
+        else if (m.getTypeId().equals("chromator") || m.getTypeId().equals("color_mixer")) {
             drawPorts(g, m, x, z, w, h);
         } else {
             drawStandardPorts(g, m, x, z, w, h);
@@ -218,6 +214,29 @@ public class FactoryPanel extends JPanel {
             g.setColor(Color.WHITE);
             if (pos.y() == currentLayer) g.drawString("NEXUS", x + 10, z + 20);
         }
+    }
+
+    // --- NUOVO METODO: PORTE DEL NEXUS ---
+    // Disegna porte di ingresso (BLU) su tutti i lati per i primi 2 livelli.
+    private void drawNexusPorts(Graphics2D g, PlacedMachine m, int x, int z, int w, int h) {
+        int machineBaseY = m.getPos().y();
+        int relativeY = currentLayer - machineBaseY;
+
+        // Se siamo al livello 0 o 1 del Nexus (base o centro), disegna porte
+        if (relativeY >= 0 && relativeY <= 1) {
+            g.setColor(Color.BLUE);
+            int pSize = 8;
+
+            // Porta Nord
+            g.fillRect(x + w/2 - pSize/2, z, pSize, pSize);
+            // Porta Sud
+            g.fillRect(x + w/2 - pSize/2, z + h - pSize, pSize, pSize);
+            // Porta Ovest
+            g.fillRect(x, z + h/2 - pSize/2, pSize, pSize);
+            // Porta Est
+            g.fillRect(x + w - pSize, z + h/2 - pSize/2, pSize, pSize);
+        }
+        // Nessun Output (Verde)
     }
 
     private void drawBeltItem(Graphics2D g, ConveyorBelt belt, int x, int z) {
@@ -268,26 +287,42 @@ public class FactoryPanel extends JPanel {
         Direction dir = m.getOrientation();
         Point out = null, in1 = null, in2 = null;
 
+        // Dimensioni macchina in pixel
+        // w e h sono già ruotati (es. NORTH: w=2 celle, h=1 cella)
+
+        int cell = CELL_SIZE;
+
         switch (dir) {
             case NORTH:
-                out = new Point(x + w/2 - pSize/2, z);
-                in1 = new Point(x + w/4 - pSize/2, z + h - pSize);
-                in2 = new Point(x + (w*3)/4 - pSize/2, z + h - pSize);
+                // Out: Blocco Sinistro (0,0) -> Lato Nord
+                out = new Point(x + cell/2 - pSize/2, z);
+                // In: Lato Sud (z+h)
+                in1 = new Point(x + cell/2 - pSize/2, z + h - pSize); // Blocco Sinistro
+                in2 = new Point(x + (cell*3)/2 - pSize/2, z + h - pSize); // Blocco Destro
                 break;
+
             case SOUTH:
-                out = new Point(x + w/2 - pSize/2, z + h - pSize);
-                in1 = new Point(x + (w*3)/4 - pSize/2, z);
-                in2 = new Point(x + w/4 - pSize/2, z);
+                // Out: Blocco Sinistro (Guardando Sud, è a dx nello schermo) -> (1,0) -> Lato Sud
+                out = new Point(x + (cell*3)/2 - pSize/2, z + h - pSize);
+                // In: Lato Nord
+                in1 = new Point(x + (cell*3)/2 - pSize/2, z);
+                in2 = new Point(x + cell/2 - pSize/2, z);
                 break;
+
             case EAST:
-                out = new Point(x + w - pSize, z + h/2 - pSize/2);
-                in1 = new Point(x, z + h/4 - pSize/2);
-                in2 = new Point(x, z + (h*3)/4 - pSize/2);
+                // Out: Blocco Sinistro (Guardando Est, è sopra) -> (0,0) -> Lato Est
+                out = new Point(x + w - pSize, z + cell/2 - pSize/2);
+                // In: Lato Ovest
+                in1 = new Point(x, z + cell/2 - pSize/2);
+                in2 = new Point(x, z + (cell*3)/2 - pSize/2);
                 break;
+
             case WEST:
-                out = new Point(x, z + h/2 - pSize/2);
-                in1 = new Point(x + w - pSize, z + (h*3)/4 - pSize/2);
-                in2 = new Point(x + w - pSize, z + h/4 - pSize/2);
+                // Out: Blocco Sinistro (Guardando Ovest, è sotto) -> (0,1) -> Lato Ovest
+                out = new Point(x, z + (cell*3)/2 - pSize/2);
+                // In: Lato Est
+                in1 = new Point(x + w - pSize, z + (cell*3)/2 - pSize/2);
+                in2 = new Point(x + w - pSize, z + cell/2 - pSize/2);
                 break;
         }
 

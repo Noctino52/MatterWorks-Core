@@ -1,6 +1,6 @@
 package com.matterworks.core.synchronization;
 
-import com.matterworks.core.common.GridPosition; // <--- IMPORT AGGIUNTO
+import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.domain.machines.PlacedMachine;
 import com.matterworks.core.managers.GridManager;
 import com.matterworks.core.ports.IRepository;
@@ -21,10 +21,10 @@ public class GridSaverService {
     }
 
     public void autoSaveTask() {
-        // Recupera tutte le macchine
-        Map<GridPosition, PlacedMachine> allMachines = gridManager.getSnapshot();
+        // FIX: Usa getAllMachinesSnapshot() invece di getSnapshot()
+        // Questo recupera le macchine di TUTTI i giocatori per salvarle.
+        Map<GridPosition, PlacedMachine> allMachines = gridManager.getAllMachinesSnapshot();
 
-        // Filtra quelle "sporche" (modificate)
         List<PlacedMachine> dirtyMachines = allMachines.values().stream()
                 .filter(PlacedMachine::isDirty)
                 .distinct()
@@ -32,7 +32,6 @@ public class GridSaverService {
 
         if (dirtyMachines.isEmpty()) return;
 
-        // Raggruppa per Proprietario (Plot)
         Map<UUID, List<PlacedMachine>> machinesByOwner = dirtyMachines.stream()
                 .collect(Collectors.groupingBy(PlacedMachine::getOwnerId));
 
@@ -40,12 +39,7 @@ public class GridSaverService {
 
         for (Map.Entry<UUID, List<PlacedMachine>> entry : machinesByOwner.entrySet()) {
             List<PlacedMachine> toSave = entry.getValue();
-
-            // Salva nel DB (aggiorna metadati)
-            // ORA IL METODO ESISTE NELL'INTERFACCIA
             repository.updateMachinesMetadata(toSave);
-
-            // Pulisce il flag dirty
             toSave.forEach(PlacedMachine::cleanDirty);
         }
     }

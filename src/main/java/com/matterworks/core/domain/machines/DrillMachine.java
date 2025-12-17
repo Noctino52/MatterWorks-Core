@@ -29,6 +29,7 @@ public class DrillMachine extends PlacedMachine {
         int capacity = CoreConfig.getInt("machine.inventory.capacity", 64);
         this.outputBuffer = new MachineInventory(capacity);
 
+        // Caricamento Dati
         if (this.metadata != null) {
             if (this.metadata.has("items")) {
                 this.outputBuffer.loadState(this.metadata);
@@ -45,8 +46,7 @@ public class DrillMachine extends PlacedMachine {
 
     public void setResourceToMine(MatterColor resource) {
         this.resourceToMine = resource;
-        this.metadata.addProperty("mining_resource", resource.name());
-        markDirty();
+        saveInternalState(); // Salva subito
     }
 
     @Override
@@ -63,37 +63,54 @@ public class DrillMachine extends PlacedMachine {
     }
 
     private void produceItem() {
-        // MODIFICA: Se è RAW è un CUBO, altrimenti è NULL (Liquido/Colore puro)
         MatterShape shape = (this.resourceToMine == MatterColor.RAW) ? MatterShape.CUBE : null;
-
         MatterPayload newItem = new MatterPayload(shape, this.resourceToMine);
 
         if (outputBuffer.insert(newItem)) {
-            // System.out.println("Drill -> MINED " + this.resourceToMine + ". Buffer: " + outputBuffer.getCount());
-            this.metadata = outputBuffer.serialize();
-            this.metadata.addProperty("mining_resource", resourceToMine.name());
-            markDirty();
+            saveInternalState(); // Usa il metodo sicuro
         }
     }
 
     private void tryEjectItem(long currentTick) {
         if (outputBuffer.isEmpty()) return;
-        if (gridManager == null) return;
 
+        // FIX: Usa getNeighborAt per trovare il nastro del proprietario corretto
+        // (Assumendo che tu abbia applicato la patch Multi-Tenant precedente)
         Vector3Int dir = orientation.toVector();
         GridPosition targetPos = new GridPosition(pos.x() + dir.x(), pos.y() + dir.y(), pos.z() + dir.z());
 
-        PlacedMachine neighbor = gridManager.getMachineAt(targetPos);
+        // Se non hai ancora il metodo getNeighborAt nella classe padre, usa:
+        // PlacedMachine neighbor = gridManager.getMachineAt(this.ownerId, targetPos);
+        PlacedMachine neighbor = getNeighborAt(targetPos);
+
         if (neighbor instanceof ConveyorBelt belt) {
             MatterPayload item = outputBuffer.extractFirst();
             if (item != null) {
                 if (belt.insertItem(item, currentTick)) {
-                    this.metadata = outputBuffer.serialize();
-                    markDirty();
+                    saveInternalState(); // FIX: Usa il metodo sicuro invece di sovrascrivere
                 } else {
-                    outputBuffer.insert(item);
+                    outputBuffer.insert(item); // Rollback se il nastro è pieno
                 }
             }
         }
+    }
+
+    /**
+     * Metodo centrale per aggiornare i metadati senza perdere pezzi.
+     * Unisce lo stato dell'inventario con la configurazione della risorsa.
+     */
+    private void saveInternalState() {
+        // 1. Ottieni il JSON dell'inventario
+        JsonObject invState = outputBuffer.serialize();
+
+        // 2. Fai il merge dentro this.metadata invece di sovrascriverlo brutalmente
+        this.metadata.add("items", invState.get("items"));
+        this.metadata.add("capacity", invState.get("capacity"));
+
+        // 3. Assicura che la risorsa sia sempre salvata
+        this.metadata.addProperty("mining_resource", resourceToMine.name());
+
+        // 4. Marca per il salvataggio DB
+        markDirty();
     }
 }

@@ -21,13 +21,12 @@ public class MatterWorksGUI extends JFrame {
         setSize(1280, 900);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setLocationRelativeTo(null);
-
         setLayout(new BorderLayout());
 
         // INFO LABELS
         lblTool = createLabel("TOOL: Drill");
         lblOrient = createLabel("DIR: NORTH");
-        lblLayer = createLabel("LAYER Y: 64");
+        lblLayer = createLabel("LAYER Y: 0");
         lblLayer.setForeground(Color.CYAN);
 
         lblMoney = new JLabel("MONEY: $---");
@@ -37,31 +36,32 @@ public class MatterWorksGUI extends JFrame {
         // GRID PANEL
         panel = new FactoryPanel(gridManager, registry, playerUuid, this::updateLabels);
 
-        // BUTTONS
+        // --- LEFT TOOLBAR ---
         JPanel leftTools = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
         leftTools.setOpaque(false);
 
         JButton btnDrill = createButton("⛏ Drill", e -> setTool("drill_mk1"));
         JButton btnBelt = createButton("⨠ Belt", e -> setTool("conveyor_belt"));
-        // NUOVO BOTTONE CHROMATOR
         JButton btnChromator = createButton("🎨 Chromator", e -> setTool("chromator"));
-        btnChromator.setBackground(new Color(255, 140, 0)); // Arancione
+        btnChromator.setBackground(new Color(255, 140, 0));
         btnChromator.setForeground(Color.BLACK);
-
+        JButton btnMixer = createButton("🌀 Mixer", e -> setTool("color_mixer"));
+        btnMixer.setBackground(new Color(0, 200, 200));
+        btnMixer.setForeground(Color.BLACK);
         JButton btnNexus = createButton("🔮 Nexus", e -> setTool("nexus_core"));
+        btnNexus.setBackground(new Color(100, 0, 150));
+        btnNexus.setForeground(Color.WHITE);
 
         JSeparator sep1 = new JSeparator(SwingConstants.VERTICAL); sep1.setPreferredSize(new Dimension(5, 25));
-
         JButton btnLayerUp = createButton("⬆ Layer UP", e -> changeLayer(1));
         JButton btnLayerDown = createButton("⬇ Layer DOWN", e -> changeLayer(-1));
-
         JSeparator sep2 = new JSeparator(SwingConstants.VERTICAL); sep2.setPreferredSize(new Dimension(5, 25));
-
         JButton btnRotate = createButton("↻ Rotate (R)", e -> panel.rotate());
 
         leftTools.add(btnDrill);
         leftTools.add(btnBelt);
-        leftTools.add(btnChromator); // Aggiunto qui
+        leftTools.add(btnChromator);
+        leftTools.add(btnMixer);
         leftTools.add(btnNexus);
         leftTools.add(sep1);
         leftTools.add(btnLayerDown);
@@ -69,21 +69,42 @@ public class MatterWorksGUI extends JFrame {
         leftTools.add(sep2);
         leftTools.add(btnRotate);
 
-        // SYSTEM BUTTONS
-        JPanel rightSystem = new JPanel(new FlowLayout(FlowLayout.RIGHT, 15, 0));
+        // --- RIGHT SYSTEM BUTTONS ---
+        JPanel rightSystem = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 0));
         rightSystem.setOpaque(false);
 
+        // SAVE
         JButton btnSave = createButton("💾 SAVE", e -> {
             onSave.run();
             JOptionPane.showMessageDialog(this, "Salvataggio Completato!", "Sistema", JOptionPane.INFORMATION_MESSAGE);
         });
-        JButton btnMixer = createButton("🌀 Mixer", e -> setTool("color_mixer"));
-        btnMixer.setBackground(new Color(0, 200, 200));
-        leftTools.add(btnMixer);
         btnSave.setBackground(new Color(0, 100, 200));
 
+        // NUOVO: RESET BUTTON
+        JButton btnReset = createButton("⚠️ RESET", e -> {
+            int choice = JOptionPane.showConfirmDialog(this,
+                    "Sei sicuro di voler RESETTARE tutto?\nCancellerà tutte le macchine e cambierà posizione alle vene.\nNon si può annullare.",
+                    "Conferma Reset",
+                    JOptionPane.YES_NO_OPTION,
+                    JOptionPane.WARNING_MESSAGE);
+
+            if (choice == JOptionPane.YES_OPTION) {
+                gridManager.resetUserPlot(playerUuid);
+                // Aspetta un attimo per dare tempo al DB di resettare
+                Timer t = new Timer(500, x -> {
+                    panel.repaint();
+                    JOptionPane.showMessageDialog(this, "Plot resettato e vene rigenerate!", "Reset", JOptionPane.INFORMATION_MESSAGE);
+                });
+                t.setRepeats(false);
+                t.start();
+            }
+        });
+        btnReset.setBackground(new Color(200, 0, 0));
+
         rightSystem.add(lblMoney);
+        rightSystem.add(Box.createHorizontalStrut(20));
         rightSystem.add(btnSave);
+        rightSystem.add(btnReset); // Aggiunto qui
 
         // LAYOUT ASSEMBLY
         JPanel topContainer = new JPanel(new BorderLayout());
@@ -147,7 +168,6 @@ public class MatterWorksGUI extends JFrame {
         btn.setBorder(BorderFactory.createEmptyBorder(5, 10, 5, 10));
         return btn;
     }
-
 
     private JLabel createLabel(String text) {
         JLabel lbl = new JLabel(text);

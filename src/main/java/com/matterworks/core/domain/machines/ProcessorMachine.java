@@ -6,22 +6,22 @@ import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.domain.inventory.MachineInventory;
 import com.matterworks.core.domain.matter.MatterPayload;
 import com.matterworks.core.domain.matter.Recipe;
-import com.matterworks.core.domain.matter.RecipeRegistry;
 
-import java.util.Collections;
 import java.util.UUID;
 
 public abstract class ProcessorMachine extends PlacedMachine {
 
     protected final MachineInventory inputBuffer;
     protected final MachineInventory outputBuffer;
-
     protected Recipe currentRecipe;
     protected long finishTick = -1;
 
+    protected static final int MAX_INPUT_STACK = 64;
+    protected static final int MAX_OUTPUT_STACK = 64;
+
     public ProcessorMachine(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata) {
         super(dbId, ownerId, typeId, pos, metadata);
-        this.inputBuffer = new MachineInventory(2); // Default a 2 per sicurezza
+        this.inputBuffer = new MachineInventory(2);
         this.outputBuffer = new MachineInventory(1);
 
         if (this.metadata.has("input")) this.inputBuffer.loadState(this.metadata.getAsJsonObject("input"));
@@ -30,16 +30,19 @@ public abstract class ProcessorMachine extends PlacedMachine {
 
     @Override
     public void tick(long currentTick) {
-        // 1. Output Logistico
         tryEjectItem(currentTick);
-
-        // 2. Logica di Processamento (Base)
-        // Le sottoclassi possono fare Override se vogliono logiche custom (come il Chromator)
         processRecipe(currentTick);
     }
 
-    public boolean insertItem(MatterPayload item) {
-        if (inputBuffer.insert(item)) {
+    public boolean insertItem(MatterPayload item) { return false; }
+    public abstract boolean insertItem(MatterPayload item, GridPosition fromPos);
+
+    // NUOVO METODO ASTRATTO: Ogni macchina deve dire esattamente DOVE sputa l'output
+    protected abstract GridPosition getOutputPosition();
+
+    protected boolean insertIntoBuffer(int slotIndex, MatterPayload item) {
+        if (inputBuffer.getCountInSlot(slotIndex) >= MAX_INPUT_STACK) return false;
+        if (inputBuffer.insertIntoSlot(slotIndex, item)) {
             saveState();
             return true;
         }
@@ -47,17 +50,10 @@ public abstract class ProcessorMachine extends PlacedMachine {
     }
 
     protected void processRecipe(long currentTick) {
+        if (outputBuffer.getCount() >= MAX_OUTPUT_STACK) return;
         if (currentRecipe != null) {
-            if (currentTick >= finishTick) {
-                completeProcessing();
-            }
-            return;
+            if (currentTick >= finishTick) completeProcessing();
         }
-
-        if (inputBuffer.isEmpty()) return;
-
-        // Logica Standard (1 input -> 1 output)
-        // Il Chromator farà Override di questo metodo per gestire 2 input.
     }
 
     protected void completeProcessing() {
@@ -69,33 +65,31 @@ public abstract class ProcessorMachine extends PlacedMachine {
         }
     }
 
-    // --- FIX QUI: cambiato da private a protected ---
     protected void tryEjectItem(long currentTick) {
         if (outputBuffer.isEmpty()) return;
         if (gridManager == null) return;
 
-        Vector3Int dir = orientation.toVector();
-        GridPosition targetPos = new GridPosition(pos.x() + dir.x(), pos.y() + dir.y(), pos.z() + dir.z());
+        // FIX: Usa la posizione specifica calcolata dalla sottoclasse
+        GridPosition targetPos = getOutputPosition();
+        if (targetPos == null) return;
 
-        PlacedMachine neighbor = gridManager.getMachineAt(targetPos);
+        PlacedMachine neighbor = getNeighborAt(targetPos);
 
         if (neighbor instanceof ConveyorBelt belt) {
             MatterPayload item = outputBuffer.extractFirst();
             if (item != null) {
-                if (belt.insertItem(item, currentTick)) {
-                    saveState();
-                } else {
-                    outputBuffer.insert(item); // Rollback
-                }
+                // Passiamo 'this.pos' (o meglio, la posizione precisa dell'output sarebbe ideale, ma this.pos va bene per ora)
+                if (belt.insertItem(item, currentTick)) saveState();
+                else outputBuffer.insert(item);
             }
         } else if (neighbor instanceof NexusMachine nexus) {
             MatterPayload item = outputBuffer.extractFirst();
             if (item != null) {
-                if (nexus.insertItem(item)) {
-                    saveState();
-                } else {
-                    outputBuffer.insert(item);
-                }
+                // Nexus requires strict fromPos checking now.
+                // We pass the output position as the "source"
+                GridPosition outputSource = getOutputPosition().add(orientation.opposite().toVector());
+                if (nexus.insertItem(item, outputSource)) saveState();
+                else outputBuffer.insert(item);
             }
         }
     }

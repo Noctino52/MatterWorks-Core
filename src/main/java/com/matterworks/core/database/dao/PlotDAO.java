@@ -22,13 +22,14 @@ public class PlotDAO {
         this.dbManager = dbManager;
     }
 
-    public Integer findPlotIdByOwner(UUID ownerId) {
+    // UPDATE: Ritorna Long
+    public Long findPlotIdByOwner(UUID ownerId) {
         String sql = "SELECT id FROM plots WHERE owner_id = ?";
         try (Connection conn = dbManager.getConnection();
              PreparedStatement stmt = conn.prepareStatement(sql)) {
             stmt.setBytes(1, UuidUtils.asBytes(ownerId));
             try (ResultSet rs = stmt.executeQuery()) {
-                if (rs.next()) return rs.getInt("id");
+                if (rs.next()) return rs.getLong("id"); // getLong
             }
         } catch (SQLException e) {
             e.printStackTrace();
@@ -51,21 +52,20 @@ public class PlotDAO {
         }
     }
 
-    // --- NUOVO METODO PER INSERIRE MACCHINE ---
     public Long insertMachine(UUID ownerId, String typeId, int x, int y, int z, String metadataJson) {
-        Integer plotId = findPlotIdByOwner(ownerId);
+        // UPDATE: Usa Long
+        Long plotId = findPlotIdByOwner(ownerId);
         if (plotId == null) {
             System.err.println("❌ Nessun plot trovato per salvare la macchina!");
             return null;
         }
 
-        // Usa 'metadata' (senza underscore) come da tuo DB attuale
         String sql = "INSERT INTO plot_machines (plot_id, type_id, x, y, z, metadata) VALUES (?, ?, ?, ?, ?, ?)";
 
         try (Connection conn = dbManager.getConnection();
              PreparedStatement stmt = conn.prepareStatement(sql, java.sql.Statement.RETURN_GENERATED_KEYS)) {
 
-            stmt.setInt(1, plotId);
+            stmt.setLong(1, plotId); // setLong
             stmt.setString(2, typeId);
             stmt.setInt(3, x);
             stmt.setInt(4, y);

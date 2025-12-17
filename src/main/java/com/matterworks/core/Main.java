@@ -1,6 +1,5 @@
 package com.matterworks.core;
 
-import com.matterworks.core.common.Direction;
 import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.database.DatabaseManager;
@@ -8,9 +7,6 @@ import com.matterworks.core.database.dao.MachineDefinitionDAO;
 import com.matterworks.core.database.dao.PlayerDAO;
 import com.matterworks.core.database.dao.PlotDAO;
 import com.matterworks.core.domain.machines.BlockRegistry;
-import com.matterworks.core.domain.machines.DrillMachine;
-import com.matterworks.core.domain.machines.PlacedMachine;
-import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.infrastructure.CoreConfig;
 import com.matterworks.core.infrastructure.MariaDBAdapter;
@@ -63,7 +59,6 @@ public class Main {
         gridManager.loadPlotFromDB(playerUuid);
         Thread.sleep(500);
 
-
         if (GraphicsEnvironment.isHeadless()) {
             System.out.println("👻 MODALITÀ HEADLESS ATTIVA (SERVER)");
         } else {
@@ -100,7 +95,6 @@ public class Main {
             }
         }
     }
-
 
     private static void ensurePlayerExists(DatabaseManager db, UUID uuid) {
         PlayerDAO playerDao = new PlayerDAO(db);

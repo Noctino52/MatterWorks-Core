@@ -26,10 +26,7 @@ public class ConveyorBelt extends PlacedMachine {
     @Override
     public void tick(long currentTick) {
         if (currentItem == null) return;
-
-        if (arrivalTick == -1) {
-            arrivalTick = currentTick + TRANSPORT_TIME;
-        }
+        if (arrivalTick == -1) arrivalTick = currentTick + TRANSPORT_TIME;
 
         if (currentTick >= arrivalTick) {
             pushToNeighbor(currentTick);
@@ -38,10 +35,8 @@ public class ConveyorBelt extends PlacedMachine {
 
     public boolean insertItem(MatterPayload item, long currentTick) {
         if (this.currentItem != null) return false;
-
         this.currentItem = item;
         this.arrivalTick = currentTick + TRANSPORT_TIME;
-
         this.metadata.add("currentItem", item.serialize());
         markDirty();
         return true;
@@ -57,23 +52,23 @@ public class ConveyorBelt extends PlacedMachine {
                 pos.z() + dirVec.z()
         );
 
-        PlacedMachine neighbor = gridManager.getMachineAt(targetPos);
+        PlacedMachine neighbor = getNeighborAt(targetPos);
         boolean moved = false;
 
         if (neighbor instanceof ConveyorBelt nextBelt) {
             moved = nextBelt.insertItem(currentItem, currentTick);
         }
         else if (neighbor instanceof NexusMachine nexus) {
-            moved = nexus.insertItem(currentItem);
+            // FIX CRUCIALE: Passiamo 'this.pos' (la posizione del nastro)
+            // Il Nexus userà questa coordinata per verificare se il nastro è davanti a una porta valida.
+            moved = nexus.insertItem(currentItem, this.pos);
         }
-        // 2. AGGIUNGI QUESTO BLOCCO FONDAMENTALE
         else if (neighbor instanceof ProcessorMachine processor) {
-            // Il Chromator è un ProcessorMachine
-            moved = processor.insertItem(currentItem);
+            // Anche i processori ora richiedono la posizione di origine
+            moved = processor.insertItem(currentItem, this.pos);
         }
 
         if (moved) {
-            // System.out.println("Belt -> Consegnato a " + neighbor.getTypeId());
             this.currentItem = null;
             this.arrivalTick = -1;
             this.metadata.remove("currentItem");
@@ -84,13 +79,8 @@ public class ConveyorBelt extends PlacedMachine {
     @Override
     public JsonObject serialize() {
         super.serialize();
-        if (currentItem != null) {
-            // Se c'è un item, SCRIVILO nel metadata
-            this.metadata.add("currentItem", currentItem.serialize());
-        } else {
-            // Se non c'è, RIMUOVI la chiave vecchia (altrimenti rimane il fantasma)
-            this.metadata.remove("currentItem");
-        }
+        if (currentItem != null) this.metadata.add("currentItem", currentItem.serialize());
+        else this.metadata.remove("currentItem");
         return this.metadata;
     }
 }
