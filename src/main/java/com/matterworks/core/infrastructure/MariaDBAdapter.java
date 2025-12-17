@@ -1,84 +1,80 @@
 package com.matterworks.core.infrastructure;
 
-import com.google.gson.JsonParser; // Utile per il parsing
 import com.matterworks.core.database.DatabaseManager;
 import com.matterworks.core.database.dao.PlayerDAO;
 import com.matterworks.core.database.dao.PlotDAO;
-import com.matterworks.core.database.dao.PlotObjectDAO;
-import com.matterworks.core.domain.player.LinkCode;
+import com.matterworks.core.domain.machines.PlacedMachine;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.model.PlotObject;
 import com.matterworks.core.ports.IRepository;
 
-import java.util.Collections;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
 import java.util.List;
 import java.util.UUID;
 
 public class MariaDBAdapter implements IRepository {
 
+    private final DatabaseManager dbManager;
     private final PlayerDAO playerDAO;
     private final PlotDAO plotDAO;
-    private final PlotObjectDAO plotObjectDAO;
 
     public MariaDBAdapter(DatabaseManager dbManager) {
+        this.dbManager = dbManager;
         this.playerDAO = new PlayerDAO(dbManager);
         this.plotDAO = new PlotDAO(dbManager);
-        this.plotObjectDAO = new PlotObjectDAO(dbManager);
     }
 
     @Override
-    public void savePlayerProfile(PlayerProfile p) {
-        playerDAO.save(p);
+    public PlayerProfile loadPlayerProfile(UUID uuid) {
+        return playerDAO.load(uuid);
     }
 
     @Override
-    public PlayerProfile loadPlayerProfile(UUID p) {
-        return playerDAO.load(p);
+    public void savePlayerProfile(PlayerProfile profile) {
+        playerDAO.save(profile);
     }
 
     @Override
-    public List<PlotObject> loadPlotMachines(UUID plotOwnerId) {
-        Long plotId = plotDAO.findPlotIdByOwner(plotOwnerId);
-        if (plotId == null) return Collections.emptyList();
-
-        List<PlotObject> machines = plotObjectDAO.loadPlotMachines(plotId);
-
-        // Piccola fix per convertire stringhe JSON in JsonObject se necessario
-        for (PlotObject obj : machines) {
-            if (obj.getMetaData() == null && obj.getRawMetaData() != null) {
-                try {
-                    obj.setMetaData(JsonParser.parseString(obj.getRawMetaData()).getAsJsonObject());
-                } catch (Exception e) { /* Ignora errori parse su dati vecchi */ }
-            }
-        }
-        return machines;
+    public List<PlotObject> loadPlotMachines(UUID ownerId) {
+        return plotDAO.loadMachines(ownerId);
     }
 
     @Override
-    public void savePlotMachines(UUID plotOwnerId, List<PlotObject> machines) {
-        Long plotId = plotDAO.findPlotIdByOwner(plotOwnerId);
-        if (plotId == null) return;
-
-        for (PlotObject obj : machines) {
-            obj.setPlotId(plotId);
-            plotObjectDAO.placeMachine(obj);
-        }
+    public Long createMachine(UUID ownerId, PlacedMachine machine) {
+        String jsonMeta = machine.serialize().toString();
+        // Chiama il nuovo metodo nel DAO
+        return plotDAO.insertMachine(
+                ownerId,
+                machine.getTypeId(),
+                machine.getPos().x(),
+                machine.getPos().y(),
+                machine.getPos().z(),
+                jsonMeta
+        );
     }
 
-    // NEW: Implementazione delete
     @Override
     public void deleteMachine(Long dbId) {
-        plotObjectDAO.deleteMachine(dbId);
+        plotDAO.removeMachine(dbId);
     }
 
     @Override
-    public void saveWebLinkCode(UUID p, LinkCode code) {
-        // Todo implementation
+    public void updateMachinesMetadata(List<PlacedMachine> machines) {
+        if (machines == null || machines.isEmpty()) return;
+        String sql = "UPDATE plot_machines SET metadata = ? WHERE id = ?";
+        try (Connection conn = dbManager.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+            for (PlacedMachine pm : machines) {
+                if (pm.getDbId() == null) continue;
+                stmt.setString(1, pm.serialize().toString());
+                stmt.setLong(2, pm.getDbId());
+                stmt.addBatch();
+            }
+            stmt.executeBatch();
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
     }
-
-    @Override
-    public void loadRecipes() {}
-
-    @Override
-    public void fetchTransactions() {}
 }

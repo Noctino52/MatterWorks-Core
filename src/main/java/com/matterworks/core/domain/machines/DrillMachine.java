@@ -18,14 +18,13 @@ public class DrillMachine extends PlacedMachine {
     private long nextSpawnTick = -1;
     private final MachineInventory outputBuffer;
 
-    // --- NUOVO: Risorsa target ---
-    private MatterColor resourceToMine = MatterColor.RAW; // Default fallback
+    private MatterColor resourceToMine = MatterColor.RAW;
 
     public DrillMachine(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata, int tierLevel) {
         super(dbId, ownerId, typeId, pos, metadata);
         this.tierLevel = tierLevel;
         this.productionSpeed = tierLevel * 1.0f;
-        this.dimensions = new Vector3Int(1, 2, 1); // 1x1 base, 2 altezza
+        this.dimensions = new Vector3Int(1, 2, 1);
 
         int capacity = CoreConfig.getInt("machine.inventory.capacity", 64);
         this.outputBuffer = new MachineInventory(capacity);
@@ -34,7 +33,6 @@ public class DrillMachine extends PlacedMachine {
             if (this.metadata.has("items")) {
                 this.outputBuffer.loadState(this.metadata);
             }
-            // Carichiamo la risorsa dal salvataggio precedente
             if (this.metadata.has("mining_resource")) {
                 try {
                     this.resourceToMine = MatterColor.valueOf(this.metadata.get("mining_resource").getAsString());
@@ -45,7 +43,6 @@ public class DrillMachine extends PlacedMachine {
         }
     }
 
-    // Chiamato dal GridManager al momento del piazzamento
     public void setResourceToMine(MatterColor resource) {
         this.resourceToMine = resource;
         this.metadata.addProperty("mining_resource", resource.name());
@@ -54,7 +51,6 @@ public class DrillMachine extends PlacedMachine {
 
     @Override
     public void tick(long currentTick) {
-        // 1. Produzione
         if (nextSpawnTick == -1) {
             nextSpawnTick = currentTick + (long)(20 / productionSpeed);
         }
@@ -63,23 +59,20 @@ public class DrillMachine extends PlacedMachine {
             produceItem();
             nextSpawnTick = currentTick + (long)(20 / productionSpeed);
         }
-
-        // 2. Output Logistico
         tryEjectItem(currentTick);
     }
 
     private void produceItem() {
-        // --- MODIFICA: Usa la risorsa specifica invece di RAW fisso ---
-        MatterPayload newItem = new MatterPayload(MatterShape.CUBE, this.resourceToMine);
+        // MODIFICA: Se è RAW è un CUBO, altrimenti è NULL (Liquido/Colore puro)
+        MatterShape shape = (this.resourceToMine == MatterColor.RAW) ? MatterShape.CUBE : null;
+
+        MatterPayload newItem = new MatterPayload(shape, this.resourceToMine);
 
         if (outputBuffer.insert(newItem)) {
-            System.out.println("Drill -> MINED " + this.resourceToMine + ". Buffer: " + outputBuffer.getCount());
+            // System.out.println("Drill -> MINED " + this.resourceToMine + ". Buffer: " + outputBuffer.getCount());
             this.metadata = outputBuffer.serialize();
-            // Assicuriamoci di salvare anche la config risorsa
             this.metadata.addProperty("mining_resource", resourceToMine.name());
             markDirty();
-        } else {
-            // Buffer pieno
         }
     }
 
@@ -94,9 +87,7 @@ public class DrillMachine extends PlacedMachine {
         if (neighbor instanceof ConveyorBelt belt) {
             MatterPayload item = outputBuffer.extractFirst();
             if (item != null) {
-                boolean accepted = belt.insertItem(item, currentTick);
-                if (accepted) {
-                    System.out.println("Drill -> EJECTED item to Belt at " + targetPos);
+                if (belt.insertItem(item, currentTick)) {
                     this.metadata = outputBuffer.serialize();
                     markDirty();
                 } else {

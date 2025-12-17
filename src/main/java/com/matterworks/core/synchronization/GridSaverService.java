@@ -1,21 +1,15 @@
 package com.matterworks.core.synchronization;
 
+import com.matterworks.core.common.GridPosition; // <--- IMPORT AGGIUNTO
 import com.matterworks.core.domain.machines.PlacedMachine;
 import com.matterworks.core.managers.GridManager;
-import com.matterworks.core.model.PlotObject;
 import com.matterworks.core.ports.IRepository;
-import com.matterworks.core.common.GridPosition;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
-/**
- * Servizio di Auto-Save.
- * - GridSaverService.
- */
 public class GridSaverService {
 
     private final GridManager gridManager;
@@ -26,42 +20,33 @@ public class GridSaverService {
         this.repository = repository;
     }
 
-    /**
-     * Eseguito da uno scheduler o manualmente.
-     * autoSaveTask
-     */
     public void autoSaveTask() {
-        Map<GridPosition, PlacedMachine> snapshot = gridManager.getSnapshot();
+        // Recupera tutte le macchine
+        Map<GridPosition, PlacedMachine> allMachines = gridManager.getSnapshot();
 
-        // Raggruppa le macchine per Proprietario (per fare salvataggi batch per plot)
-        Map<UUID, List<PlacedMachine>> byOwner = snapshot.values().stream()
-                .filter(PlacedMachine::isDirty) // Salva solo quelle cambiate
+        // Filtra quelle "sporche" (modificate)
+        List<PlacedMachine> dirtyMachines = allMachines.values().stream()
+                .filter(PlacedMachine::isDirty)
+                .distinct()
+                .collect(Collectors.toList());
+
+        if (dirtyMachines.isEmpty()) return;
+
+        // Raggruppa per Proprietario (Plot)
+        Map<UUID, List<PlacedMachine>> machinesByOwner = dirtyMachines.stream()
                 .collect(Collectors.groupingBy(PlacedMachine::getOwnerId));
 
-        if (byOwner.isEmpty()) return;
+        System.out.println("💾 AutoSave: Saving dirty machines for " + machinesByOwner.size() + " plots.");
 
-        System.out.println("💾 AutoSave: Saving dirty machines for " + byOwner.size() + " plots.");
+        for (Map.Entry<UUID, List<PlacedMachine>> entry : machinesByOwner.entrySet()) {
+            List<PlacedMachine> toSave = entry.getValue();
 
-        byOwner.forEach((ownerId, machines) -> {
-            // 1. Converti Domain -> DTO
-            List<PlotObject> dtos = new ArrayList<>();
-            for (PlacedMachine m : machines) {
-                // Creiamo un DTO con i dati aggiornati (specialmente il metadata JSON)
-                PlotObject dto = new PlotObject(
-                        m.getDbId(),
-                        null, // PlotID gestito internamente dal Repository/DAO tramite owner o DB ID
-                        m.getPos().x(), m.getPos().y(), m.getPos().z(),
-                        m.getTypeId(),
-                        m.serialize()   // JSON stato aggiornato
-                );
-                dtos.add(dto);
-            }
+            // Salva nel DB (aggiorna metadati)
+            // ORA IL METODO ESISTE NELL'INTERFACCIA
+            repository.updateMachinesMetadata(toSave);
 
-            // 2. Salva tramite Repository
-            repository.savePlotMachines(ownerId, dtos);
-
-            // 3. Pulisci dirty flag
-            machines.forEach(PlacedMachine::clearDirty);
-        });
+            // Pulisce il flag dirty
+            toSave.forEach(PlacedMachine::cleanDirty);
+        }
     }
 }

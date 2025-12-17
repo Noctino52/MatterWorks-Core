@@ -7,58 +7,168 @@ import com.matterworks.core.domain.matter.MatterPayload;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Predicate;
 
 public class MachineInventory {
 
-    private final List<MatterPayload> slots;
-    private final int maxCapacity;
+    // Classe interna per rappresentare uno Slot con quantità
+    private static class InventorySlot {
+        MatterPayload item;
+        int count;
 
-    public MachineInventory(int maxCapacity) {
-        this.maxCapacity = maxCapacity;
-        this.slots = new ArrayList<>();
+        InventorySlot(MatterPayload item, int count) {
+            this.item = item;
+            this.count = count;
+        }
     }
 
-    public boolean insert(MatterPayload m) {
-        if (slots.size() >= maxCapacity) return false;
-        slots.add(m);
-        return true;
+    private final List<InventorySlot> slots;
+    private final int slotCount;
+    private final int MAX_STACK_SIZE = 64; // Limite stack per slot
+
+    public MachineInventory(int slotCount) {
+        this.slotCount = slotCount;
+        this.slots = new ArrayList<>(slotCount);
+        // Inizializza slot vuoti
+        for (int i = 0; i < slotCount; i++) {
+            slots.add(null);
+        }
+    }
+
+    // --- GESTIONE SLOT (STACKING LOGIC) ---
+
+    public MatterPayload getItemInSlot(int slotIndex) {
+        if (slotIndex < 0 || slotIndex >= slots.size()) return null;
+        InventorySlot slot = slots.get(slotIndex);
+        return (slot != null) ? slot.item : null;
+    }
+
+    public int getCountInSlot(int slotIndex) {
+        if (slotIndex < 0 || slotIndex >= slots.size()) return 0;
+        InventorySlot slot = slots.get(slotIndex);
+        return (slot != null) ? slot.count : 0;
     }
 
     /**
-     * Estrae il primo oggetto disponibile (FIFO).
-     * Usato per l'espulsione automatica verso nastri/inventari.
+     * Tenta di inserire un item in uno slot specifico gestendo lo stacking.
      */
-    public MatterPayload extractFirst() {
-        if (slots.isEmpty()) return null;
-        return slots.remove(0);
+    public boolean insertIntoSlot(int slotIndex, MatterPayload newItem) {
+        if (newItem == null) return false;
+
+        // Assicuriamoci che la lista sia dimensionata
+        while (slots.size() <= slotIndex) slots.add(null);
+
+        InventorySlot currentSlot = slots.get(slotIndex);
+
+        // CASO 1: Slot vuoto -> Crea nuovo stack
+        if (currentSlot == null) {
+            slots.set(slotIndex, new InventorySlot(newItem, 1));
+            return true;
+        }
+
+        // CASO 2: Slot occupato -> Controlla se è lo stesso item e se c'è spazio
+        if (isSameItem(currentSlot.item, newItem)) {
+            if (currentSlot.count < MAX_STACK_SIZE) {
+                currentSlot.count++;
+                return true;
+            }
+        }
+
+        // CASO 3: Item diverso o Stack pieno -> Rifiuta
+        return false;
     }
 
-    public boolean isEmpty() { return slots.isEmpty(); }
-    public int getCount() { return slots.size(); }
+    /**
+     * Decrementa la quantità in uno slot (Consumo ricetta).
+     */
+    public void decreaseSlot(int slotIndex, int amount) {
+        if (slotIndex < 0 || slotIndex >= slots.size()) return;
+
+        InventorySlot slot = slots.get(slotIndex);
+        if (slot != null) {
+            slot.count -= amount;
+            if (slot.count <= 0) {
+                slots.set(slotIndex, null); // Slot svuotato
+            }
+        }
+    }
+
+    // --- METODI LEGACY (Per Belt/Drill che non usano slot specifici) ---
+
+    public boolean insert(MatterPayload m) {
+        // Cerca il primo slot valido (Vuoto o Stesso tipo con spazio)
+        for (int i = 0; i < slots.size(); i++) {
+            if (insertIntoSlot(i, m)) return true;
+        }
+        return false;
+    }
+
+    public MatterPayload extractFirst() {
+        // Cerca il primo slot non vuoto e decrementa
+        for (int i = 0; i < slots.size(); i++) {
+            InventorySlot slot = slots.get(i);
+            if (slot != null && slot.count > 0) {
+                MatterPayload item = slot.item;
+                decreaseSlot(i, 1);
+                return item;
+            }
+        }
+        return null;
+    }
+
+    public boolean isEmpty() {
+        for (InventorySlot s : slots) if (s != null) return false;
+        return true;
+    }
+
+    public int getCount() {
+        // Ritorna la somma totale degli item
+        int total = 0;
+        for (InventorySlot s : slots) if (s != null) total += s.count;
+        return total;
+    }
+
+    // --- HELPER ---
+
+    private boolean isSameItem(MatterPayload a, MatterPayload b) {
+        return a.color() == b.color() && a.shape() == b.shape();
+        // Nota: Ignoriamo effetti per ora per semplicità di stacking
+    }
+
+    // --- SERIALIZZAZIONE (Aggiornata con COUNT) ---
 
     public JsonObject serialize() {
         JsonObject json = new JsonObject();
-        json.addProperty("capacity", maxCapacity);
-        json.addProperty("count", slots.size());
+        json.addProperty("capacity", slotCount);
 
-        JsonArray items = new JsonArray();
-        for (MatterPayload p : slots) {
-            items.add(p.serialize());
+        JsonArray itemsArr = new JsonArray();
+        for (InventorySlot slot : slots) {
+            if (slot != null) {
+                JsonObject slotJson = slot.item.serialize();
+                slotJson.addProperty("count", slot.count); // Salviamo quanti ce ne sono
+                itemsArr.add(slotJson);
+            } else {
+                itemsArr.add((JsonElement) null);
+            }
         }
-        json.add("items", items);
+        json.add("items", itemsArr);
         return json;
     }
 
     public void loadState(JsonObject json) {
         if (json == null || !json.has("items")) return;
 
-        this.slots.clear();
-        JsonArray items = json.getAsJsonArray("items");
+        slots.clear();
+        for(int i=0; i<slotCount; i++) slots.add(null);
 
-        for (JsonElement el : items) {
+        JsonArray itemsArr = json.getAsJsonArray("items");
+        for (int i = 0; i < itemsArr.size() && i < slotCount; i++) {
+            JsonElement el = itemsArr.get(i);
             if (el.isJsonObject()) {
-                MatterPayload mp = MatterPayload.fromJson(el.getAsJsonObject());
-                this.slots.add(mp);
+                JsonObject obj = el.getAsJsonObject();
+                MatterPayload mp = MatterPayload.fromJson(obj);
+                int count = obj.has("count") ? obj.get("count").getAsInt() : 1;
+                slots.set(i, new InventorySlot(mp, count));
             }
         }
     }

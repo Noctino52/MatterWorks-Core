@@ -18,8 +18,19 @@ public record MatterPayload(
 
     public JsonObject serialize() {
         JsonObject json = new JsonObject();
-        json.addProperty("shape", shape.name());
-        json.addProperty("color", color.name());
+
+        // --- FIX NPE: Controllo null su shape ---
+        if (shape != null) {
+            json.addProperty("shape", shape.name());
+        } else {
+            // Se shape è null (liquido), non scriviamo nulla o scriviamo null esplicito
+            // Gson gestisce l'assenza come null al deserializing solitamente.
+        }
+
+        // Colore è sempre presente (anche se RAW)
+        if (color != null) {
+            json.addProperty("color", color.name());
+        }
 
         if (!effects.isEmpty()) {
             JsonArray effectsJson = new JsonArray();
@@ -31,21 +42,34 @@ public record MatterPayload(
 
     public boolean isComplex() { return !effects.isEmpty(); }
 
-    // --- NUOVO METODO: Deserializzazione ---
+    // --- FIX DESERIALIZZAZIONE: Supporto shape null ---
     public static MatterPayload fromJson(JsonObject json) {
         try {
-            MatterShape s = MatterShape.valueOf(json.get("shape").getAsString());
-            MatterColor c = MatterColor.valueOf(json.get("color").getAsString());
+            // 1. Gestione Shape Opzionale
+            MatterShape s = null;
+            if (json.has("shape") && !json.get("shape").isJsonNull()) {
+                s = MatterShape.valueOf(json.get("shape").getAsString());
+            }
 
+            // 2. Gestione Colore
+            MatterColor c = MatterColor.RAW; // Default fallback
+            if (json.has("color")) {
+                c = MatterColor.valueOf(json.get("color").getAsString());
+            }
+
+            // 3. Gestione Effetti
             List<MatterEffect> effs = new ArrayList<>();
             if (json.has("effects")) {
                 JsonArray arr = json.getAsJsonArray("effects");
                 arr.forEach(el -> effs.add(MatterEffect.valueOf(el.getAsString())));
             }
+
             return new MatterPayload(s, c, effs);
+
         } catch (Exception e) {
             System.err.println("Errore parsing payload: " + e.getMessage());
-            return new MatterPayload(MatterShape.CUBE, MatterColor.RAW); // Fallback
+            // In caso di errore grave, ritorniamo un cubo raw per non crashare il server
+            return new MatterPayload(MatterShape.CUBE, MatterColor.RAW);
         }
     }
 }

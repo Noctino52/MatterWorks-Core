@@ -77,6 +77,9 @@ public class MatterWorksGUI extends JFrame {
             onSave.run();
             JOptionPane.showMessageDialog(this, "Salvataggio Completato!", "Sistema", JOptionPane.INFORMATION_MESSAGE);
         });
+        JButton btnMixer = createButton("🌀 Mixer", e -> setTool("color_mixer"));
+        btnMixer.setBackground(new Color(0, 200, 200));
+        leftTools.add(btnMixer);
         btnSave.setBackground(new Color(0, 100, 200));
 
         rightSystem.add(lblMoney);
@@ -144,6 +147,7 @@ public class MatterWorksGUI extends JFrame {
         btn.setBorder(BorderFactory.createEmptyBorder(5, 10, 5, 10));
         return btn;
     }
+
 
     private JLabel createLabel(String text) {
         JLabel lbl = new JLabel(text);

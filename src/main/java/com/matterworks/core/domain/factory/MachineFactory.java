@@ -44,6 +44,7 @@ public class MachineFactory {
                     "chromator",
                     model.getMetaData()
             );
+            case "color_mixer" -> new ColorMixer(model.getId(), ownerId, pos, "color_mixer", model.getMetaData());
 
 
             default -> {

@@ -5,101 +5,76 @@ import com.matterworks.core.common.Direction;
 import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.managers.GridManager;
-import com.matterworks.core.ports.IMachineVisuals;
 import com.matterworks.core.ports.IWorldAccess;
 
 import java.util.UUID;
 
 public abstract class PlacedMachine implements IGridComponent {
 
-    protected final UUID instanceId;
-    protected final Long dbId;
-    protected final UUID ownerId;
-    protected final GridPosition pos;
-    protected final String typeId;
-
-    // Logistica
+    protected Long dbId;
+    protected UUID ownerId;
+    protected String typeId;
+    protected GridPosition pos;
     protected Direction orientation;
-    protected GridManager gridManager;
-
-    // Stato
+    protected Vector3Int dimensions; // Dimensioni BASE
     protected JsonObject metadata;
-    protected boolean isDirty;
-    protected Vector3Int dimensions;
-
-    // Riferimenti
-    protected IWorldAccess worldRef;
-    protected IMachineVisuals visuals;
+    protected GridManager gridManager;
+    protected boolean isDirty = false;
 
     public PlacedMachine(Long dbId, UUID ownerId, String typeId, GridPosition pos, JsonObject metadata) {
         this.dbId = dbId;
-        this.instanceId = UUID.randomUUID();
         this.ownerId = ownerId;
         this.typeId = typeId;
         this.pos = pos;
-        this.metadata = (metadata != null) ? metadata : new JsonObject();
-        this.isDirty = false; // Appena caricato è pulito
-        this.dimensions = Vector3Int.one();
+        this.metadata = metadata != null ? metadata : new JsonObject();
 
-        // Caricamento Orientamento
+        this.orientation = Direction.NORTH;
         if (this.metadata.has("orientation")) {
             this.orientation = Direction.valueOf(this.metadata.get("orientation").getAsString());
-        } else {
-            this.orientation = Direction.NORTH;
         }
+
+        this.dimensions = new Vector3Int(1, 1, 1);
     }
 
-    public void setGridContext(GridManager gridManager) {
-        this.gridManager = gridManager;
+    // --- FIX ROTAZIONE FISICA ---
+    @Override
+    public Vector3Int getDimensions() {
+        if (orientation == Direction.EAST || orientation == Direction.WEST) {
+            return new Vector3Int(dimensions.z(), dimensions.y(), dimensions.x());
+        }
+        return dimensions;
     }
+
+    public void setOrientation(Direction orientation) {
+        this.orientation = orientation;
+        this.metadata.addProperty("orientation", orientation.name());
+        markDirty();
+    }
+
+    // --- METODI MANCANTI AGGIUNTI QUI ---
+    public UUID getOwnerId() { return ownerId; }
+    public void cleanDirty() { this.isDirty = false; }
+
+    // --- METODI STANDARD ---
+    public GridPosition getPos() { return pos; }
+    public String getTypeId() { return typeId; }
+    public Direction getOrientation() { return orientation; }
+
+    public Long getDbId() { return dbId; }
+    public void setDbId(Long id) { this.dbId = id; }
+
+    public void setGridContext(GridManager gm) { this.gridManager = gm; }
+
+    public void markDirty() { this.isDirty = true; }
+    public boolean isDirty() { return isDirty; }
 
     public abstract void tick(long currentTick);
 
-    @Override
-    public void onPlace(IWorldAccess world) {
-        this.worldRef = world;
-        markDirty();
-    }
-
-    @Override
+    public void onPlace(IWorldAccess world) {}
     public void onRemove() {}
 
-    @Override
     public JsonObject serialize() {
-        this.metadata.addProperty("orientation", orientation.name());
-        return this.metadata;
+        metadata.addProperty("orientation", orientation.name());
+        return metadata;
     }
-
-    @Override
-    public Vector3Int getDimensions() { return this.dimensions; }
-
-    // --- GESTIONE STATO "DIRTY" (Per il GridSaverService) ---
-
-    protected void markDirty() {
-        this.isDirty = true;
-    }
-
-    // Metodo PUBBLICO richiesto dal GridSaverService
-    public boolean isDirty() {
-        return isDirty;
-    }
-
-    // Metodo PUBBLICO richiesto dal GridSaverService
-    public void clearDirty() {
-        this.isDirty = false;
-    }
-
-    // --- GETTERS (Richiesti dal GridSaverService e altri) ---
-
-    public UUID getOwnerId() { return ownerId; } // <--- ERA MANCANTE
-    public GridPosition getPos() { return pos; }
-    public Direction getOrientation() { return orientation; }
-
-    public void setOrientation(Direction dir) {
-        this.orientation = dir;
-        markDirty();
-    }
-
-    public String getTypeId() { return typeId; }
-    public Long getDbId() { return dbId; }
 }

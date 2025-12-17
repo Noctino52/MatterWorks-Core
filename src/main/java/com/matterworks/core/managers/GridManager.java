@@ -1,13 +1,14 @@
 package com.matterworks.core.managers;
 
+import com.matterworks.core.common.Direction;
 import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.domain.factory.MachineFactory;
 import com.matterworks.core.domain.machines.BlockRegistry;
-import com.matterworks.core.domain.machines.DrillMachine; // Import
+import com.matterworks.core.domain.machines.DrillMachine;
 import com.matterworks.core.domain.machines.IGridComponent;
 import com.matterworks.core.domain.machines.PlacedMachine;
-import com.matterworks.core.domain.matter.MatterColor; // Import
+import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.shop.MarketManager;
 import com.matterworks.core.model.PlotObject;
 import com.matterworks.core.ports.IRepository;
@@ -28,11 +29,6 @@ public class GridManager {
     private final Map<GridPosition, IGridComponent> globalGrid = new ConcurrentHashMap<>();
     private final List<PlacedMachine> tickingMachines = new ArrayList<>();
     private final ExecutorService ioExecutor = Executors.newVirtualThreadPerTaskExecutor();
-
-    // --- NUOVO: MAPPA DELLE RISORSE DEL TERRENO ---
-    // Mappa Coordinate 2D (x, z) -> Tipo di Risorsa
-    // Usiamo una String key "x,z" per semplicità o una mappa dedicata.
-    // Per coerenza col progetto, usiamo una Map<GridPosition, MatterColor> dove y è sempre 0.
     private final Map<GridPosition, MatterColor> terrainResources = new ConcurrentHashMap<>();
 
     public GridManager(IRepository repository, IWorldAccess worldAdapter, BlockRegistry registry) {
@@ -40,28 +36,17 @@ public class GridManager {
         this.worldAdapter = worldAdapter;
         this.blockRegistry = registry;
         this.marketManager = new MarketManager(repository);
-
-        // Generiamo il terreno finto (in futuro verra caricato dal PlotDAO)
         generateMockTerrain();
     }
 
     private void generateMockTerrain() {
         System.out.println("🌍 Generazione Vene Risorse (Mock)...");
-
-        // Vena RAW (Grigia) sotto la zona di partenza (x=10, z=10)
         terrainResources.put(new GridPosition(10, 0, 10), MatterColor.RAW);
-        terrainResources.put(new GridPosition(10, 0, 11), MatterColor.RAW);
-        terrainResources.put(new GridPosition(11, 0, 10), MatterColor.RAW);
-
-        // Vena RED (Rossa) un po' più a sinistra
-        terrainResources.put(new GridPosition(5, 0, 5), MatterColor.RED);
-        terrainResources.put(new GridPosition(6, 0, 5), MatterColor.RED);
-
-        // Vena BLUE (Blu) un po' più a destra
-        terrainResources.put(new GridPosition(15, 0, 15), MatterColor.BLUE);
+        terrainResources.put(new GridPosition(10, 0, 9), MatterColor.RAW);
+        terrainResources.put(new GridPosition(11, 0, 10), MatterColor.RED);
+        terrainResources.put(new GridPosition(12, 0, 10), MatterColor.BLUE);
     }
 
-    // Metodo pubblico per la GUI (per disegnare le risorse a terra)
     public Map<GridPosition, MatterColor> getTerrainResources() {
         return Collections.unmodifiableMap(terrainResources);
     }
@@ -86,64 +71,62 @@ public class GridManager {
     public boolean placeMachine(UUID ownerId, GridPosition pos, String typeId) {
         Vector3Int dim = blockRegistry.getDimensions(typeId);
 
-        // Controllo generico collisioni
         if (!isAreaClear(pos, dim)) {
             System.out.println("⚠️ Area ostruita per " + typeId + " a " + pos);
             return false;
         }
 
-        // --- NUOVO: CONTROLLO SPECIFICO PER TRIVELLE ---
         MatterColor resourceUnderDrill = null;
-
         if (typeId.equals("drill_mk1")) {
-            // 1. Deve essere a terra (Y=0)
-            if (pos.y() != 0) {
-                System.out.println("⛔ ERRORE: La trivella può essere piazzata solo a terra (Y=0)!");
-                return false;
-            }
-            // 2. Deve esserci una risorsa sotto
+            if (pos.y() != 0) return false;
             resourceUnderDrill = terrainResources.get(pos);
-            if (resourceUnderDrill == null) {
-                System.out.println("⛔ ERRORE: Nessuna risorsa da estrarre qui!");
-                return false;
-            }
+            if (resourceUnderDrill == null) return false;
         }
-        // ------------------------------------------------
 
         PlotObject newDto = new PlotObject(null, null, pos.x(), pos.y(), pos.z(), typeId, null);
         PlacedMachine newMachine = MachineFactory.createFromModel(newDto, ownerId);
 
         if (newMachine == null) return false;
 
-        // --- NUOVO: CONFIGURA LA TRIVELLA ---
         if (newMachine instanceof DrillMachine drill && resourceUnderDrill != null) {
             drill.setResourceToMine(resourceUnderDrill);
-            System.out.println("⛏️ Trivella configurata per estrarre: " + resourceUnderDrill);
         }
 
+        // 1. Aggiungi alla memoria
         internalAddMachine(newMachine);
         newMachine.onPlace(worldAdapter);
+
+        // 2. SALVATAGGIO DB IMMEDIATO (Insert)
+        Long dbId = repository.createMachine(ownerId, newMachine);
+        if (dbId != null) {
+            newMachine.setDbId(dbId);
+            System.out.println("💾 DB: Nuova macchina salvata ID: " + dbId);
+        } else {
+            System.err.println("❌ DB: Fallito salvataggio macchina!");
+        }
+
         return true;
     }
 
-    private void internalAddMachine(PlacedMachine machine) {
-        machine.setGridContext(this);
-        Vector3Int dim = machine.getDimensions();
-        GridPosition origin = machine.getPos();
+    public boolean rotateMachine(GridPosition pos, Direction newDir) {
+        PlacedMachine machine = getMachineAt(pos);
+        if (machine == null) return false;
 
-        for (int x = 0; x < dim.x(); x++) {
-            for (int y = 0; y < dim.y(); y++) {
-                for (int z = 0; z < dim.z(); z++) {
-                    GridPosition occupiedPos = new GridPosition(
-                            origin.x() + x, origin.y() + y, origin.z() + z
-                    );
-                    globalGrid.put(occupiedPos, machine);
-                }
-            }
-        }
+        Direction oldDir = machine.getOrientation();
+        if (oldDir == newDir) return true;
 
-        synchronized (tickingMachines) {
-            tickingMachines.add(machine);
+        removeFromGridMap(machine);
+        machine.setOrientation(newDir);
+        Vector3Int newDim = machine.getDimensions();
+
+        if (isAreaClear(pos, newDim)) {
+            addToGridMap(machine);
+            return true;
+        } else {
+            machine.setOrientation(oldDir);
+            addToGridMap(machine);
+            System.out.println("⚠️ Rotazione bloccata: Collisione.");
+            return false;
         }
     }
 
@@ -151,70 +134,70 @@ public class GridManager {
         PlacedMachine target = getMachineAt(pos);
         if (target == null) return;
 
-        System.out.println("🗑️ Removing: " + target.getTypeId() + " (DB_ID: " + target.getDbId() + ")");
-
-        if (target.getDbId() != null) {
-            repository.deleteMachine(target.getDbId());
-        }
-
-        Vector3Int dim = target.getDimensions();
-        GridPosition origin = target.getPos();
-
-        for (int x = 0; x < dim.x(); x++) {
-            for (int y = 0; y < dim.y(); y++) {
-                for (int z = 0; z < dim.z(); z++) {
-                    GridPosition occupiedPos = new GridPosition(
-                            origin.x() + x, origin.y() + y, origin.z() + z
-                    );
-                    globalGrid.remove(occupiedPos);
-                }
-            }
-        }
-
-        synchronized (tickingMachines) {
-            tickingMachines.remove(target);
-        }
+        if (target.getDbId() != null) repository.deleteMachine(target.getDbId());
+        removeFromGridMap(target);
+        synchronized (tickingMachines) { tickingMachines.remove(target); }
         target.onRemove();
     }
 
-    public PlacedMachine getMachineAt(GridPosition pos) {
-        IGridComponent comp = globalGrid.get(pos);
-        if (comp instanceof PlacedMachine pm) {
-            return pm;
-        }
-        return null;
+    private void internalAddMachine(PlacedMachine machine) {
+        machine.setGridContext(this);
+        addToGridMap(machine);
+        synchronized (tickingMachines) { tickingMachines.add(machine); }
     }
 
-    public MarketManager getMarketManager() {
-        return marketManager;
+    private void addToGridMap(PlacedMachine m) {
+        Vector3Int dim = m.getDimensions();
+        GridPosition origin = m.getPos();
+        for (int x = 0; x < dim.x(); x++) {
+            for (int y = 0; y < dim.y(); y++) {
+                for (int z = 0; z < dim.z(); z++) {
+                    globalGrid.put(new GridPosition(origin.x() + x, origin.y() + y, origin.z() + z), m);
+                }
+            }
+        }
+    }
+
+    private void removeFromGridMap(PlacedMachine m) {
+        Vector3Int dim = m.getDimensions();
+        GridPosition origin = m.getPos();
+        for (int x = 0; x < dim.x(); x++) {
+            for (int y = 0; y < dim.y(); y++) {
+                for (int z = 0; z < dim.z(); z++) {
+                    globalGrid.remove(new GridPosition(origin.x() + x, origin.y() + y, origin.z() + z));
+                }
+            }
+        }
     }
 
     public boolean isAreaClear(GridPosition origin, Vector3Int dim) {
         for (int x = 0; x < dim.x(); x++) {
             for (int y = 0; y < dim.y(); y++) {
                 for (int z = 0; z < dim.z(); z++) {
-                    GridPosition checkPos = new GridPosition(origin.x() + x, origin.y() + y, origin.z() + z);
-                    if (globalGrid.containsKey(checkPos)) return false;
+                    if (globalGrid.containsKey(new GridPosition(origin.x() + x, origin.y() + y, origin.z() + z))) return false;
                 }
             }
         }
         return true;
     }
 
+    public PlacedMachine getMachineAt(GridPosition pos) {
+        IGridComponent comp = globalGrid.get(pos);
+        return (comp instanceof PlacedMachine pm) ? pm : null;
+    }
+
+    public MarketManager getMarketManager() { return marketManager; }
+
     public void tick(long currentTick) {
         List<PlacedMachine> snapshot;
-        synchronized (tickingMachines) {
-            snapshot = new ArrayList<>(tickingMachines);
-        }
+        synchronized (tickingMachines) { snapshot = new ArrayList<>(tickingMachines); }
         snapshot.forEach(m -> m.tick(currentTick));
     }
 
     public Map<GridPosition, PlacedMachine> getSnapshot() {
         Map<GridPosition, PlacedMachine> uniqueMachines = new HashMap<>();
         synchronized (tickingMachines) {
-            for (PlacedMachine m : tickingMachines) {
-                uniqueMachines.put(m.getPos(), m);
-            }
+            for (PlacedMachine m : tickingMachines) uniqueMachines.put(m.getPos(), m);
         }
         return Collections.unmodifiableMap(uniqueMachines);
     }

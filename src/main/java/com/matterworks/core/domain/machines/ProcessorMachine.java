@@ -21,30 +21,24 @@ public abstract class ProcessorMachine extends PlacedMachine {
 
     public ProcessorMachine(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata) {
         super(dbId, ownerId, typeId, pos, metadata);
-
-        // Default: 1 slot input, 1 slot output (Le sottoclassi possono cambiarlo)
-        this.inputBuffer = new MachineInventory(1);
+        this.inputBuffer = new MachineInventory(2); // Default a 2 per sicurezza
         this.outputBuffer = new MachineInventory(1);
 
-        // Caricamento Stato (se esistente)
         if (this.metadata.has("input")) this.inputBuffer.loadState(this.metadata.getAsJsonObject("input"));
         if (this.metadata.has("output")) this.outputBuffer.loadState(this.metadata.getAsJsonObject("output"));
     }
 
     @Override
     public void tick(long currentTick) {
-        // 1. Logica di Output (Svuota il prodotto finito verso nastri/nexus)
+        // 1. Output Logistico
         tryEjectItem(currentTick);
 
-        // 2. Logica di Processamento
+        // 2. Logica di Processamento (Base)
+        // Le sottoclassi possono fare Override se vogliono logiche custom (come il Chromator)
         processRecipe(currentTick);
     }
 
-    /**
-     * Chiamato dai Nastri (Conveyor) per inserire item qui.
-     */
     public boolean insertItem(MatterPayload item) {
-        // Accetta l'item solo se c'è spazio nell'input
         if (inputBuffer.insert(item)) {
             saveState();
             return true;
@@ -52,8 +46,7 @@ public abstract class ProcessorMachine extends PlacedMachine {
         return false;
     }
 
-    private void processRecipe(long currentTick) {
-        // A. Se stiamo già lavorando
+    protected void processRecipe(long currentTick) {
         if (currentRecipe != null) {
             if (currentTick >= finishTick) {
                 completeProcessing();
@@ -61,65 +54,48 @@ public abstract class ProcessorMachine extends PlacedMachine {
             return;
         }
 
-        // B. Se siamo fermi, cerchiamo una nuova ricetta
         if (inputBuffer.isEmpty()) return;
 
-        // Simula la lista degli input attuali (per ora prendiamo solo il primo per test)
-        // In futuro: inputBuffer.getAllItems()
-        var possibleRecipe = RecipeRegistry.findMatchingRecipe(Collections.singletonList(inputBuffer.extractFirst()));
-
-        if (possibleRecipe.isPresent()) {
-            // Trovata! Inizia il lavoro
-            this.currentRecipe = possibleRecipe.get();
-            // Calcola tick fine (20 tick = 1 secondo)
-            this.finishTick = currentTick + (long)(currentRecipe.processTimeSeconds() * 20);
-
-            // Nota: L'item è già stato estratto (consumato) sopra nel findMatchingRecipe simulato
-            // In un sistema reale, lo estrarremmo qui.
-            saveState();
-        } else {
-            // Nessuna ricetta valida per questo item?
-            // Per ora lo rimettiamo dentro o lo lasciamo lì (qui l'abbiamo estratto per check, errore logico semplice)
-            // Fix rapido per MVP: Se non trovi ricetta, rimettilo dentro o espellilo come scarto.
-        }
+        // Logica Standard (1 input -> 1 output)
+        // Il Chromator farà Override di questo metodo per gestire 2 input.
     }
 
-    private void completeProcessing() {
-        // Mette il risultato nell'output
+    protected void completeProcessing() {
         if (outputBuffer.insert(currentRecipe.output())) {
-            // Successo
             System.out.println(typeId + " -> FINITO: Creato " + currentRecipe.output().color());
             this.currentRecipe = null;
             this.finishTick = -1;
             saveState();
-        } else {
-            // Output pieno! La macchina si blocca (Stalled)
-            // Non resettiamo la ricetta, riproveremo al prossimo tick
         }
     }
 
-    private void tryEjectItem(long currentTick) {
+    // --- FIX QUI: cambiato da private a protected ---
+    protected void tryEjectItem(long currentTick) {
         if (outputBuffer.isEmpty()) return;
         if (gridManager == null) return;
 
         Vector3Int dir = orientation.toVector();
-        GridPosition targetPos = pos.add(dir);
+        GridPosition targetPos = new GridPosition(pos.x() + dir.x(), pos.y() + dir.y(), pos.z() + dir.z());
+
         PlacedMachine neighbor = gridManager.getMachineAt(targetPos);
 
-        // Logica di Push (simile al Drill)
         if (neighbor instanceof ConveyorBelt belt) {
             MatterPayload item = outputBuffer.extractFirst();
-            if (item != null && belt.insertItem(item, currentTick)) {
-                saveState();
-            } else if (item != null) {
-                outputBuffer.insert(item); // Rollback
+            if (item != null) {
+                if (belt.insertItem(item, currentTick)) {
+                    saveState();
+                } else {
+                    outputBuffer.insert(item); // Rollback
+                }
             }
         } else if (neighbor instanceof NexusMachine nexus) {
             MatterPayload item = outputBuffer.extractFirst();
-            if (item != null && nexus.insertItem(item)) {
-                saveState();
-            } else if (item != null) {
-                outputBuffer.insert(item);
+            if (item != null) {
+                if (nexus.insertItem(item)) {
+                    saveState();
+                } else {
+                    outputBuffer.insert(item);
+                }
             }
         }
     }

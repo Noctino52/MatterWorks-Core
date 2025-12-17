@@ -8,7 +8,7 @@ import com.matterworks.core.domain.machines.BlockRegistry;
 import com.matterworks.core.domain.machines.ConveyorBelt;
 import com.matterworks.core.domain.machines.NexusMachine;
 import com.matterworks.core.domain.machines.PlacedMachine;
-import com.matterworks.core.domain.matter.MatterColor; // Import
+import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.managers.GridManager;
 
 import javax.swing.*;
@@ -18,14 +18,6 @@ import java.util.Map;
 import java.util.UUID;
 
 public class FactoryPanel extends JPanel {
-
-    // ... (Campi e Costruttore identici a prima) ...
-    // ... Copia tutto il contenuto precedente fino a paintComponent ...
-
-    // (Per brevità non ricopio tutto il file, sostituisci solo paintComponent e aggiungi drawTerrain)
-    // Assicurati di mantenere gridManager, registry, etc.
-
-    // -------------------------------------------------------------
 
     private final GridManager gridManager;
     private final BlockRegistry registry;
@@ -37,7 +29,7 @@ public class FactoryPanel extends JPanel {
 
     private String currentTool = "drill_mk1";
     private Direction currentOrientation = Direction.NORTH;
-    private int currentLayer = 0; // PARTIAMO DAL LAYER 0 per vedere le risorse!
+    private int currentLayer = 0;
 
     private GridPosition mouseHoverPos = null;
     private Runnable onStateChange;
@@ -47,7 +39,6 @@ public class FactoryPanel extends JPanel {
         this.registry = registry;
         this.playerUuid = playerUuid;
         this.onStateChange = onStateChange;
-
         this.setBackground(new Color(30, 30, 30));
         this.setFocusable(true);
 
@@ -74,14 +65,14 @@ public class FactoryPanel extends JPanel {
         });
     }
 
-    public void setLayer(int y) {
-        this.currentLayer = y;
-        repaint();
-    }
-    public int getCurrentLayer() { return currentLayer; }
+    // --- API MANCANTI AGGIUNTE QUI ---
+    public void setLayer(int y) { this.currentLayer = y; repaint(); }
+    public int getCurrentLayer() { return currentLayer; } // <--- ERA MANCANTE
+
     public void setTool(String toolId) { this.currentTool = toolId; repaint(); }
+    public String getCurrentToolName() { return currentTool != null ? currentTool : "None"; } // <--- ERA MANCANTE
+
     public void rotate() {
-        // ... (Logica rotazione uguale a prima) ...
         switch(currentOrientation) {
             case NORTH -> currentOrientation = Direction.EAST;
             case EAST -> currentOrientation = Direction.SOUTH;
@@ -91,8 +82,7 @@ public class FactoryPanel extends JPanel {
         if (onStateChange != null) onStateChange.run();
         repaint();
     }
-    public String getCurrentToolName() { return currentTool != null ? currentTool : "None"; }
-    public String getCurrentOrientationName() { return currentOrientation.name(); }
+    public String getCurrentOrientationName() { return currentOrientation.name(); } // <--- ERA MANCANTE
 
     private void updateMousePos(int x, int y) {
         int gx = toGridX(x);
@@ -110,8 +100,10 @@ public class FactoryPanel extends JPanel {
             if (currentTool != null) {
                 boolean success = gridManager.placeMachine(playerUuid, mouseHoverPos, currentTool);
                 if (success) {
-                    PlacedMachine pm = gridManager.getMachineAt(mouseHoverPos);
-                    if (pm != null) pm.setOrientation(currentOrientation);
+                    // Importante: Ruotiamo subito se l'orientamento scelto non è Default
+                    if (currentOrientation != Direction.NORTH) {
+                        gridManager.rotateMachine(mouseHoverPos, currentOrientation);
+                    }
                 }
             }
         } else if (SwingUtilities.isRightMouseButton(e)) {
@@ -119,18 +111,13 @@ public class FactoryPanel extends JPanel {
         }
     }
 
-    // --- RENDERING ---
     @Override
     protected void paintComponent(Graphics g) {
         super.paintComponent(g);
         Graphics2D g2 = (Graphics2D) g;
         g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
 
-        // Disegna Terreno (Risorse) PRIMA della griglia
-        if (currentLayer == 0) {
-            drawTerrainResources(g2);
-        }
-
+        if (currentLayer == 0) drawTerrainResources(g2);
         drawGrid(g2);
         drawMachines(g2);
         drawGhost(g2);
@@ -138,30 +125,23 @@ public class FactoryPanel extends JPanel {
 
     private void drawTerrainResources(Graphics2D g) {
         Map<GridPosition, MatterColor> resources = gridManager.getTerrainResources();
-
         for (Map.Entry<GridPosition, MatterColor> entry : resources.entrySet()) {
             GridPosition pos = entry.getKey();
             MatterColor type = entry.getValue();
-
             int x = toScreenX(pos.x());
             int z = toScreenY(pos.z());
 
-            // Colore della vena con trasparenza
             Color c = switch(type) {
-                case RAW -> new Color(100, 100, 100, 100); // Grigio
-                case RED -> new Color(200, 0, 0, 100);     // Rosso
-                case BLUE -> new Color(0, 0, 200, 100);    // Blu
+                case RAW -> new Color(100, 100, 100, 100);
+                case RED -> new Color(200, 0, 0, 100);
+                case BLUE -> new Color(0, 0, 200, 100);
+                case YELLOW -> new Color(200, 200, 0, 100);
                 default -> new Color(255, 255, 255, 50);
             };
-
             g.setColor(c);
             g.fillRect(x, z, CELL_SIZE, CELL_SIZE);
-
-            // Bordo
             g.setColor(c.darker());
             g.drawRect(x, z, CELL_SIZE, CELL_SIZE);
-
-            // Label piccola
             g.setColor(Color.WHITE);
             g.setFont(new Font("SansSerif", Font.PLAIN, 9));
             g.drawString(type.name(), x + 2, z + 12);
@@ -178,15 +158,11 @@ public class FactoryPanel extends JPanel {
         g.drawString("LAYER Y = " + currentLayer, 10, getHeight() - 10);
     }
 
-    // ... (drawMachines, drawGhost, getColorForType, drawDirectionArrow, toScreenX... UGUALI A PRIMA) ...
-    // Ricopia i metodi drawMachines, drawGhost, ecc. dal codice precedente, non sono cambiati.
-
     private void drawMachines(Graphics2D g) {
         Map<GridPosition, PlacedMachine> machines = gridManager.getSnapshot();
         for (PlacedMachine m : machines.values()) {
             int machineY = m.getPos().y();
             int machineHeight = m.getDimensions().y();
-
             if (currentLayer >= machineY && currentLayer < machineY + machineHeight) {
                 drawSingleMachine(g, m, false);
             }
@@ -195,17 +171,23 @@ public class FactoryPanel extends JPanel {
 
     private void drawGhost(Graphics2D g) {
         if (mouseHoverPos == null || currentTool == null) return;
-        Vector3Int dim = registry.getDimensions(currentTool);
+        Vector3Int dimBase = registry.getDimensions(currentTool);
+
+        boolean isRotated = (currentOrientation == Direction.EAST || currentOrientation == Direction.WEST);
+        int w = (isRotated ? dimBase.z() : dimBase.x()) * CELL_SIZE;
+        int h = (isRotated ? dimBase.x() : dimBase.z()) * CELL_SIZE;
+
         Composite original = g.getComposite();
         g.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.5f));
+
         int x = toScreenX(mouseHoverPos.x());
         int z = toScreenY(mouseHoverPos.z());
-        int w = dim.x() * CELL_SIZE;
-        int h = dim.z() * CELL_SIZE;
+
         g.setColor(getColorForType(currentTool));
         g.fillRect(x, z, w, h);
         g.setColor(Color.WHITE);
         g.drawRect(x, z, w, h);
+
         drawDirectionArrow(g, x, z, w, h, currentOrientation);
         g.setComposite(original);
     }
@@ -221,48 +203,112 @@ public class FactoryPanel extends JPanel {
 
         g.setColor(getColorForType(m.getTypeId()));
         g.fillRect(x + 2, z + 2, w - 4, h - 4);
+
+        if (m.getTypeId().equals("chromator") || m.getTypeId().equals("color_mixer")) {
+            drawPorts(g, m, x, z, w, h);
+        } else {
+            drawStandardPorts(g, m, x, z, w, h);
+        }
+
         drawDirectionArrow(g, x, z, w, h, m.getOrientation());
 
-        // --- FIX VISUALIZZAZIONE MATTER ---
         if (m instanceof ConveyorBelt belt) {
-            JsonObject meta = belt.serialize();
-            if (meta.has("currentItem")) {
-                // 1. Recupera il colore, con fallback su RAW se fallisce
-                String colorName = "RAW";
-                try {
-                    colorName = meta.getAsJsonObject("currentItem").get("color").getAsString();
-                } catch (Exception e) {
-                    // Ignora errori di parsing, resta RAW
-                }
-
-                // 2. Scegli il colore grafico
-                Color itemColor = switch(colorName) {
-                    case "RAW" -> Color.LIGHT_GRAY;   // Grigio chiaro (si vede sul nastro scuro)
-                    case "RED" -> new Color(255, 50, 50);
-                    case "BLUE" -> new Color(50, 50, 255);
-                    case "GREEN" -> new Color(50, 255, 50);
-                    default -> Color.MAGENTA; // Fallback "Errore" (facile da vedere)
-                };
-
-                // 3. Disegna l'item
-                g.setColor(itemColor);
-                g.fillOval(x + 10, z + 10, 20, 20);
-
-                // 4. Bordo bianco per farlo risaltare
-                g.setColor(Color.WHITE);
-                g.drawOval(x + 10, z + 10, 20, 20);
-            }
-        }
-        // --- FINE FIX ---
-
-        else if (m instanceof NexusMachine) {
+            drawBeltItem(g, belt, x, z);
+        } else if (m instanceof NexusMachine) {
             g.setColor(Color.WHITE);
-            if (pos.y() == currentLayer) {
-                g.drawString("NEXUS", x + 10, z + 20);
+            if (pos.y() == currentLayer) g.drawString("NEXUS", x + 10, z + 20);
+        }
+    }
+
+    private void drawBeltItem(Graphics2D g, ConveyorBelt belt, int x, int z) {
+        JsonObject meta = belt.serialize();
+        if (meta.has("currentItem")) {
+            JsonObject itemJson = meta.getAsJsonObject("currentItem");
+            String shapeStr = null;
+            String colorStr = "RAW";
+
+            try {
+                if (itemJson.has("shape") && !itemJson.get("shape").isJsonNull()) {
+                    shapeStr = itemJson.get("shape").getAsString();
+                }
+                if (itemJson.has("color")) colorStr = itemJson.get("color").getAsString();
+            } catch(Exception ignored) {}
+
+            Color itemColor = switch(colorStr) {
+                case "RAW" -> new Color(180, 180, 180);
+                case "RED" -> new Color(220, 50, 50);
+                case "BLUE" -> new Color(50, 80, 255);
+                case "YELLOW" -> new Color(255, 220, 0);
+                case "GREEN" -> new Color(50, 200, 50);
+                case "ORANGE" -> new Color(255, 140, 0);
+                case "PURPLE" -> new Color(160, 32, 240);
+                default -> Color.MAGENTA;
+            };
+
+            int itemSize = 20;
+            int ix = x + (CELL_SIZE - itemSize) / 2;
+            int iz = z + (CELL_SIZE - itemSize) / 2;
+
+            g.setColor(itemColor);
+
+            if ("CUBE".equals(shapeStr)) {
+                g.fillRect(ix, iz, itemSize, itemSize);
+                g.setColor(Color.WHITE);
+                g.drawRect(ix, iz, itemSize, itemSize);
             } else {
-                g.drawString("NEXUS (Part)", x + 2, z + 20);
+                g.fillOval(ix, iz, itemSize, itemSize);
+                g.setColor(Color.WHITE);
+                g.drawOval(ix, iz, itemSize, itemSize);
             }
         }
+    }
+
+    private void drawPorts(Graphics2D g, PlacedMachine m, int x, int z, int w, int h) {
+        int pSize = 8;
+        Direction dir = m.getOrientation();
+        Point out = null, in1 = null, in2 = null;
+
+        switch (dir) {
+            case NORTH:
+                out = new Point(x + w/2 - pSize/2, z);
+                in1 = new Point(x + w/4 - pSize/2, z + h - pSize);
+                in2 = new Point(x + (w*3)/4 - pSize/2, z + h - pSize);
+                break;
+            case SOUTH:
+                out = new Point(x + w/2 - pSize/2, z + h - pSize);
+                in1 = new Point(x + (w*3)/4 - pSize/2, z);
+                in2 = new Point(x + w/4 - pSize/2, z);
+                break;
+            case EAST:
+                out = new Point(x + w - pSize, z + h/2 - pSize/2);
+                in1 = new Point(x, z + h/4 - pSize/2);
+                in2 = new Point(x, z + (h*3)/4 - pSize/2);
+                break;
+            case WEST:
+                out = new Point(x, z + h/2 - pSize/2);
+                in1 = new Point(x + w - pSize, z + (h*3)/4 - pSize/2);
+                in2 = new Point(x + w - pSize, z + h/4 - pSize/2);
+                break;
+        }
+
+        if (out != null) {
+            g.setColor(Color.GREEN); g.fillRect(out.x, out.y, pSize, pSize);
+            g.setColor(Color.BLUE);  g.fillRect(in1.x, in1.y, pSize, pSize);
+            g.setColor(Color.BLUE);  g.fillRect(in2.x, in2.y, pSize, pSize);
+        }
+    }
+
+    private void drawStandardPorts(Graphics2D g, PlacedMachine m, int x, int z, int w, int h) {
+        int pSize = 8;
+        Point out = null, in = null;
+        switch (m.getOrientation()) {
+            case NORTH -> { out = new Point(x + w/2 - pSize/2, z); in = new Point(x + w/2 - pSize/2, z + h - pSize); }
+            case SOUTH -> { out = new Point(x + w/2 - pSize/2, z + h - pSize); in = new Point(x + w/2 - pSize/2, z); }
+            case EAST  -> { out = new Point(x + w - pSize, z + h/2 - pSize/2); in = new Point(x, z + h/2 - pSize/2); }
+            case WEST  -> { out = new Point(x, z + h/2 - pSize/2); in = new Point(x + w - pSize, z + h/2 - pSize/2); }
+        }
+        if (out != null) { g.setColor(Color.GREEN); g.fillRect(out.x, out.y, pSize, pSize); }
+        if (in != null && !m.getTypeId().equals("drill_mk1")) { g.setColor(Color.BLUE); g.fillRect(in.x, in.y, pSize, pSize); }
     }
 
     private Color getColorForType(String type) {
@@ -271,6 +317,7 @@ public class FactoryPanel extends JPanel {
             case "conveyor_belt" -> Color.DARK_GRAY;
             case "nexus_core" -> new Color(150, 0, 150);
             case "chromator" -> new Color(255, 140, 0);
+            case "color_mixer" -> new Color(0, 200, 200);
             default -> Color.RED;
         };
     }
