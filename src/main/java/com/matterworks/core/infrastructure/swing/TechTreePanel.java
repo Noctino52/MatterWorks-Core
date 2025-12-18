@@ -14,6 +14,7 @@ public class TechTreePanel extends JPanel {
     private final IRepository repository;
     private final UUID playerUuid;
     private final GridManager gridManager;
+    private final Timer refreshTimer;
 
     public TechTreePanel(IRepository repository, UUID playerUuid, GridManager gm) {
         this.repository = repository;
@@ -26,14 +27,26 @@ public class TechTreePanel extends JPanel {
 
         renderNodes();
 
-        // Timer di aggiornamento per riflettere i cambiamenti di saldo o sblocchi
-        new Timer(1000, e -> renderNodes()).start();
+        // Timer di refresh 1 secondo
+        refreshTimer = new Timer(1000, e -> {
+            if (!this.isDisplayable()) {
+                dispose();
+                return;
+            }
+            renderNodes();
+        });
+        refreshTimer.start();
+    }
+
+    public void dispose() {
+        if (refreshTimer != null && refreshTimer.isRunning()) {
+            refreshTimer.stop();
+        }
     }
 
     private void renderNodes() {
         removeAll();
 
-        // Titolo Pannello
         JLabel title = new JLabel("RESEARCH & DEVELOPMENT");
         title.setForeground(Color.ORANGE);
         title.setFont(new Font("Monospaced", Font.BOLD, 16));
@@ -42,11 +55,11 @@ public class TechTreePanel extends JPanel {
         add(Box.createVerticalStrut(15));
 
         TechManager tm = gridManager.getTechManager();
-        PlayerProfile p = repository.loadPlayerProfile(playerUuid);
+        // Use Cache
+        PlayerProfile p = gridManager.getCachedProfile(playerUuid);
 
         if (p == null) return;
 
-        // Itera sui nodi caricati dal DB
         for (TechManager.TechNode node : tm.getAllNodes()) {
             add(createTechCard(node, tm, p));
             add(Box.createVerticalStrut(10));
@@ -59,7 +72,6 @@ public class TechTreePanel extends JPanel {
     private JPanel createTechCard(TechManager.TechNode node, TechManager tm, PlayerProfile p) {
         boolean unlocked = p.hasTech(node.id());
 
-        // Verifica che TUTTI i genitori siano sbloccati (Logica AND)
         boolean parentsUnlocked = true;
         for (String parentId : node.parentIds()) {
             if (!p.hasTech(parentId)) {
@@ -76,7 +88,6 @@ public class TechTreePanel extends JPanel {
         card.setMaximumSize(new Dimension(310, 70));
         card.setPreferredSize(new Dimension(310, 70));
 
-        // Info: Nome e Dettagli
         JPanel info = new JPanel(new GridLayout(2, 1));
         info.setOpaque(false);
         JLabel lblName = new JLabel(node.name());
@@ -92,7 +103,6 @@ public class TechTreePanel extends JPanel {
         info.add(lblDetail);
         info.setBorder(BorderFactory.createEmptyBorder(5, 10, 5, 0));
 
-        // Bottone Azione
         JButton btnAction = new JButton();
         btnAction.setPreferredSize(new Dimension(100, 40));
         btnAction.setFont(new Font("SansSerif", Font.BOLD, 11));
@@ -105,21 +115,19 @@ public class TechTreePanel extends JPanel {
             btnAction.setEnabled(false);
         } else if (!parentsUnlocked) {
             btnAction.setText("BLOCCATO");
-            btnAction.setBackground(new Color(120, 40, 40)); // Rosso
+            btnAction.setBackground(new Color(120, 40, 40));
             btnAction.setForeground(Color.WHITE);
             btnAction.setEnabled(false);
-
-            // Tooltip per mostrare i requisiti
             if (!node.parentIds().isEmpty()) {
                 btnAction.setToolTipText("Richiede: " + String.join(", ", node.parentIds()));
             }
         } else {
             btnAction.setText("SBLOCCA");
-            btnAction.setBackground(canAfford ? new Color(40, 140, 40) : new Color(100, 100, 40)); // Verde o Giallo
+            btnAction.setBackground(canAfford ? new Color(40, 140, 40) : new Color(100, 100, 40));
             btnAction.setForeground(Color.WHITE);
             btnAction.addActionListener(e -> {
                 if (tm.unlockNode(p, node.id())) {
-                    renderNodes(); // Refresh immediato
+                    renderNodes();
                 }
             });
         }

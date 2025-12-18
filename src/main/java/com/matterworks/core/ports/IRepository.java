@@ -5,7 +5,6 @@ import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.model.PlotObject;
 import com.matterworks.core.common.GridPosition;
-import com.matterworks.core.domain.player.PlayerProfile;
 
 import java.util.List;
 import java.util.Map;
@@ -17,6 +16,11 @@ public interface IRepository {
     PlayerProfile loadPlayerProfile(UUID uuid);
     void savePlayerProfile(PlayerProfile profile);
 
+    /**
+     * Elimina definitivamente il giocatore e tutti i dati associati (Plot, Inventario, Macchine).
+     */
+    void deletePlayerFull(UUID uuid);
+
     // --- PLOT DATA ---
     List<PlotObject> loadPlotMachines(UUID ownerId);
     Long createMachine(UUID ownerId, PlacedMachine machine);
@@ -24,7 +28,6 @@ public interface IRepository {
 
     // Aggiornamento batch dei metadati (per autosave)
     void updateMachinesMetadata(List<PlacedMachine> machines);
-
     // Reset totale del plot
     void clearPlotData(UUID ownerId);
     Long getPlotId(UUID ownerId);
@@ -33,15 +36,8 @@ public interface IRepository {
     void saveResource(Long plotId, int x, int z, MatterColor type);
     Map<GridPosition, MatterColor> loadResources(Long plotId);
 
-    // --- INVENTARIO (NUOVI METODI) ---
-    /**
-     * Restituisce la quantità di un item posseduta dal giocatore.
-     */
+    // --- INVENTARIO ---
     int getInventoryItemCount(UUID ownerId, String itemId);
-
-    /**
-     * Modifica la quantità di un item (positivo = aggiungi, negativo = rimuovi).
-     */
     void modifyInventoryItem(UUID ownerId, String itemId, int delta);
-    java.util.List<PlayerProfile> getAllPlayers();
+    List<PlayerProfile> getAllPlayers();
 }

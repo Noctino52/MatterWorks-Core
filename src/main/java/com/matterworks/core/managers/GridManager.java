@@ -19,6 +19,7 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.stream.Collectors;
 
 public class GridManager {
 
@@ -28,9 +29,15 @@ public class GridManager {
     private final MarketManager marketManager;
     private final TechManager techManager;
 
+    // Cache profili per ridurre hit al DB
+    private final Map<UUID, PlayerProfile> activeProfileCache = new ConcurrentHashMap<>();
+
     private final Map<UUID, Map<GridPosition, PlacedMachine>> playerGrids = new ConcurrentHashMap<>();
     private final Map<UUID, Map<GridPosition, MatterColor>> playerResources = new ConcurrentHashMap<>();
+
+    // Lista macchine attive (Sincronizzata per thread-safety nel tick loop)
     private final List<PlacedMachine> tickingMachines = Collections.synchronizedList(new ArrayList<>());
+
     private final ExecutorService ioExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
     public GridManager(IRepository repository, IWorldAccess worldAdapter, BlockRegistry registry) {
@@ -49,6 +56,91 @@ public class GridManager {
     public TechManager getTechManager() { return techManager; }
     public MarketManager getMarketManager() { return marketManager; }
 
+    /**
+     * Switch Contestuale Atomico.
+     * Blocca il tick loop per evitare Race Conditions durante il cambio player.
+     */
+    public void switchPlayerContext(UUID oldUuid, UUID newUuid) {
+        synchronized (tickingMachines) {
+            try {
+                // 1. Salvataggio Vecchio Player
+                if (oldUuid != null) {
+                    saveAndUnloadSynchronously(oldUuid);
+                    activeProfileCache.remove(oldUuid); // Invalida cache vecchia
+                }
+
+                // 2. Caricamento Nuovo Player
+                if (newUuid != null) {
+                    loadPlotSynchronously(newUuid);
+                    // Pre-popola cache
+                    PlayerProfile p = repository.loadPlayerProfile(newUuid);
+                    if (p != null) activeProfileCache.put(newUuid, p);
+                }
+            } catch (Exception e) {
+                System.err.println("🔥 CRITICAL ERROR DURING SWITCH: " + e.getMessage());
+                e.printStackTrace();
+            }
+        }
+        System.out.println("✅ [GridManager] Switch context: " + oldUuid + " -> " + newUuid);
+    }
+
+    private void saveAndUnloadSynchronously(UUID ownerId) {
+        try {
+            Map<GridPosition, PlacedMachine> machines = playerGrids.get(ownerId);
+            if (machines != null && !machines.isEmpty()) {
+                List<PlacedMachine> dirty = machines.values().stream()
+                        .filter(PlacedMachine::isDirty)
+                        .collect(Collectors.toList());
+
+                if (!dirty.isEmpty()) {
+                    repository.updateMachinesMetadata(dirty);
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("⚠️ Errore salvataggio player " + ownerId + ": " + e.getMessage());
+        } finally {
+            // Pulizia forzata della memoria
+            playerGrids.remove(ownerId);
+            playerResources.remove(ownerId);
+            tickingMachines.removeIf(m -> m.getOwnerId().equals(ownerId));
+        }
+    }
+
+    private void loadPlotSynchronously(UUID ownerId) {
+        // Pulizia preventiva per evitare duplicati
+        unloadPlot(ownerId);
+
+        try {
+            // 1. Risorse
+            if (repository instanceof MariaDBAdapter db) {
+                Long pid = db.getPlotId(ownerId);
+                if (pid != null) {
+                    Map<GridPosition, MatterColor> res = db.loadResources(pid);
+                    if (res.isEmpty()) generateDefaultResources(db, pid, res);
+                    playerResources.put(ownerId, res);
+                }
+            }
+            // 2. Macchine
+            List<PlotObject> dtos = repository.loadPlotMachines(ownerId);
+            for (PlotObject d : dtos) {
+                PlacedMachine m = MachineFactory.createFromModel(d, ownerId);
+                if (m != null) internalAddMachine(ownerId, m);
+            }
+        } catch (Exception e) {
+            System.err.println("⚠️ Errore caricamento player " + ownerId);
+            e.printStackTrace();
+        }
+    }
+
+    public PlayerProfile getCachedProfile(UUID uuid) {
+        if (uuid == null) return null;
+        return activeProfileCache.computeIfAbsent(uuid, repository::loadPlayerProfile);
+    }
+
+    private void updateProfileCache(PlayerProfile p) {
+        if (p != null) activeProfileCache.put(p.getPlayerId(), p);
+    }
+
     public PlayerProfile createNewPlayer(String username) {
         UUID newUuid = UUID.randomUUID();
         PlayerProfile p = new PlayerProfile(newUuid);
@@ -56,24 +148,34 @@ public class GridManager {
         p.setMoney(1000.0);
         p.setRank(PlayerProfile.PlayerRank.PLAYER);
         repository.savePlayerProfile(p);
+        updateProfileCache(p);
 
         if (repository instanceof MariaDBAdapter adapter) {
             PlotDAO plotDAO = new PlotDAO(adapter.getDbManager());
             Long plotId = plotDAO.createPlot(newUuid, 1, 0, 0);
-            if (plotId != null) {
-                generateDefaultResources(adapter, plotId, new HashMap<>());
-            }
+            if (plotId != null) generateDefaultResources(adapter, plotId, new HashMap<>());
         }
         return p;
     }
 
+    public void deletePlayer(UUID ownerId) {
+        synchronized (tickingMachines) {
+            saveAndUnloadSynchronously(ownerId);
+            activeProfileCache.remove(ownerId);
+        }
+        repository.deletePlayerFull(ownerId);
+        System.out.println("[GridManager] Player " + ownerId + " eliminato.");
+    }
+
     public boolean attemptBailout(UUID ownerId) {
-        PlayerProfile player = repository.loadPlayerProfile(ownerId);
+        PlayerProfile player = getCachedProfile(ownerId);
         if (player == null || !(repository instanceof MariaDBAdapter adapter)) return false;
+
         double threshold = adapter.getSosThreshold();
         if (player.getMoney() < threshold) {
             player.setMoney(threshold);
             repository.savePlayerProfile(player);
+            updateProfileCache(player);
             return true;
         }
         return false;
@@ -81,14 +183,16 @@ public class GridManager {
 
     public void resetUserPlot(UUID ownerId) {
         ioExecutor.submit(() -> {
-            unloadPlot(ownerId);
-            if (repository instanceof MariaDBAdapter db) db.clearPlotData(ownerId);
-            loadPlotFromDB(ownerId);
+            synchronized (tickingMachines) {
+                saveAndUnloadSynchronously(ownerId);
+                if (repository instanceof MariaDBAdapter db) db.clearPlotData(ownerId);
+                loadPlotSynchronously(ownerId);
+            }
         });
     }
 
     public boolean buyItem(UUID playerId, String itemId, int amount) {
-        PlayerProfile p = repository.loadPlayerProfile(playerId);
+        PlayerProfile p = getCachedProfile(playerId);
         if (p == null) return false;
 
         if (!techManager.canBuyItem(p, itemId)) {
@@ -102,17 +206,18 @@ public class GridManager {
         if (!p.isAdmin()) {
             p.modifyMoney(-cost);
             repository.savePlayerProfile(p);
+            updateProfileCache(p);
         }
         repository.modifyInventoryItem(playerId, itemId, amount);
         return true;
     }
 
     public boolean placeMachine(UUID ownerId, GridPosition pos, String typeId, Direction orientation) {
-        PlayerProfile player = repository.loadPlayerProfile(ownerId);
+        PlayerProfile player = getCachedProfile(ownerId);
         if (player == null) return false;
 
         if (!techManager.canBuyItem(player, typeId)) {
-            System.err.println("🔒 LOCK: " + player.getUsername() + " non ha la tech per " + typeId);
+            System.err.println("🔒 LOCK: Tech mancante per " + typeId);
             return false;
         }
 
@@ -149,8 +254,11 @@ public class GridManager {
         if (target == null) return;
         repository.modifyInventoryItem(ownerId, target.getTypeId(), 1);
         if (target.getDbId() != null) repository.deleteMachine(target.getDbId());
-        removeFromGridMap(ownerId, target);
-        synchronized (tickingMachines) { tickingMachines.remove(target); }
+
+        synchronized (tickingMachines) {
+            removeFromGridMap(ownerId, target);
+            tickingMachines.remove(target);
+        }
         target.onRemove();
     }
 
@@ -179,7 +287,8 @@ public class GridManager {
         Vector3Int dim = m.getDimensions(); GridPosition o = m.getPos();
         for(int x=0; x<dim.x(); x++) for(int y=0; y<dim.y(); y++) for(int z=0; z<dim.z(); z++)
             grid.put(new GridPosition(o.x()+x, o.y()+y, o.z()+z), m);
-        tickingMachines.add(m);
+
+        synchronized (tickingMachines) { tickingMachines.add(m); }
     }
 
     private void removeFromGridMap(UUID id, PlacedMachine m) {
@@ -190,24 +299,10 @@ public class GridManager {
             grid.remove(new GridPosition(o.x()+x, o.y()+y, o.z()+z));
     }
 
+    // Legacy support via async wrapper
     public void loadPlotFromDB(UUID ownerId) {
         ioExecutor.submit(() -> {
-            try {
-                unloadPlot(ownerId);
-                if (repository instanceof MariaDBAdapter db) {
-                    Long pid = db.getPlotId(ownerId);
-                    if (pid != null) {
-                        Map<GridPosition, MatterColor> res = db.loadResources(pid);
-                        if (res.isEmpty()) generateDefaultResources(db, pid, res);
-                        playerResources.put(ownerId, res);
-                    }
-                }
-                List<PlotObject> dtos = repository.loadPlotMachines(ownerId);
-                for(PlotObject d : dtos) {
-                    PlacedMachine m = MachineFactory.createFromModel(d, ownerId);
-                    if(m != null) internalAddMachine(ownerId, m);
-                }
-            } catch(Exception e) { e.printStackTrace(); }
+            synchronized (tickingMachines) { loadPlotSynchronously(ownerId); }
         });
     }
 
@@ -236,9 +331,7 @@ public class GridManager {
 
     public Map<GridPosition, PlacedMachine> getAllMachinesSnapshot() {
         Map<GridPosition, PlacedMachine> all = new HashMap<>();
-        for (var map : playerGrids.values()) {
-            all.putAll(map);
-        }
+        for (var map : playerGrids.values()) all.putAll(map);
         return all;
     }
 

@@ -2,17 +2,17 @@ package com.matterworks.core.infrastructure;
 
 import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.database.DatabaseManager;
-import com.matterworks.core.database.dao.*; // Importa tutti i DAO incluso TechDefinitionDAO
+import com.matterworks.core.database.dao.*;
 import com.matterworks.core.domain.machines.PlacedMachine;
 import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.model.PlotObject;
 import com.matterworks.core.ports.IRepository;
+import com.matterworks.core.database.UuidUtils;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -24,7 +24,7 @@ public class MariaDBAdapter implements IRepository {
     private final PlotDAO plotDAO;
     private final PlotResourceDAO resourceDAO;
     private final InventoryDAO inventoryDAO;
-    private final TechDefinitionDAO techDefinitionDAO; // Nuovo DAO
+    private final TechDefinitionDAO techDefinitionDAO;
 
     public MariaDBAdapter(DatabaseManager dbManager) {
         this.dbManager = dbManager;
@@ -35,27 +35,89 @@ public class MariaDBAdapter implements IRepository {
         this.techDefinitionDAO = new TechDefinitionDAO(dbManager);
     }
 
-    // Metodo getter per il Core (usato in GridManager)
     public TechDefinitionDAO getTechDefinitionDAO() {
         return techDefinitionDAO;
     }
 
-    // --- METODI ESISTENTI (Invariati) ---
     public DatabaseManager getDbManager() { return dbManager; }
 
     @Override public PlayerProfile loadPlayerProfile(UUID uuid) { return playerDAO.load(uuid); }
     @Override public void savePlayerProfile(PlayerProfile profile) { playerDAO.save(profile); }
     @Override public List<PlayerProfile> getAllPlayers() { return playerDAO.loadAll(); }
 
+    @Override
+    public void deletePlayerFull(UUID uuid) {
+        if (uuid == null) return;
+
+        Long plotId = plotDAO.findPlotIdByOwner(uuid);
+
+        try (Connection conn = dbManager.getConnection()) {
+            // Disattiva auto-commit per transazione sicura
+            conn.setAutoCommit(false);
+
+            try {
+                // 1. Elimina Macchine e Risorse se esiste un plot
+                if (plotId != null) {
+                    try (PreparedStatement ps = conn.prepareStatement("DELETE FROM plot_machines WHERE plot_id = ?")) {
+                        ps.setLong(1, plotId);
+                        ps.executeUpdate();
+                    }
+                    try (PreparedStatement ps = conn.prepareStatement("DELETE FROM plot_resources WHERE plot_id = ?")) {
+                        ps.setLong(1, plotId);
+                        ps.executeUpdate();
+                    }
+                    // 2. Elimina il Plot
+                    try (PreparedStatement ps = conn.prepareStatement("DELETE FROM plots WHERE id = ?")) {
+                        ps.setLong(1, plotId);
+                        ps.executeUpdate();
+                    }
+                }
+
+                byte[] uuidBytes = UuidUtils.asBytes(uuid);
+
+                // 3. Elimina Inventario Giocatore
+                try (PreparedStatement ps = conn.prepareStatement("DELETE FROM player_inventory WHERE player_uuid = ?")) {
+                    ps.setBytes(1, uuidBytes);
+                    ps.executeUpdate();
+                }
+
+                // 4. Elimina eventuali codici verifica
+                try (PreparedStatement ps = conn.prepareStatement("DELETE FROM verification_codes WHERE player_uuid = ?")) {
+                    ps.setBytes(1, uuidBytes);
+                    ps.executeUpdate();
+                }
+
+                // 5. Infine, elimina il Giocatore
+                try (PreparedStatement ps = conn.prepareStatement("DELETE FROM players WHERE uuid = ?")) {
+                    ps.setBytes(1, uuidBytes);
+                    ps.executeUpdate();
+                }
+
+                conn.commit();
+                System.out.println("💀 DB: Eliminazione completa utente " + uuid);
+
+            } catch (SQLException ex) {
+                conn.rollback();
+                ex.printStackTrace();
+            } finally {
+                conn.setAutoCommit(true);
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+    }
+
     @Override public int getInventoryItemCount(UUID ownerId, String itemId) { return inventoryDAO.getItemCount(ownerId, itemId); }
     @Override public void modifyInventoryItem(UUID ownerId, String itemId, int delta) { inventoryDAO.modifyItemCount(ownerId, itemId, delta); }
 
     @Override public List<PlotObject> loadPlotMachines(UUID ownerId) { return plotDAO.loadMachines(ownerId); }
+
     @Override
     public Long createMachine(UUID ownerId, PlacedMachine machine) {
         String jsonMeta = machine.serialize().toString();
         return plotDAO.insertMachine(ownerId, machine.getTypeId(), machine.getPos().x(), machine.getPos().y(), machine.getPos().z(), jsonMeta);
     }
+
     @Override public void deleteMachine(Long dbId) { plotDAO.removeMachine(dbId); }
 
     @Override
