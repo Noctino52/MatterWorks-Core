@@ -1,5 +1,7 @@
 package com.matterworks.core.domain.player;
 
+import java.util.HashSet;
+import java.util.Set;
 import java.util.UUID;
 
 public class PlayerProfile {
@@ -10,6 +12,7 @@ public class PlayerProfile {
     private String username;
     private double money;
     private PlayerRank rank;
+    private Set<String> unlockedTechs = new HashSet<>();
 
     public PlayerProfile(UUID playerId) {
         this.playerId = playerId;
@@ -32,5 +35,14 @@ public class PlayerProfile {
         // --- VISUALIZZA USERNAME (SHORT-ID) ---
         String shortId = playerId.toString().substring(0, 8);
         return username + " (" + shortId + ")";
+    }
+    public Set<String> getUnlockedTechs() { return unlockedTechs; }
+
+    public void addTech(String techId) {
+        this.unlockedTechs.add(techId);
+    }
+
+    public boolean hasTech(String techId) {
+        return unlockedTechs.contains(techId);
     }
 }

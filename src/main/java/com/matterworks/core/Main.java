@@ -1,12 +1,8 @@
 package com.matterworks.core;
 
-import com.matterworks.core.common.GridPosition;
-import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.database.DatabaseManager;
-import com.matterworks.core.database.dao.MachineDefinitionDAO;
-import com.matterworks.core.database.dao.PlayerDAO;
-import com.matterworks.core.database.dao.PlotDAO;
 import com.matterworks.core.domain.machines.BlockRegistry;
+import com.matterworks.core.database.dao.MachineDefinitionDAO;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.infrastructure.CoreConfig;
 import com.matterworks.core.infrastructure.MariaDBAdapter;
@@ -25,7 +21,7 @@ import java.util.UUID;
 public class Main {
 
     public static void main(String[] args) throws InterruptedException {
-        System.out.println("🏭 MatterWorks Core Starting...");
+        System.out.println("🍄 MatterWorks Core Starting...");
         CoreConfig.load();
 
         String url = "jdbc:mariadb://dev.matterworks.org:3306/matterworks_core?allowPublicKeyRetrieval=true&useSSL=false";
@@ -38,8 +34,7 @@ public class Main {
 
         WorldIntegrityValidator validator = new WorldIntegrityValidator(dbManager, blockRegistry);
         if (!validator.validateWorldIntegrity()) {
-            System.err.println("🚨 ATTENZIONE: Il mondo contiene collisioni! Controlla il DB.");
-            Thread.sleep(2000);
+            System.err.println("🚨 ATTENZIONE: Il mondo contiene collisioni!");
         }
 
         IRepository repository = new MariaDBAdapter(dbManager);
@@ -51,80 +46,47 @@ public class Main {
 
         UUID playerUuid = UUID.fromString("550e8400-e29b-41d4-a716-446655440000");
         ensurePlayerExists(dbManager, playerUuid);
-        ensurePlayerHasPlot(dbManager, playerUuid);
 
-        System.out.println("📥 Caricamento Plot dal Database...");
         gridManager.loadPlotFromDB(playerUuid);
-        Thread.sleep(500);
 
-        if (GraphicsEnvironment.isHeadless()) {
-            System.out.println("👻 MODALITÀ HEADLESS ATTIVA (SERVER)");
-        } else {
-            System.out.println("🖥️ Monitor rilevato: Avvio GUI...");
+        if (!GraphicsEnvironment.isHeadless()) {
             SwingUtilities.invokeLater(() -> {
+                // CORRETTO: 5 argomenti invece di 6
                 new MatterWorksGUI(
                         gridManager,
                         blockRegistry,
                         playerUuid,
                         () -> {
-                            System.out.println("💾 Manual Save...");
+                            System.out.println("💾 Saving...");
                             saverService.autoSaveTask();
                         },
-                        () -> {
-                            PlayerProfile p = repository.loadPlayerProfile(playerUuid);
-                            return (p != null) ? p.getMoney() : 0.0;
-                        },
-                        repository // Passiamo il repository per leggere l'inventario
+                        repository
                 );
             });
         }
 
-        System.out.println("--- 🟢 SISTEMA ONLINE ---");
-        int ticks = 0;
         while (true) {
-            Thread.sleep(1000);
-            ticks++;
-            if (ticks % 10 == 0) {
-                System.out.println("💾 AutoSave Triggered...");
-                saverService.autoSaveTask();
-                PlayerProfile p = repository.loadPlayerProfile(playerUuid);
-                if (p != null) {
-                    System.out.println("   [Status] Saldo: " + p.getMoney() + "$ | Uptime: " + ticks + "s");
-                }
-            }
+            Thread.sleep(10000);
+            saverService.autoSaveTask();
         }
     }
 
     private static void ensurePlayerExists(DatabaseManager db, UUID uuid) {
-        PlayerDAO playerDao = new PlayerDAO(db);
+        com.matterworks.core.database.dao.PlayerDAO playerDao = new com.matterworks.core.database.dao.PlayerDAO(db);
         PlayerProfile p = playerDao.load(uuid);
-
         if (p == null) {
             p = new PlayerProfile(uuid);
             p.setUsername("Noctino_Dev");
             p.setMoney(1000.0);
-            p.setRank(PlayerProfile.PlayerRank.ADMIN); // DEFAULT ADMIN per test
-            playerDao.save(p);
-        } else {
-            // FIX: Forza l'aggiornamento a ADMIN se esiste già
-            // (Utile perché nel DB sei probabilmente salvato come PLAYER)
             p.setRank(PlayerProfile.PlayerRank.ADMIN);
             playerDao.save(p);
-            System.out.println("👑 Rango impostato ad ADMIN per " + uuid);
-        }
-    }
-
-    private static void ensurePlayerHasPlot(DatabaseManager db, UUID owner) {
-        PlotDAO plotDao = new PlotDAO(db);
-        if (plotDao.findPlotIdByOwner(owner) == null) {
-            plotDao.createPlot(owner, 1, 0, 0);
         }
     }
 
     static class MockWorld implements IWorldAccess {
-        @Override public void setBlock(GridPosition pos, String blockId) {}
-        @Override public boolean isBlockSolid(GridPosition pos) { return true; }
-        @Override public void createVisuals(GridPosition pos, String visualId) {}
-        @Override public Vector3Int fetchExternalBlockDimensions(String blockId) { return Vector3Int.one(); }
+        @Override public void setBlock(com.matterworks.core.common.GridPosition pos, String id) {}
+        @Override public boolean isBlockSolid(com.matterworks.core.common.GridPosition pos) { return true; }
+        @Override public void createVisuals(com.matterworks.core.common.GridPosition pos, String id) {}
+        @Override public com.matterworks.core.common.Vector3Int fetchExternalBlockDimensions(String id) { return com.matterworks.core.common.Vector3Int.one(); }
     }
 }

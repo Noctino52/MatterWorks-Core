@@ -2,10 +2,7 @@ package com.matterworks.core.infrastructure;
 
 import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.database.DatabaseManager;
-import com.matterworks.core.database.dao.InventoryDAO;
-import com.matterworks.core.database.dao.PlayerDAO;
-import com.matterworks.core.database.dao.PlotDAO;
-import com.matterworks.core.database.dao.PlotResourceDAO;
+import com.matterworks.core.database.dao.*; // Importa tutti i DAO incluso TechDefinitionDAO
 import com.matterworks.core.domain.machines.PlacedMachine;
 import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.player.PlayerProfile;
@@ -27,6 +24,7 @@ public class MariaDBAdapter implements IRepository {
     private final PlotDAO plotDAO;
     private final PlotResourceDAO resourceDAO;
     private final InventoryDAO inventoryDAO;
+    private final TechDefinitionDAO techDefinitionDAO; // Nuovo DAO
 
     public MariaDBAdapter(DatabaseManager dbManager) {
         this.dbManager = dbManager;
@@ -34,45 +32,31 @@ public class MariaDBAdapter implements IRepository {
         this.plotDAO = new PlotDAO(dbManager);
         this.resourceDAO = new PlotResourceDAO(dbManager);
         this.inventoryDAO = new InventoryDAO(dbManager);
+        this.techDefinitionDAO = new TechDefinitionDAO(dbManager);
     }
 
-    // --- GETTER PER IL CORE ---
-    public DatabaseManager getDbManager() {
-        return dbManager;
+    // Metodo getter per il Core (usato in GridManager)
+    public TechDefinitionDAO getTechDefinitionDAO() {
+        return techDefinitionDAO;
     }
 
-    // --- PLAYER & INVENTORY ---
-    @Override
-    public PlayerProfile loadPlayerProfile(UUID uuid) { return playerDAO.load(uuid); }
+    // --- METODI ESISTENTI (Invariati) ---
+    public DatabaseManager getDbManager() { return dbManager; }
 
-    @Override
-    public void savePlayerProfile(PlayerProfile profile) { playerDAO.save(profile); }
+    @Override public PlayerProfile loadPlayerProfile(UUID uuid) { return playerDAO.load(uuid); }
+    @Override public void savePlayerProfile(PlayerProfile profile) { playerDAO.save(profile); }
+    @Override public List<PlayerProfile> getAllPlayers() { return playerDAO.loadAll(); }
 
-    @Override
-    public List<PlayerProfile> getAllPlayers() { return playerDAO.loadAll(); }
+    @Override public int getInventoryItemCount(UUID ownerId, String itemId) { return inventoryDAO.getItemCount(ownerId, itemId); }
+    @Override public void modifyInventoryItem(UUID ownerId, String itemId, int delta) { inventoryDAO.modifyItemCount(ownerId, itemId, delta); }
 
-    @Override
-    public int getInventoryItemCount(UUID ownerId, String itemId) {
-        return inventoryDAO.getItemCount(ownerId, itemId);
-    }
-
-    @Override
-    public void modifyInventoryItem(UUID ownerId, String itemId, int delta) {
-        inventoryDAO.modifyItemCount(ownerId, itemId, delta);
-    }
-
-    // --- PLOT MANAGEMENT ---
-    @Override
-    public List<PlotObject> loadPlotMachines(UUID ownerId) { return plotDAO.loadMachines(ownerId); }
-
+    @Override public List<PlotObject> loadPlotMachines(UUID ownerId) { return plotDAO.loadMachines(ownerId); }
     @Override
     public Long createMachine(UUID ownerId, PlacedMachine machine) {
         String jsonMeta = machine.serialize().toString();
         return plotDAO.insertMachine(ownerId, machine.getTypeId(), machine.getPos().x(), machine.getPos().y(), machine.getPos().z(), jsonMeta);
     }
-
-    @Override
-    public void deleteMachine(Long dbId) { plotDAO.removeMachine(dbId); }
+    @Override public void deleteMachine(Long dbId) { plotDAO.removeMachine(dbId); }
 
     @Override
     public void updateMachinesMetadata(List<PlacedMachine> machines) {
@@ -95,13 +79,16 @@ public class MariaDBAdapter implements IRepository {
         if (plotId == null) return;
         try (Connection conn = dbManager.getConnection()) {
             try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM plot_machines WHERE plot_id = ?")) {
-                stmt.setLong(1, plotId); stmt.executeUpdate();
+                stmt.setLong(1, plotId);
+                stmt.executeUpdate();
             }
             try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM plot_resources WHERE plot_id = ?")) {
-                stmt.setLong(1, plotId); stmt.executeUpdate();
+                stmt.setLong(1, plotId);
+                stmt.executeUpdate();
             }
         } catch (SQLException e) { e.printStackTrace(); }
     }
+
     public double getSosThreshold() {
         String sql = "SELECT sos_threshold FROM server_gamestate WHERE id = 1";
         try (Connection conn = dbManager.getConnection();
@@ -109,22 +96,7 @@ public class MariaDBAdapter implements IRepository {
              java.sql.ResultSet rs = ps.executeQuery()) {
             if (rs.next()) return rs.getDouble("sos_threshold");
         } catch (java.sql.SQLException e) { e.printStackTrace(); }
-        return 500.0; // Fallback
-    }
-
-    public Map<String, Integer> getFullInventory(UUID ownerId) {
-        Map<String, Integer> inventory = new HashMap<>();
-        String sql = "SELECT item_id, quantity FROM player_inventory WHERE player_uuid = ?";
-        try (Connection conn = dbManager.getConnection();
-             java.sql.PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setBytes(1, com.matterworks.core.database.UuidUtils.asBytes(ownerId));
-            try (java.sql.ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    inventory.put(rs.getString("item_id"), rs.getInt("quantity"));
-                }
-            }
-        } catch (java.sql.SQLException e) { e.printStackTrace(); }
-        return inventory;
+        return 500.0;
     }
 
     @Override public Long getPlotId(UUID ownerId) { return plotDAO.findPlotIdByOwner(ownerId); }
