@@ -47,11 +47,11 @@ public class Main {
         UUID playerUuid = UUID.fromString("550e8400-e29b-41d4-a716-446655440000");
         ensurePlayerExists(dbManager, playerUuid);
 
+        // Ora questo metodo esiste e carica il plot nella simulazione globale
         gridManager.loadPlotFromDB(playerUuid);
 
         if (!GraphicsEnvironment.isHeadless()) {
             SwingUtilities.invokeLater(() -> {
-                // CORRETTO: 5 argomenti invece di 6
                 new MatterWorksGUI(
                         gridManager,
                         blockRegistry,

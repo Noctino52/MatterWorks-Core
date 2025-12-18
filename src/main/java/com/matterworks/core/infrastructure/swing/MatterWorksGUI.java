@@ -55,7 +55,7 @@ public class MatterWorksGUI extends JFrame {
                 g.fillRect(0, 0, getWidth(), getHeight());
                 g.setColor(Color.WHITE);
                 g.setFont(new Font("SansSerif", Font.BOLD, 26));
-                String msg = "SYNCING WORLD STATE...";
+                String msg = "SWITCHING VIEW...";
                 FontMetrics fm = g.getFontMetrics();
                 g.drawString(msg, (getWidth() - fm.stringWidth(msg)) / 2, getHeight() / 2);
             }
@@ -81,7 +81,7 @@ public class MatterWorksGUI extends JFrame {
         add(statusBar, BorderLayout.SOUTH);
 
         // Timer
-        repaintTimer = new Timer(40, e -> factoryPanel.repaint()); // 25 FPS
+        repaintTimer = new Timer(40, e -> factoryPanel.repaint());
         economyTimer = new Timer(1000, e -> updateEconomyLabels());
 
         repaintTimer.start();
@@ -91,8 +91,9 @@ public class MatterWorksGUI extends JFrame {
         factoryPanel.requestFocusInWindow();
         updateLabels();
 
+        // Caricamento iniziale
         if(currentPlayerUuid != null) {
-            new Thread(() -> gridManager.switchPlayerContext(null, currentPlayerUuid)).start();
+            gridManager.loadPlotFromDB(currentPlayerUuid);
         }
     }
 
@@ -100,15 +101,6 @@ public class MatterWorksGUI extends JFrame {
         SwingUtilities.invokeLater(() -> {
             glassPane.setVisible(loading);
             playerSelector.setEnabled(!loading);
-
-            if (loading) {
-                repaintTimer.stop();
-                economyTimer.stop();
-            } else {
-                repaintTimer.start();
-                economyTimer.start();
-                factoryPanel.repaint();
-            }
         });
     }
 
@@ -202,7 +194,7 @@ public class MatterWorksGUI extends JFrame {
                         this.currentPlayerUuid = next.getPlayerId();
                         factoryPanel.setPlayerUuid(next.getPlayerId());
                         new Thread(() -> {
-                            gridManager.switchPlayerContext(null, next.getPlayerId());
+                            gridManager.loadPlotFromDB(next.getPlayerId());
                             SwingUtilities.invokeLater(() -> {
                                 updateTabs();
                                 setLoading(false);
@@ -234,9 +226,8 @@ public class MatterWorksGUI extends JFrame {
         return statusPanel;
     }
 
-    // --- FIX CRITICO: Pulizia Risorse Pannelli ---
     private void updateTabs() {
-        // 1. Dispose vecchi componenti
+        // Dispose old panels (Anti-Lag Fix)
         for (Component c : rightTabbedPane.getComponents()) {
             if (c instanceof InventoryDebugPanel) ((InventoryDebugPanel) c).dispose();
             if (c instanceof TechTreePanel) ((TechTreePanel) c).dispose();
@@ -255,16 +246,15 @@ public class MatterWorksGUI extends JFrame {
         Object sel = playerSelector.getSelectedItem();
 
         if (sel instanceof PlayerProfile p) {
-            UUID oldUuid = this.currentPlayerUuid;
             UUID newUuid = p.getPlayerId();
-
-            if (newUuid.equals(oldUuid)) return;
+            if (newUuid.equals(this.currentPlayerUuid)) return;
 
             setLoading(true);
 
             new Thread(() -> {
                 try {
-                    gridManager.switchPlayerContext(oldUuid, newUuid);
+                    // Assicura caricamento in memoria (no unload)
+                    gridManager.loadPlotFromDB(newUuid);
 
                     SwingUtilities.invokeLater(() -> {
                         this.currentPlayerUuid = newUuid;
