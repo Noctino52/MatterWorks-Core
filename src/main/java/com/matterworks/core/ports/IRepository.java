@@ -13,6 +13,9 @@ import java.util.UUID;
 
 public interface IRepository {
 
+    // --- TRANSACTION LOGGING ---
+    void logTransaction(PlayerProfile player, String actionType, String currency, double amount, String itemId);
+
     // --- CONFIG ---
     ServerConfig loadServerConfig();
 
@@ -20,6 +23,7 @@ public interface IRepository {
     PlayerProfile loadPlayerProfile(UUID uuid);
     void savePlayerProfile(PlayerProfile profile);
     void deletePlayerFull(UUID uuid);
+    List<PlayerProfile> getAllPlayers();
 
     // --- PLOT DATA ---
     List<PlotObject> loadPlotMachines(UUID ownerId);
@@ -36,5 +40,4 @@ public interface IRepository {
     // --- INVENTARIO ---
     int getInventoryItemCount(UUID ownerId, String itemId);
     void modifyInventoryItem(UUID ownerId, String itemId, int delta);
-    List<PlayerProfile> getAllPlayers();
 }

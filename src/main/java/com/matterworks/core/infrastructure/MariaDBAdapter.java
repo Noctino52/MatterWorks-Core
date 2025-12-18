@@ -10,6 +10,7 @@ import com.matterworks.core.model.PlotObject;
 import com.matterworks.core.ports.IRepository;
 import com.matterworks.core.database.UuidUtils;
 
+import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -26,6 +27,7 @@ public class MariaDBAdapter implements IRepository {
     private final PlotResourceDAO resourceDAO;
     private final InventoryDAO inventoryDAO;
     private final TechDefinitionDAO techDefinitionDAO;
+    private final TransactionDAO transactionDAO;
 
     public MariaDBAdapter(DatabaseManager dbManager) {
         this.dbManager = dbManager;
@@ -34,10 +36,13 @@ public class MariaDBAdapter implements IRepository {
         this.resourceDAO = new PlotResourceDAO(dbManager);
         this.inventoryDAO = new InventoryDAO(dbManager);
         this.techDefinitionDAO = new TechDefinitionDAO(dbManager);
+        this.transactionDAO = new TransactionDAO(dbManager);
     }
 
-    public TechDefinitionDAO getTechDefinitionDAO() { return techDefinitionDAO; }
-    public DatabaseManager getDbManager() { return dbManager; }
+    @Override
+    public void logTransaction(PlayerProfile player, String actionType, String currency, double amount, String itemId) {
+        transactionDAO.logTransaction(player, actionType, currency, BigDecimal.valueOf(amount), itemId);
+    }
 
     @Override
     public ServerConfig loadServerConfig() {
@@ -55,10 +60,7 @@ public class MariaDBAdapter implements IRepository {
                         rs.getDouble("sos_threshold")
                 );
             }
-        } catch (SQLException e) {
-            e.printStackTrace();
-        }
-        // Fallback in caso di errore grave (es. tabella mancante)
+        } catch (SQLException e) { e.printStackTrace(); }
         return new ServerConfig(1000.0, 3, 1, 1, 0, 500.0);
     }
 
@@ -81,14 +83,13 @@ public class MariaDBAdapter implements IRepository {
                 byte[] uuidBytes = UuidUtils.asBytes(uuid);
                 try (PreparedStatement ps = conn.prepareStatement("DELETE FROM player_inventory WHERE player_uuid = ?")) { ps.setBytes(1, uuidBytes); ps.executeUpdate(); }
                 try (PreparedStatement ps = conn.prepareStatement("DELETE FROM verification_codes WHERE player_uuid = ?")) { ps.setBytes(1, uuidBytes); ps.executeUpdate(); }
+                try (PreparedStatement ps = conn.prepareStatement("DELETE FROM transactions WHERE player_uuid = ?")) { ps.setBytes(1, uuidBytes); ps.executeUpdate(); }
                 try (PreparedStatement ps = conn.prepareStatement("DELETE FROM players WHERE uuid = ?")) { ps.setBytes(1, uuidBytes); ps.executeUpdate(); }
                 conn.commit();
             } catch (SQLException ex) {
                 conn.rollback();
                 ex.printStackTrace();
-            } finally {
-                conn.setAutoCommit(true);
-            }
+            } finally { conn.setAutoCommit(true); }
         } catch (SQLException e) { e.printStackTrace(); }
     }
 
@@ -106,7 +107,6 @@ public class MariaDBAdapter implements IRepository {
 
     @Override
     public void updateMachinesMetadata(List<PlacedMachine> machines) {
-        if (machines == null || machines.isEmpty()) return;
         String sql = "UPDATE plot_machines SET metadata = ? WHERE id = ?";
         try (Connection conn = dbManager.getConnection(); PreparedStatement stmt = conn.prepareStatement(sql)) {
             for (PlacedMachine pm : machines) {
@@ -132,4 +132,7 @@ public class MariaDBAdapter implements IRepository {
     @Override public Long getPlotId(UUID ownerId) { return plotDAO.findPlotIdByOwner(ownerId); }
     @Override public void saveResource(Long plotId, int x, int z, MatterColor type) { resourceDAO.addResource(plotId, x, z, type); }
     @Override public Map<GridPosition, MatterColor> loadResources(Long plotId) { return resourceDAO.loadResources(plotId); }
+
+    public TechDefinitionDAO getTechDefinitionDAO() { return techDefinitionDAO; }
+    public DatabaseManager getDbManager() { return dbManager; }
 }

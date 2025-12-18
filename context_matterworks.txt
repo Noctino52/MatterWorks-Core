@@ -27,13 +27,9 @@ FILE: Main.java
 --------------------------------
 package com.matterworks.core;
 
-import com.matterworks.core.common.GridPosition;
-import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.database.DatabaseManager;
-import com.matterworks.core.database.dao.MachineDefinitionDAO;
-import com.matterworks.core.database.dao.PlayerDAO;
-import com.matterworks.core.database.dao.PlotDAO;
 import com.matterworks.core.domain.machines.BlockRegistry;
+import com.matterworks.core.database.dao.MachineDefinitionDAO;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.infrastructure.CoreConfig;
 import com.matterworks.core.infrastructure.MariaDBAdapter;
@@ -52,7 +48,7 @@ import java.util.UUID;
 public class Main {
 
     public static void main(String[] args) throws InterruptedException {
-        System.out.println("ðŸ­ MatterWorks Core Starting...");
+        System.out.println("ðŸ„ MatterWorks Core Starting...");
         CoreConfig.load();
 
         String url = "jdbc:mariadb://dev.matterworks.org:3306/matterworks_core?allowPublicKeyRetrieval=true&useSSL=false";
@@ -65,8 +61,7 @@ public class Main {
 
         WorldIntegrityValidator validator = new WorldIntegrityValidator(dbManager, blockRegistry);
         if (!validator.validateWorldIntegrity()) {
-            System.err.println("ðŸš¨ ATTENZIONE: Il mondo contiene collisioni! Controlla il DB.");
-            Thread.sleep(2000);
+            System.err.println("ðŸš¨ ATTENZIONE: Il mondo contiene collisioni!");
         }
 
         IRepository repository = new MariaDBAdapter(dbManager);
@@ -78,81 +73,48 @@ public class Main {
 
         UUID playerUuid = UUID.fromString("550e8400-e29b-41d4-a716-446655440000");
         ensurePlayerExists(dbManager, playerUuid);
-        ensurePlayerHasPlot(dbManager, playerUuid);
 
-        System.out.println("ðŸ“¥ Caricamento Plot dal Database...");
+        // Ora questo metodo esiste e carica il plot nella simulazione globale
         gridManager.loadPlotFromDB(playerUuid);
-        Thread.sleep(500);
 
-        if (GraphicsEnvironment.isHeadless()) {
-            System.out.println("ðŸ‘» MODALITÃ€ HEADLESS ATTIVA (SERVER)");
-        } else {
-            System.out.println("ðŸ–¥ï¸ Monitor rilevato: Avvio GUI...");
+        if (!GraphicsEnvironment.isHeadless()) {
             SwingUtilities.invokeLater(() -> {
                 new MatterWorksGUI(
                         gridManager,
                         blockRegistry,
                         playerUuid,
                         () -> {
-                            System.out.println("ðŸ’¾ Manual Save...");
+                            System.out.println("ðŸ’¾ Saving...");
                             saverService.autoSaveTask();
                         },
-                        () -> {
-                            PlayerProfile p = repository.loadPlayerProfile(playerUuid);
-                            return (p != null) ? p.getMoney() : 0.0;
-                        },
-                        repository // Passiamo il repository per leggere l'inventario
+                        repository
                 );
             });
         }
 
-        System.out.println("--- ðŸŸ¢ SISTEMA ONLINE ---");
-        int ticks = 0;
         while (true) {
-            Thread.sleep(1000);
-            ticks++;
-            if (ticks % 10 == 0) {
-                System.out.println("ðŸ’¾ AutoSave Triggered...");
-                saverService.autoSaveTask();
-                PlayerProfile p = repository.loadPlayerProfile(playerUuid);
-                if (p != null) {
-                    System.out.println("   [Status] Saldo: " + p.getMoney() + "$ | Uptime: " + ticks + "s");
-                }
-            }
+            Thread.sleep(10000);
+            saverService.autoSaveTask();
         }
     }
 
     private static void ensurePlayerExists(DatabaseManager db, UUID uuid) {
-        PlayerDAO playerDao = new PlayerDAO(db);
+        com.matterworks.core.database.dao.PlayerDAO playerDao = new com.matterworks.core.database.dao.PlayerDAO(db);
         PlayerProfile p = playerDao.load(uuid);
-
         if (p == null) {
             p = new PlayerProfile(uuid);
             p.setUsername("Noctino_Dev");
             p.setMoney(1000.0);
-            p.setRank(PlayerProfile.PlayerRank.ADMIN); // DEFAULT ADMIN per test
-            playerDao.save(p);
-        } else {
-            // FIX: Forza l'aggiornamento a ADMIN se esiste giÃ 
-            // (Utile perchÃ© nel DB sei probabilmente salvato come PLAYER)
             p.setRank(PlayerProfile.PlayerRank.ADMIN);
             playerDao.save(p);
-            System.out.println("ðŸ‘‘ Rango impostato ad ADMIN per " + uuid);
-        }
-    }
-
-    private static void ensurePlayerHasPlot(DatabaseManager db, UUID owner) {
-        PlotDAO plotDao = new PlotDAO(db);
-        if (plotDao.findPlotIdByOwner(owner) == null) {
-            plotDao.createPlot(owner, 1, 0, 0);
         }
     }
 
     static class MockWorld implements IWorldAccess {
-        @Override public void setBlock(GridPosition pos, String blockId) {}
-        @Override public boolean isBlockSolid(GridPosition pos) { return true; }
-        @Override public void createVisuals(GridPosition pos, String visualId) {}
-        @Override public Vector3Int fetchExternalBlockDimensions(String blockId) { return Vector3Int.one(); }
+        @Override public void setBlock(com.matterworks.core.common.GridPosition pos, String id) {}
+        @Override public boolean isBlockSolid(com.matterworks.core.common.GridPosition pos) { return true; }
+        @Override public void createVisuals(com.matterworks.core.common.GridPosition pos, String id) {}
+        @Override public com.matterworks.core.common.Vector3Int fetchExternalBlockDimensions(String id) { return com.matterworks.core.common.Vector3Int.one(); }
     }
 }
 
@@ -482,30 +444,35 @@ FILE: PlayerDAO.java
 --------------------------------
 package com.matterworks.core.database.dao;
 
+import com.google.gson.Gson;
+import com.google.gson.reflect.TypeToken;
 import com.matterworks.core.database.DatabaseManager;
 import com.matterworks.core.database.UuidUtils;
 import com.matterworks.core.domain.player.PlayerProfile;
-
+import java.lang.reflect.Type;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 public class PlayerDAO {
 
     private final DatabaseManager db;
+    private final Gson gson = new Gson();
 
-    // UPDATE: Aggiunto 'rank' alla query
     private static final String UPSERT_SQL = """
-        INSERT INTO players (uuid, username, money, rank) 
-        VALUES (?, ?, ?, ?)
+        INSERT INTO players (uuid, username, money, rank, tech_unlocks) 
+        VALUES (?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE 
             username = VALUES(username),
             money = VALUES(money),
             rank = VALUES(rank),
+            tech_unlocks = VALUES(tech_unlocks),
             last_login = CURRENT_TIMESTAMP
     """;
 
@@ -522,10 +489,13 @@ public class PlayerDAO {
             ps.setBytes(1, UuidUtils.asBytes(p.getPlayerId()));
             ps.setString(2, p.getUsername());
             ps.setDouble(3, p.getMoney());
-            ps.setString(4, p.getRank().name()); // Salva Enum come Stringa
+            ps.setString(4, p.getRank().name());
+
+            // Assicuriamoci di salvare sempre un array []
+            String json = gson.toJson(p.getUnlockedTechs());
+            ps.setString(5, json);
 
             ps.executeUpdate();
-
         } catch (SQLException e) {
             e.printStackTrace();
         }
@@ -536,14 +506,12 @@ public class PlayerDAO {
              PreparedStatement ps = conn.prepareStatement(SELECT_SQL)) {
 
             ps.setBytes(1, UuidUtils.asBytes(uuid));
-
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) {
                     PlayerProfile p = new PlayerProfile(uuid);
                     p.setUsername(rs.getString("username"));
                     p.setMoney(rs.getDouble("money"));
 
-                    // Carica Rank (con fallback se null)
                     String rankStr = rs.getString("rank");
                     if (rankStr != null) {
                         try {
@@ -552,30 +520,45 @@ public class PlayerDAO {
                             p.setRank(PlayerProfile.PlayerRank.PLAYER);
                         }
                     }
+
+                    // --- FIX: Parsing Sicuro del JSON ---
+                    String techJson = rs.getString("tech_unlocks");
+                    if (techJson != null && !techJson.isBlank()) {
+                        try {
+                            // Se techJson Ã¨ "{}" (oggetto) invece di "[]" (array), questo fallirebbe senza catch
+                            Type setType = new TypeToken<HashSet<String>>(){}.getType();
+                            Set<String> unlocks = gson.fromJson(techJson, setType);
+                            if (unlocks != null) {
+                                unlocks.forEach(p::addTech);
+                            }
+                        } catch (Exception e) {
+                            System.err.println("âš ï¸ Warning: Formato tech_unlocks errato nel DB per " + uuid + ". Uso set vuoto.");
+                            // Non facciamo nulla, p ha giÃ  un set vuoto di default
+                        }
+                    }
+
                     return p;
                 }
             }
         } catch (SQLException e) {
             e.printStackTrace();
         }
-        return null; // Non trovato
+        return null;
     }
 
     public List<PlayerProfile> loadAll() {
         List<PlayerProfile> players = new ArrayList<>();
-        String sql = "SELECT * FROM players";
-        try (java.sql.Connection conn = db.getConnection();
-             java.sql.PreparedStatement ps = conn.prepareStatement(sql);
-             java.sql.ResultSet rs = ps.executeQuery()) {
+        String sql = "SELECT uuid FROM players";
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
             while (rs.next()) {
-                PlayerProfile p = new PlayerProfile(UuidUtils.asUuid(rs.getBytes("uuid")));
-                p.setUsername(rs.getString("username"));
-                p.setMoney(rs.getDouble("money"));
-                String rankStr = rs.getString("rank");
-                if (rankStr != null) p.setRank(PlayerProfile.PlayerRank.valueOf(rankStr));
-                players.add(p);
+                PlayerProfile p = load(UuidUtils.asUuid(rs.getBytes("uuid")));
+                if (p != null) players.add(p);
             }
-        } catch (java.sql.SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return players;
     }
 }
@@ -903,6 +886,71 @@ public class PlotResourceDAO {
             e.printStackTrace();
         }
         return resources;
+    }
+}
+
+
+--------------------------------
+FILE: TechDefinitionDAO.java
+--------------------------------
+package com.matterworks.core.database.dao;
+
+import com.google.gson.Gson;
+import com.google.gson.reflect.TypeToken;
+import com.matterworks.core.database.DatabaseManager;
+import com.matterworks.core.managers.TechManager.TechNode;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.List;
+
+public class TechDefinitionDAO {
+
+    private final DatabaseManager db;
+    private final Gson gson = new Gson();
+
+    public TechDefinitionDAO(DatabaseManager db) {
+        this.db = db;
+    }
+
+    public List<TechNode> loadAllNodes() {
+        List<TechNode> nodes = new ArrayList<>();
+        String sql = "SELECT node_id, name_display, cost_money, parent_node_ids, unlock_machine_ids FROM tech_definitions";
+
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+
+            while (rs.next()) {
+                String id = rs.getString("node_id");
+                String name = rs.getString("name_display");
+                double cost = rs.getDouble("cost_money");
+
+                // Deserializzazione liste JSON
+                List<String> parents = parseJsonList(rs.getString("parent_node_ids"));
+                List<String> unlocks = parseJsonList(rs.getString("unlock_machine_ids"));
+
+                nodes.add(new TechNode(id, name, cost, parents, unlocks));
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+        return nodes;
+    }
+
+    private List<String> parseJsonList(String json) {
+        if (json == null || json.isBlank() || json.equals("null")) {
+            return new ArrayList<>();
+        }
+        try {
+            return gson.fromJson(json, new TypeToken<List<String>>(){}.getType());
+        } catch (Exception e) {
+            System.err.println("âš ï¸ JSON Parse Error in TechDefinitionDAO: " + json);
+            return new ArrayList<>();
+        }
     }
 }
 
@@ -2350,6 +2398,8 @@ FILE: PlayerProfile.java
 --------------------------------
 package com.matterworks.core.domain.player;
 
+import java.util.HashSet;
+import java.util.Set;
 import java.util.UUID;
 
 public class PlayerProfile {
@@ -2360,6 +2410,7 @@ public class PlayerProfile {
     private String username;
     private double money;
     private PlayerRank rank;
+    private Set<String> unlockedTechs = new HashSet<>();
 
     public PlayerProfile(UUID playerId) {
         this.playerId = playerId;
@@ -2382,6 +2433,15 @@ public class PlayerProfile {
         // --- VISUALIZZA USERNAME (SHORT-ID) ---
         String shortId = playerId.toString().substring(0, 8);
         return username + " (" + shortId + ")";
+    }
+    public Set<String> getUnlockedTechs() { return unlockedTechs; }
+
+    public void addTech(String techId) {
+        this.unlockedTechs.add(techId);
+    }
+
+    public boolean hasTech(String techId) {
+        return unlockedTechs.contains(techId);
     }
 }
 
@@ -2515,20 +2575,18 @@ package com.matterworks.core.infrastructure;
 
 import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.database.DatabaseManager;
-import com.matterworks.core.database.dao.InventoryDAO;
-import com.matterworks.core.database.dao.PlayerDAO;
-import com.matterworks.core.database.dao.PlotDAO;
-import com.matterworks.core.database.dao.PlotResourceDAO;
+import com.matterworks.core.database.dao.*;
 import com.matterworks.core.domain.machines.PlacedMachine;
 import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.model.PlotObject;
 import com.matterworks.core.ports.IRepository;
+import com.matterworks.core.database.UuidUtils;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -2540,6 +2598,7 @@ public class MariaDBAdapter implements IRepository {
     private final PlotDAO plotDAO;
     private final PlotResourceDAO resourceDAO;
     private final InventoryDAO inventoryDAO;
+    private final TechDefinitionDAO techDefinitionDAO;
 
     public MariaDBAdapter(DatabaseManager dbManager) {
         this.dbManager = dbManager;
@@ -2547,36 +2606,68 @@ public class MariaDBAdapter implements IRepository {
         this.plotDAO = new PlotDAO(dbManager);
         this.resourceDAO = new PlotResourceDAO(dbManager);
         this.inventoryDAO = new InventoryDAO(dbManager);
+        this.techDefinitionDAO = new TechDefinitionDAO(dbManager);
     }
 
-    // --- GETTER PER IL CORE ---
-    public DatabaseManager getDbManager() {
-        return dbManager;
+    public TechDefinitionDAO getTechDefinitionDAO() { return techDefinitionDAO; }
+    public DatabaseManager getDbManager() { return dbManager; }
+
+    @Override
+    public ServerConfig loadServerConfig() {
+        String sql = "SELECT player_start_money, vein_raw, vein_red, vein_blue, vein_yellow, sos_threshold FROM server_gamestate WHERE id = 1";
+        try (Connection conn = dbManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            if (rs.next()) {
+                return new ServerConfig(
+                        rs.getDouble("player_start_money"),
+                        rs.getInt("vein_raw"),
+                        rs.getInt("vein_red"),
+                        rs.getInt("vein_blue"),
+                        rs.getInt("vein_yellow"),
+                        rs.getDouble("sos_threshold")
+                );
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+        // Fallback in caso di errore grave (es. tabella mancante)
+        return new ServerConfig(1000.0, 3, 1, 1, 0, 500.0);
     }
 
-    // --- PLAYER & INVENTORY ---
-    @Override
-    public PlayerProfile loadPlayerProfile(UUID uuid) { return playerDAO.load(uuid); }
+    @Override public PlayerProfile loadPlayerProfile(UUID uuid) { return playerDAO.load(uuid); }
+    @Override public void savePlayerProfile(PlayerProfile profile) { playerDAO.save(profile); }
+    @Override public List<PlayerProfile> getAllPlayers() { return playerDAO.loadAll(); }
 
     @Override
-    public void savePlayerProfile(PlayerProfile profile) { playerDAO.save(profile); }
-
-    @Override
-    public List<PlayerProfile> getAllPlayers() { return playerDAO.loadAll(); }
-
-    @Override
-    public int getInventoryItemCount(UUID ownerId, String itemId) {
-        return inventoryDAO.getItemCount(ownerId, itemId);
+    public void deletePlayerFull(UUID uuid) {
+        if (uuid == null) return;
+        Long plotId = plotDAO.findPlotIdByOwner(uuid);
+        try (Connection conn = dbManager.getConnection()) {
+            conn.setAutoCommit(false);
+            try {
+                if (plotId != null) {
+                    try (PreparedStatement ps = conn.prepareStatement("DELETE FROM plot_machines WHERE plot_id = ?")) { ps.setLong(1, plotId); ps.executeUpdate(); }
+                    try (PreparedStatement ps = conn.prepareStatement("DELETE FROM plot_resources WHERE plot_id = ?")) { ps.setLong(1, plotId); ps.executeUpdate(); }
+                    try (PreparedStatement ps = conn.prepareStatement("DELETE FROM plots WHERE id = ?")) { ps.setLong(1, plotId); ps.executeUpdate(); }
+                }
+                byte[] uuidBytes = UuidUtils.asBytes(uuid);
+                try (PreparedStatement ps = conn.prepareStatement("DELETE FROM player_inventory WHERE player_uuid = ?")) { ps.setBytes(1, uuidBytes); ps.executeUpdate(); }
+                try (PreparedStatement ps = conn.prepareStatement("DELETE FROM verification_codes WHERE player_uuid = ?")) { ps.setBytes(1, uuidBytes); ps.executeUpdate(); }
+                try (PreparedStatement ps = conn.prepareStatement("DELETE FROM players WHERE uuid = ?")) { ps.setBytes(1, uuidBytes); ps.executeUpdate(); }
+                conn.commit();
+            } catch (SQLException ex) {
+                conn.rollback();
+                ex.printStackTrace();
+            } finally {
+                conn.setAutoCommit(true);
+            }
+        } catch (SQLException e) { e.printStackTrace(); }
     }
 
-    @Override
-    public void modifyInventoryItem(UUID ownerId, String itemId, int delta) {
-        inventoryDAO.modifyItemCount(ownerId, itemId, delta);
-    }
-
-    // --- PLOT MANAGEMENT ---
-    @Override
-    public List<PlotObject> loadPlotMachines(UUID ownerId) { return plotDAO.loadMachines(ownerId); }
+    @Override public int getInventoryItemCount(UUID ownerId, String itemId) { return inventoryDAO.getItemCount(ownerId, itemId); }
+    @Override public void modifyInventoryItem(UUID ownerId, String itemId, int delta) { inventoryDAO.modifyItemCount(ownerId, itemId, delta); }
+    @Override public List<PlotObject> loadPlotMachines(UUID ownerId) { return plotDAO.loadMachines(ownerId); }
 
     @Override
     public Long createMachine(UUID ownerId, PlacedMachine machine) {
@@ -2584,8 +2675,7 @@ public class MariaDBAdapter implements IRepository {
         return plotDAO.insertMachine(ownerId, machine.getTypeId(), machine.getPos().x(), machine.getPos().y(), machine.getPos().z(), jsonMeta);
     }
 
-    @Override
-    public void deleteMachine(Long dbId) { plotDAO.removeMachine(dbId); }
+    @Override public void deleteMachine(Long dbId) { plotDAO.removeMachine(dbId); }
 
     @Override
     public void updateMachinesMetadata(List<PlacedMachine> machines) {
@@ -2607,43 +2697,30 @@ public class MariaDBAdapter implements IRepository {
         Long plotId = plotDAO.findPlotIdByOwner(ownerId);
         if (plotId == null) return;
         try (Connection conn = dbManager.getConnection()) {
-            try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM plot_machines WHERE plot_id = ?")) {
-                stmt.setLong(1, plotId); stmt.executeUpdate();
-            }
-            try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM plot_resources WHERE plot_id = ?")) {
-                stmt.setLong(1, plotId); stmt.executeUpdate();
-            }
+            try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM plot_machines WHERE plot_id = ?")) { stmt.setLong(1, plotId); stmt.executeUpdate(); }
+            try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM plot_resources WHERE plot_id = ?")) { stmt.setLong(1, plotId); stmt.executeUpdate(); }
         } catch (SQLException e) { e.printStackTrace(); }
-    }
-    public double getSosThreshold() {
-        String sql = "SELECT sos_threshold FROM server_gamestate WHERE id = 1";
-        try (Connection conn = dbManager.getConnection();
-             java.sql.PreparedStatement ps = conn.prepareStatement(sql);
-             java.sql.ResultSet rs = ps.executeQuery()) {
-            if (rs.next()) return rs.getDouble("sos_threshold");
-        } catch (java.sql.SQLException e) { e.printStackTrace(); }
-        return 500.0; // Fallback
-    }
-
-    public Map<String, Integer> getFullInventory(UUID ownerId) {
-        Map<String, Integer> inventory = new HashMap<>();
-        String sql = "SELECT item_id, quantity FROM player_inventory WHERE player_uuid = ?";
-        try (Connection conn = dbManager.getConnection();
-             java.sql.PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setBytes(1, com.matterworks.core.database.UuidUtils.asBytes(ownerId));
-            try (java.sql.ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    inventory.put(rs.getString("item_id"), rs.getInt("quantity"));
-                }
-            }
-        } catch (java.sql.SQLException e) { e.printStackTrace(); }
-        return inventory;
     }
 
     @Override public Long getPlotId(UUID ownerId) { return plotDAO.findPlotIdByOwner(ownerId); }
     @Override public void saveResource(Long plotId, int x, int z, MatterColor type) { resourceDAO.addResource(plotId, x, z, type); }
     @Override public Map<GridPosition, MatterColor> loadResources(Long plotId) { return resourceDAO.loadResources(plotId); }
 }
+
+
+--------------------------------
+FILE: ServerConfig.java
+--------------------------------
+package com.matterworks.core.infrastructure;
+
+public record ServerConfig(
+        double startMoney,
+        int veinRaw,
+        int veinRed,
+        int veinBlue,
+        int veinYellow,
+        double sosThreshold
+) {}
 
 
 --------------------------------
@@ -2709,7 +2786,11 @@ public class FactoryPanel extends JPanel {
     public void setPlayerUuid(UUID uuid) { this.playerUuid = uuid; repaint(); }
     public void setLayer(int y) { this.currentLayer = y; repaint(); }
     public int getCurrentLayer() { return currentLayer; }
-    public void setTool(String toolId) { this.currentTool = toolId; repaint(); }
+    public void setTool(String toolId) {
+        this.currentTool = toolId;
+        // Non facciamo controlli qui: il fantasma deve apparire sempre
+        repaint();
+    }
     public String getCurrentToolName() { return currentTool != null ? currentTool : "None"; }
 
     public void rotate() {
@@ -2943,9 +3024,10 @@ package com.matterworks.core.infrastructure.swing;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.managers.GridManager;
 import com.matterworks.core.ports.IRepository;
-
 import javax.swing.*;
 import java.awt.*;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.UUID;
 
 public class InventoryDebugPanel extends JPanel {
@@ -2954,16 +3036,20 @@ public class InventoryDebugPanel extends JPanel {
     private final UUID playerUuid;
     private final GridManager gridManager;
     private final String[] itemIds = {"drill_mk1", "conveyor_belt", "nexus_core", "chromator", "color_mixer"};
+    private final Map<String, JLabel> labelMap = new HashMap<>();
+
+    // Timer salvato in campo per poterlo fermare
+    private final Timer refreshTimer;
 
     public InventoryDebugPanel(IRepository repository, UUID playerUuid, GridManager gm) {
         this.repository = repository;
         this.playerUuid = playerUuid;
         this.gridManager = gm;
 
-        // FIX: Imposta dimensione preferita per evitare che BorderLayout lo schiacci
-        this.setPreferredSize(new Dimension(280, 0));
+        this.setPreferredSize(new Dimension(320, 0));
+        this.setMinimumSize(new Dimension(320, 0));
 
-        PlayerProfile profile = repository.loadPlayerProfile(playerUuid);
+        PlayerProfile profile = gridManager.getCachedProfile(playerUuid); // Use cache
         boolean isPlayer = (profile != null && profile.getRank() == PlayerProfile.PlayerRank.PLAYER);
 
         setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
@@ -2972,65 +3058,92 @@ public class InventoryDebugPanel extends JPanel {
 
         for (String id : itemIds) {
             add(createItemRow(id, isPlayer));
-            add(Box.createVerticalStrut(5));
+            add(Box.createVerticalStrut(8));
         }
 
-        new Timer(1000, e -> repaint()).start();
+        // Timer a 500ms
+        refreshTimer = new Timer(500, e -> updateAllLabels());
+        refreshTimer.start();
+    }
+
+    /**
+     * IMPORTANTE: Ferma il timer per evitare memory leak e CPU usage in background
+     */
+    public void dispose() {
+        if (refreshTimer != null && refreshTimer.isRunning()) {
+            refreshTimer.stop();
+        }
     }
 
     private JPanel createItemRow(String itemId, boolean isPlayer) {
-        JPanel row = new JPanel(new BorderLayout(5, 0));
+        JPanel row = new JPanel(new BorderLayout(10, 0));
         row.setOpaque(false);
-        row.setMaximumSize(new Dimension(260, 35)); // Aumentata leggermente altezza
+        row.setMaximumSize(new Dimension(310, 40));
 
-        JLabel lblInfo = new JLabel() {
-            @Override
-            protected void paintComponent(Graphics g) {
-                setText(itemId + ": " + repository.getInventoryItemCount(playerUuid, itemId));
-                super.paintComponent(g);
-            }
-        };
+        JLabel lblInfo = new JLabel(itemId + ": 0");
         lblInfo.setForeground(Color.WHITE);
-        lblInfo.setFont(new Font("Monospaced", Font.PLAIN, 12));
+        lblInfo.setFont(new Font("Monospaced", Font.BOLD, 12));
+        labelMap.put(itemId, lblInfo);
 
         JPanel buttons = new JPanel(new GridLayout(1, 2, 5, 0));
         buttons.setOpaque(false);
+        buttons.setPreferredSize(new Dimension(80, 28));
+        buttons.setMinimumSize(new Dimension(80, 28));
 
         JButton btnAdd = createTinyButton("+", () -> {
             if (isPlayer) gridManager.buyItem(playerUuid, itemId, 1);
             else repository.modifyInventoryItem(playerUuid, itemId, 1);
         });
-        btnAdd.setBackground(new Color(50, 100, 50));
+        btnAdd.setBackground(new Color(50, 110, 50));
 
         JButton btnRem = createTinyButton("-", () -> {
             if (isPlayer) {
                 if (repository.getInventoryItemCount(playerUuid, itemId) > 0) {
                     double refund = gridManager.getBlockRegistry().getPrice(itemId) * 0.5;
-                    PlayerProfile p = repository.loadPlayerProfile(playerUuid);
-                    p.modifyMoney(refund);
-                    repository.savePlayerProfile(p);
-                    repository.modifyInventoryItem(playerUuid, itemId, -1);
+                    PlayerProfile p = gridManager.getCachedProfile(playerUuid);
+                    if (p != null) {
+                        p.modifyMoney(refund);
+                        repository.savePlayerProfile(p);
+                        repository.modifyInventoryItem(playerUuid, itemId, -1);
+                    }
                 }
             } else {
                 repository.modifyInventoryItem(playerUuid, itemId, -1);
             }
         });
-        btnRem.setBackground(new Color(100, 50, 50));
+        btnRem.setBackground(new Color(120, 50, 50));
 
         buttons.add(btnRem);
         buttons.add(btnAdd);
+
         row.add(lblInfo, BorderLayout.CENTER);
         row.add(buttons, BorderLayout.EAST);
         return row;
     }
 
+    private void updateAllLabels() {
+        // Safe check: se il pannello non Ã¨ piÃ¹ visualizzabile, fermati
+        if (!this.isDisplayable()) {
+            dispose();
+            return;
+        }
+        for (String id : itemIds) {
+            JLabel lbl = labelMap.get(id);
+            if (lbl != null) {
+                int count = repository.getInventoryItemCount(playerUuid, id);
+                lbl.setText(id + ": " + count);
+            }
+        }
+    }
+
     private JButton createTinyButton(String t, Runnable a) {
         JButton b = new JButton(t);
-        b.setPreferredSize(new Dimension(30, 25));
-        b.setFont(new Font("SansSerif", Font.BOLD, 12));
+        b.setPreferredSize(new Dimension(35, 25));
+        b.setMargin(new Insets(0, 0, 0, 0));
+        b.setFont(new Font("SansSerif", Font.BOLD, 14));
         b.setFocusable(false);
         b.setForeground(Color.WHITE);
-        b.addActionListener(e -> { a.run(); repaint(); });
+        b.addActionListener(e -> { a.run(); updateAllLabels(); });
         return b;
     }
 }
@@ -3048,8 +3161,10 @@ import com.matterworks.core.ports.IRepository;
 
 import javax.swing.*;
 import java.awt.*;
+import java.awt.event.ActionListener;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
@@ -3061,20 +3176,20 @@ public class MatterWorksGUI extends JFrame {
     private final Runnable onSave;
 
     private final FactoryPanel factoryPanel;
-    private final JPanel inventoryContainer;
+    private final JTabbedPane rightTabbedPane;
+    private final JPanel glassPane;
 
     private JComboBox<Object> playerSelector;
-    private JLabel lblMoney;
-    private JLabel lblTool;
-    private JLabel lblOrient;
-    private JLabel lblLayer;
-    private JLabel lblPlotId;
+    private JLabel lblMoney, lblTool, lblOrient, lblLayer, lblPlotId;
+
+    private final Timer repaintTimer;
+    private final Timer economyTimer;
 
     private UUID currentPlayerUuid;
+    private List<PlayerProfile> cachedPlayerList = new ArrayList<>();
 
     public MatterWorksGUI(GridManager gm, BlockRegistry reg, UUID initialUuid,
-                          Runnable onSave, java.util.function.Supplier<Double> moneyProvider,
-                          IRepository repo) {
+                          Runnable onSave, IRepository repo) {
 
         this.gridManager = gm;
         this.registry = reg;
@@ -3083,7 +3198,26 @@ public class MatterWorksGUI extends JFrame {
         this.onSave = onSave;
 
         this.factoryPanel = new FactoryPanel(gm, reg, currentPlayerUuid, this::updateLabels);
-        this.inventoryContainer = new JPanel(new BorderLayout());
+        this.rightTabbedPane = new JTabbedPane();
+        this.rightTabbedPane.setPreferredSize(new Dimension(340, 0));
+
+        // Loading Overlay
+        this.glassPane = new JPanel() {
+            @Override
+            protected void paintComponent(Graphics g) {
+                g.setColor(new Color(0, 0, 0, 180));
+                g.fillRect(0, 0, getWidth(), getHeight());
+                g.setColor(Color.WHITE);
+                g.setFont(new Font("SansSerif", Font.BOLD, 26));
+                String msg = "SWITCHING VIEW...";
+                FontMetrics fm = g.getFontMetrics();
+                g.drawString(msg, (getWidth() - fm.stringWidth(msg)) / 2, getHeight() / 2);
+            }
+        };
+        glassPane.setOpaque(false);
+        glassPane.addMouseListener(new MouseAdapter() {});
+        glassPane.addMouseMotionListener(new MouseAdapter() {});
+        setGlassPane(glassPane);
 
         setTitle("MatterWorks Architect - Multi-User Management");
         setSize(1600, 950);
@@ -3091,170 +3225,248 @@ public class MatterWorksGUI extends JFrame {
         setLocationRelativeTo(null);
         setLayout(new BorderLayout());
 
-        // --- 1. HEADER: Selezione Player ---
-        JPanel headerPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 20, 10));
-        headerPanel.setBackground(new Color(45, 45, 48));
+        JPanel topContainer = createTopContainer();
+        updateTabs();
+        JPanel statusBar = createStatusBar();
+
+        add(topContainer, BorderLayout.NORTH);
+        add(factoryPanel, BorderLayout.CENTER);
+        add(rightTabbedPane, BorderLayout.EAST);
+        add(statusBar, BorderLayout.SOUTH);
+
+        // Timer
+        repaintTimer = new Timer(40, e -> factoryPanel.repaint());
+        economyTimer = new Timer(1000, e -> updateEconomyLabels());
+
+        repaintTimer.start();
+        economyTimer.start();
+
+        setVisible(true);
+        factoryPanel.requestFocusInWindow();
+        updateLabels();
+
+        // Caricamento iniziale
+        if(currentPlayerUuid != null) {
+            gridManager.loadPlotFromDB(currentPlayerUuid);
+        }
+    }
+
+    private void setLoading(boolean loading) {
+        SwingUtilities.invokeLater(() -> {
+            glassPane.setVisible(loading);
+            playerSelector.setEnabled(!loading);
+        });
+    }
+
+    private JPanel createTopContainer() {
+        JPanel container = new JPanel(new BorderLayout());
+        JPanel header = new JPanel(new FlowLayout(FlowLayout.LEFT, 20, 10));
+        header.setBackground(new Color(45, 45, 48));
 
         playerSelector = new JComboBox<>();
-        refreshPlayerList();
-        playerSelector.addActionListener(e -> handlePlayerSwitch());
+        refreshPlayerList(true);
+
+        playerSelector.addActionListener(e -> {
+            if (!glassPane.isVisible()) handlePlayerSwitch();
+        });
 
         lblMoney = createLabel("MONEY: $---", Color.GREEN, 16);
+        header.add(new JLabel("ACTIVE USER:") {{ setForeground(Color.WHITE); }});
+        header.add(playerSelector);
+        header.add(lblMoney);
 
-        headerPanel.add(new JLabel("ACTIVE USER:") {{ setForeground(Color.WHITE); }});
-        headerPanel.add(playerSelector);
-        headerPanel.add(lblMoney);
+        JPanel toolbar = new JPanel(new BorderLayout());
+        toolbar.setBackground(new Color(60, 60, 65));
 
-        // --- 2. TOOLBAR: Costruzione ---
-        JPanel leftToolbar = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
-        leftToolbar.setOpaque(false);
+        JPanel leftTools = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 5));
+        leftTools.setOpaque(false);
+        leftTools.add(createToolButton("â› Drill", "drill_mk1"));
+        leftTools.add(createToolButton("âª  Belt", "conveyor_belt"));
+        leftTools.add(createToolButton("ðŸŽ¨ Chromator", "chromator"));
+        leftTools.add(createToolButton("ðŸŒª Mixer", "color_mixer"));
+        leftTools.add(createToolButton("ðŸ”® Nexus", "nexus_core"));
+        leftTools.add(new JSeparator(SwingConstants.VERTICAL) {{ setPreferredSize(new Dimension(5, 25)); }});
+        leftTools.add(createSimpleButton("â¬‡ DOWN", e -> changeLayer(-1)));
+        leftTools.add(createSimpleButton("â¬† UP", e -> changeLayer(1)));
 
-        leftToolbar.add(createToolButton("â› Drill", "drill_mk1", e -> setTool("drill_mk1")));
-        leftToolbar.add(createToolButton("â¨  Belt", "conveyor_belt", e -> setTool("conveyor_belt")));
-        leftToolbar.add(createToolButton("ðŸŽ¨ Chromator", "chromator", e -> setTool("chromator")));
-        leftToolbar.add(createToolButton("ðŸŒ€ Mixer", "color_mixer", e -> setTool("color_mixer")));
-        leftToolbar.add(createToolButton("ðŸ”® Nexus", "nexus_core", e -> setTool("nexus_core")));
-
-        leftToolbar.add(new JSeparator(SwingConstants.VERTICAL) {{ setPreferredSize(new Dimension(5, 25)); }});
-        leftToolbar.add(createSimpleButton("â¬‡ DOWN", e -> changeLayer(-1)));
-        leftToolbar.add(createSimpleButton("â¬† UP", e -> changeLayer(1)));
-
-        // --- 3. SYSTEM BAR: SOS, Save e il ripristinato RESET ---
-        JPanel rightSystem = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 0));
+        JPanel rightSystem = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 5));
         rightSystem.setOpaque(false);
 
-        // Bottone SOS (Bailout) [cite: 630]
         JButton btnSOS = createSimpleButton("ðŸ†˜ SOS", e -> {
             if (gridManager.attemptBailout(currentPlayerUuid)) {
-                JOptionPane.showMessageDialog(this, "Richiesta SOS approvata! Saldo ripristinato.");
-            } else {
-                JOptionPane.showMessageDialog(this, "SOS Negato: Hai asset o fondi a sufficienza.", "Info", JOptionPane.WARNING_MESSAGE);
+                JOptionPane.showMessageDialog(this, "SOS approved!");
             }
         });
         btnSOS.setBackground(new Color(220, 150, 0));
 
-        // Bottone SAVE [cite: 628]
-        JButton btnSave = createSimpleButton("ðŸ’¾ SAVE", e -> {
-            onSave.run();
-            JOptionPane.showMessageDialog(this, "Salvataggio completato correttamente.");
-        });
+        JButton btnSave = createSimpleButton("ðŸ’¾ SAVE", e -> onSave.run());
         btnSave.setBackground(new Color(0, 100, 200));
 
-        // Bottone RESET (Re-integrato) [cite: 629-633]
         JButton btnReset = createSimpleButton("âš ï¸ RESET", e -> {
-            int choice = JOptionPane.showConfirmDialog(this,
-                    "Sei sicuro di voler RESETTARE tutto?\nCancellerÃ  le macchine e rigenererÃ  le vene.\nL'azione Ã¨ irreversibile.",
-                    "Conferma Reset Plot",
-                    JOptionPane.YES_NO_OPTION,
-                    JOptionPane.ERROR_MESSAGE);
-
-            if (choice == JOptionPane.YES_OPTION) {
-                gridManager.resetUserPlot(currentPlayerUuid); // Riutilizzo della funzione backend [cite: 651-653]
-                Timer t = new Timer(600, x -> {
-                    factoryPanel.repaint();
-                    JOptionPane.showMessageDialog(this, "Plot resettato con successo!");
-                });
-                t.setRepeats(false);
-                t.start();
+            if (JOptionPane.showConfirmDialog(this, "Reset plot?") == JOptionPane.YES_OPTION) {
+                gridManager.resetUserPlot(currentPlayerUuid);
             }
         });
         btnReset.setBackground(new Color(180, 0, 0));
 
+        JButton btnDelete = createSimpleButton("ðŸ’€ DELETE", e -> handleDeletePlayer());
+        btnDelete.setBackground(Color.BLACK);
+        btnDelete.setForeground(Color.RED);
+        btnDelete.setBorder(BorderFactory.createLineBorder(Color.RED, 1));
+
         rightSystem.add(btnSOS);
         rightSystem.add(btnSave);
         rightSystem.add(btnReset);
+        rightSystem.add(btnDelete);
 
-        // Assemblaggio Top
-        JPanel topContainer = new JPanel(new BorderLayout());
-        topContainer.add(headerPanel, BorderLayout.NORTH);
+        toolbar.add(leftTools, BorderLayout.WEST);
+        toolbar.add(rightSystem, BorderLayout.EAST);
+        container.add(header, BorderLayout.NORTH);
+        container.add(toolbar, BorderLayout.SOUTH);
+        return container;
+    }
 
-        JPanel midToolbar = new JPanel(new BorderLayout());
-        midToolbar.setBackground(new Color(60, 60, 65));
-        midToolbar.add(leftToolbar, BorderLayout.WEST);
-        midToolbar.add(rightSystem, BorderLayout.EAST);
-        topContainer.add(midToolbar, BorderLayout.SOUTH);
+    private void handleDeletePlayer() {
+        if (currentPlayerUuid == null) return;
 
-        // --- 4. STATUS BAR (Plot ID in basso a destra) ---
+        int confirm = JOptionPane.showConfirmDialog(this,
+                "ELIMINARE DEFINITIVAMENTE QUESTO GIOCATORE?",
+                "Delete Player", JOptionPane.YES_NO_OPTION, JOptionPane.ERROR_MESSAGE);
+
+        if (confirm == JOptionPane.YES_OPTION) {
+            setLoading(true);
+            UUID toDelete = currentPlayerUuid;
+
+            new Thread(() -> {
+                gridManager.deletePlayer(toDelete);
+
+                SwingUtilities.invokeLater(() -> {
+                    refreshPlayerList(true);
+
+                    if (!cachedPlayerList.isEmpty()) {
+                        PlayerProfile next = cachedPlayerList.get(0);
+                        this.currentPlayerUuid = next.getPlayerId();
+                        factoryPanel.setPlayerUuid(next.getPlayerId());
+                        new Thread(() -> {
+                            gridManager.loadPlotFromDB(next.getPlayerId());
+                            SwingUtilities.invokeLater(() -> {
+                                updateTabs();
+                                setLoading(false);
+                            });
+                        }).start();
+                    } else {
+                        this.currentPlayerUuid = null;
+                        factoryPanel.setPlayerUuid(null);
+                        updateTabs();
+                        setLoading(false);
+                    }
+                });
+            }).start();
+        }
+    }
+
+    private JPanel createStatusBar() {
         JPanel statusPanel = new JPanel(new BorderLayout());
         statusPanel.setBackground(new Color(35, 35, 35));
-
         JPanel leftStatus = new JPanel(new FlowLayout(FlowLayout.LEFT, 20, 5));
         leftStatus.setOpaque(false);
         lblTool = createLabel("TOOL: Drill", Color.WHITE, 12);
         lblOrient = createLabel("DIR: NORTH", Color.WHITE, 12);
         lblLayer = createLabel("LAYER: 0", Color.CYAN, 12);
         leftStatus.add(lblTool); leftStatus.add(lblOrient); leftStatus.add(lblLayer);
-
-        JPanel rightStatus = new JPanel(new FlowLayout(FlowLayout.RIGHT, 20, 5));
-        rightStatus.setOpaque(false);
         lblPlotId = createLabel("PLOT ID: #---", Color.LIGHT_GRAY, 12);
-        rightStatus.add(lblPlotId);
-
         statusPanel.add(leftStatus, BorderLayout.WEST);
-        statusPanel.add(rightStatus, BorderLayout.EAST);
+        statusPanel.add(lblPlotId, BorderLayout.EAST);
+        return statusPanel;
+    }
 
-        updateInventoryView();
+    private void updateTabs() {
+        // Dispose old panels (Anti-Lag Fix)
+        for (Component c : rightTabbedPane.getComponents()) {
+            if (c instanceof InventoryDebugPanel) ((InventoryDebugPanel) c).dispose();
+            if (c instanceof TechTreePanel) ((TechTreePanel) c).dispose();
+        }
 
-        add(topContainer, BorderLayout.NORTH);
-        add(factoryPanel, BorderLayout.CENTER);
-        add(inventoryContainer, BorderLayout.EAST);
-        add(statusPanel, BorderLayout.SOUTH);
-
-        // Timers aggiornamento UI
-        new Timer(50, e -> factoryPanel.repaint()).start();
-        new Timer(1000, e -> updateEconomyLabels()).start();
-
-        setVisible(true);
-        factoryPanel.requestFocusInWindow();
-        updateLabels();
+        rightTabbedPane.removeAll();
+        if (currentPlayerUuid != null) {
+            rightTabbedPane.addTab("Shop", new InventoryDebugPanel(repository, currentPlayerUuid, gridManager));
+            rightTabbedPane.addTab("Tech Tree", new TechTreePanel(repository, currentPlayerUuid, gridManager));
+        } else {
+            rightTabbedPane.addTab("Info", new JPanel() {{ add(new JLabel("No Player")); }});
+        }
     }
 
     private void handlePlayerSwitch() {
         Object sel = playerSelector.getSelectedItem();
+
         if (sel instanceof PlayerProfile p) {
-            this.currentPlayerUuid = p.getPlayerId();
-            factoryPanel.setPlayerUuid(currentPlayerUuid);
-            gridManager.loadPlotFromDB(currentPlayerUuid);
-            updateInventoryView();
-            updateLabels();
+            UUID newUuid = p.getPlayerId();
+            if (newUuid.equals(this.currentPlayerUuid)) return;
+
+            setLoading(true);
+
+            new Thread(() -> {
+                try {
+                    // Assicura caricamento in memoria (no unload)
+                    gridManager.loadPlotFromDB(newUuid);
+
+                    SwingUtilities.invokeLater(() -> {
+                        this.currentPlayerUuid = newUuid;
+                        factoryPanel.setPlayerUuid(newUuid);
+                        updateTabs();
+                        updateLabels();
+                        updateEconomyLabels();
+                        setLoading(false);
+                    });
+                } catch (Exception ex) {
+                    ex.printStackTrace();
+                    setLoading(false);
+                }
+            }).start();
+
         } else if ("--- ADD NEW PLAYER ---".equals(sel)) {
-            String n = JOptionPane.showInputDialog(this, "Nome nuovo giocatore:");
+            String n = JOptionPane.showInputDialog("Name:");
             if (n != null && !n.isBlank()) {
                 gridManager.createNewPlayer(n);
-                refreshPlayerList();
+                refreshPlayerList(true);
+            } else {
+                refreshPlayerList(false);
             }
         }
     }
 
-    private void refreshPlayerList() {
+    private void refreshPlayerList(boolean forceDb) {
+        ActionListener[] listeners = playerSelector.getActionListeners();
+        for (var l : listeners) playerSelector.removeActionListener(l);
+
+        if (forceDb) cachedPlayerList = repository.getAllPlayers();
+
         playerSelector.removeAllItems();
-        List<PlayerProfile> all = repository.getAllPlayers();
-        for (PlayerProfile p : all) playerSelector.addItem(p);
+        for (PlayerProfile p : cachedPlayerList) playerSelector.addItem(p);
         playerSelector.addItem("--- ADD NEW PLAYER ---");
 
-        for (int i = 0; i < playerSelector.getItemCount(); i++) {
-            if (playerSelector.getItemAt(i) instanceof PlayerProfile p && p.getPlayerId().equals(currentPlayerUuid)) {
-                playerSelector.setSelectedIndex(i);
-                break;
+        if (currentPlayerUuid != null) {
+            for (int i = 0; i < playerSelector.getItemCount(); i++) {
+                if (playerSelector.getItemAt(i) instanceof PlayerProfile p && p.getPlayerId().equals(currentPlayerUuid)) {
+                    playerSelector.setSelectedIndex(i);
+                    break;
+                }
             }
         }
-    }
 
-    private void updateInventoryView() {
-        inventoryContainer.removeAll();
-        inventoryContainer.add(new InventoryDebugPanel(repository, currentPlayerUuid, gridManager), BorderLayout.CENTER);
-        inventoryContainer.revalidate();
-        inventoryContainer.repaint();
+        for (var l : listeners) playerSelector.addActionListener(l);
     }
 
     private void updateEconomyLabels() {
-        PlayerProfile p = repository.loadPlayerProfile(currentPlayerUuid);
+        if (currentPlayerUuid == null) {
+            lblMoney.setText("MONEY: $---");
+            lblPlotId.setText("PLOT ID: ---");
+            return;
+        }
+        PlayerProfile p = gridManager.getCachedProfile(currentPlayerUuid);
         if (p != null) {
             lblMoney.setText(String.format("MONEY: $%,.2f [%s]", p.getMoney(), p.getRank()));
             lblMoney.setForeground(p.isAdmin() ? new Color(255, 215, 0) : Color.GREEN);
-
-            Long pid = repository.getPlotId(currentPlayerUuid);
-            lblPlotId.setText("PLOT ID: #" + (pid != null ? pid : "---"));
         }
     }
 
@@ -3266,22 +3478,18 @@ public class MatterWorksGUI extends JFrame {
         }
     }
 
-    private void setTool(String id) { factoryPanel.setTool(id); updateLabels(); }
-
     private void changeLayer(int delta) {
         int newY = Math.max(0, factoryPanel.getCurrentLayer() + delta);
         factoryPanel.setLayer(newY);
         updateLabels();
     }
 
-    private JButton createToolButton(String text, String itemId, java.awt.event.ActionListener action) {
-        JButton btn = createSimpleButton(text, action);
+    private JButton createToolButton(String text, String itemId) {
+        JButton btn = createSimpleButton(text, e -> { factoryPanel.setTool(itemId); updateLabels(); });
         btn.addMouseListener(new MouseAdapter() {
-            @Override
             public void mouseClicked(MouseEvent e) {
-                if (SwingUtilities.isRightMouseButton(e)) {
+                if (SwingUtilities.isRightMouseButton(e) && currentPlayerUuid != null)
                     gridManager.buyItem(currentPlayerUuid, itemId, 1);
-                }
             }
         });
         return btn;
@@ -3289,12 +3497,8 @@ public class MatterWorksGUI extends JFrame {
 
     private JButton createSimpleButton(String text, java.awt.event.ActionListener action) {
         JButton btn = new JButton(text);
-        btn.setFocusable(false);
-        btn.addActionListener(action);
-        btn.setBackground(new Color(70, 70, 70));
-        btn.setForeground(Color.WHITE);
-        btn.setFont(new Font("SansSerif", Font.PLAIN, 12));
-        btn.setBorder(BorderFactory.createEmptyBorder(5, 12, 5, 12));
+        btn.setFocusable(false); btn.addActionListener(action);
+        btn.setBackground(new Color(70, 70, 70)); btn.setForeground(Color.WHITE);
         return btn;
     }
 
@@ -3303,6 +3507,151 @@ public class MatterWorksGUI extends JFrame {
         lbl.setForeground(color);
         lbl.setFont(new Font("Monospaced", Font.BOLD, size));
         return lbl;
+    }
+}
+
+
+--------------------------------
+FILE: TechTreePanel.java
+--------------------------------
+package com.matterworks.core.infrastructure.swing;
+
+import com.matterworks.core.domain.player.PlayerProfile;
+import com.matterworks.core.managers.GridManager;
+import com.matterworks.core.managers.TechManager;
+import com.matterworks.core.ports.IRepository;
+
+import javax.swing.*;
+import java.awt.*;
+import java.util.UUID;
+
+public class TechTreePanel extends JPanel {
+
+    private final IRepository repository;
+    private final UUID playerUuid;
+    private final GridManager gridManager;
+    private final Timer refreshTimer;
+
+    public TechTreePanel(IRepository repository, UUID playerUuid, GridManager gm) {
+        this.repository = repository;
+        this.playerUuid = playerUuid;
+        this.gridManager = gm;
+
+        setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
+        setBackground(new Color(30, 30, 35));
+        setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+
+        renderNodes();
+
+        // Timer di refresh 1 secondo
+        refreshTimer = new Timer(1000, e -> {
+            if (!this.isDisplayable()) {
+                dispose();
+                return;
+            }
+            renderNodes();
+        });
+        refreshTimer.start();
+    }
+
+    public void dispose() {
+        if (refreshTimer != null && refreshTimer.isRunning()) {
+            refreshTimer.stop();
+        }
+    }
+
+    private void renderNodes() {
+        removeAll();
+
+        JLabel title = new JLabel("RESEARCH & DEVELOPMENT");
+        title.setForeground(Color.ORANGE);
+        title.setFont(new Font("Monospaced", Font.BOLD, 16));
+        title.setAlignmentX(Component.CENTER_ALIGNMENT);
+        add(title);
+        add(Box.createVerticalStrut(15));
+
+        TechManager tm = gridManager.getTechManager();
+        // Use Cache
+        PlayerProfile p = gridManager.getCachedProfile(playerUuid);
+
+        if (p == null) return;
+
+        for (TechManager.TechNode node : tm.getAllNodes()) {
+            add(createTechCard(node, tm, p));
+            add(Box.createVerticalStrut(10));
+        }
+
+        revalidate();
+        repaint();
+    }
+
+    private JPanel createTechCard(TechManager.TechNode node, TechManager tm, PlayerProfile p) {
+        boolean unlocked = p.hasTech(node.id());
+
+        boolean parentsUnlocked = true;
+        for (String parentId : node.parentIds()) {
+            if (!p.hasTech(parentId)) {
+                parentsUnlocked = false;
+                break;
+            }
+        }
+
+        boolean canAfford = p.getMoney() >= node.cost();
+
+        JPanel card = new JPanel(new BorderLayout(10, 5));
+        card.setBackground(new Color(50, 50, 55));
+        card.setBorder(BorderFactory.createLineBorder(Color.DARK_GRAY, 1));
+        card.setMaximumSize(new Dimension(310, 70));
+        card.setPreferredSize(new Dimension(310, 70));
+
+        JPanel info = new JPanel(new GridLayout(2, 1));
+        info.setOpaque(false);
+        JLabel lblName = new JLabel(node.name());
+        lblName.setForeground(Color.WHITE);
+        lblName.setFont(new Font("SansSerif", Font.BOLD, 13));
+
+        String unlockText = String.join(", ", node.unlockItemIds());
+        JLabel lblDetail = new JLabel("Cost: $" + (int)node.cost() + " | Unlocks: " + unlockText);
+        lblDetail.setForeground(Color.LIGHT_GRAY);
+        lblDetail.setFont(new Font("Monospaced", Font.PLAIN, 10));
+
+        info.add(lblName);
+        info.add(lblDetail);
+        info.setBorder(BorderFactory.createEmptyBorder(5, 10, 5, 0));
+
+        JButton btnAction = new JButton();
+        btnAction.setPreferredSize(new Dimension(100, 40));
+        btnAction.setFont(new Font("SansSerif", Font.BOLD, 11));
+        btnAction.setFocusable(false);
+
+        if (unlocked) {
+            btnAction.setText("ACQUISITO");
+            btnAction.setBackground(new Color(80, 80, 80));
+            btnAction.setForeground(Color.LIGHT_GRAY);
+            btnAction.setEnabled(false);
+        } else if (!parentsUnlocked) {
+            btnAction.setText("BLOCCATO");
+            btnAction.setBackground(new Color(120, 40, 40));
+            btnAction.setForeground(Color.WHITE);
+            btnAction.setEnabled(false);
+            if (!node.parentIds().isEmpty()) {
+                btnAction.setToolTipText("Richiede: " + String.join(", ", node.parentIds()));
+            }
+        } else {
+            btnAction.setText("SBLOCCA");
+            btnAction.setBackground(canAfford ? new Color(40, 140, 40) : new Color(100, 100, 40));
+            btnAction.setForeground(Color.WHITE);
+            btnAction.addActionListener(e -> {
+                if (tm.unlockNode(p, node.id())) {
+                    renderNodes();
+                }
+            });
+        }
+
+        card.add(info, BorderLayout.CENTER);
+        card.add(btnAction, BorderLayout.EAST);
+
+        return card;
     }
 }
 
@@ -3321,14 +3670,18 @@ import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.domain.shop.MarketManager;
 import com.matterworks.core.infrastructure.MariaDBAdapter;
+import com.matterworks.core.infrastructure.ServerConfig;
 import com.matterworks.core.model.PlotObject;
 import com.matterworks.core.ports.IRepository;
 import com.matterworks.core.ports.IWorldAccess;
+import com.matterworks.core.database.dao.TechDefinitionDAO;
+import com.matterworks.core.database.dao.PlotDAO;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.stream.Collectors;
 
 public class GridManager {
 
@@ -3336,234 +3689,412 @@ public class GridManager {
     private final IWorldAccess worldAdapter;
     private final BlockRegistry blockRegistry;
     private final MarketManager marketManager;
+    private final TechManager techManager;
 
+    // Cache Globale: Mantiene TUTTI i player caricati per la simulazione
+    private final Map<UUID, PlayerProfile> activeProfileCache = new ConcurrentHashMap<>();
     private final Map<UUID, Map<GridPosition, PlacedMachine>> playerGrids = new ConcurrentHashMap<>();
     private final Map<UUID, Map<GridPosition, MatterColor>> playerResources = new ConcurrentHashMap<>();
+
+    // Lista unica sincronizzata per il tick loop
     private final List<PlacedMachine> tickingMachines = Collections.synchronizedList(new ArrayList<>());
+
     private final ExecutorService ioExecutor = Executors.newVirtualThreadPerTaskExecutor();
+    private ServerConfig serverConfig;
 
     public GridManager(IRepository repository, IWorldAccess worldAdapter, BlockRegistry registry) {
         this.repository = repository;
         this.worldAdapter = worldAdapter;
         this.blockRegistry = registry;
         this.marketManager = new MarketManager(repository);
-    }
 
-    private String log(UUID id) {
-        PlayerProfile p = repository.loadPlayerProfile(id);
-        return "[" + (p != null ? p.getUsername() : "Unknown") + "] ";
-    }
-
-    // --- FIX: METODO createNewPlayer ---
-    public PlayerProfile createNewPlayer(String username) {
-        UUID newUuid = UUID.randomUUID();
-        PlayerProfile p = new PlayerProfile(newUuid);
-        p.setUsername(username);
-        p.setMoney(1000.0);
-        p.setRank(PlayerProfile.PlayerRank.PLAYER);
-
-        repository.savePlayerProfile(p);
-
+        TechDefinitionDAO techDao = null;
         if (repository instanceof MariaDBAdapter adapter) {
-            Long plotId = new com.matterworks.core.database.dao.PlotDAO(adapter.getDbManager())
-                    .createPlot(newUuid, 1, 0, 0);
-
-            if (plotId != null) {
-                generateDefaultResources(adapter, plotId, new HashMap<>());
-                System.out.println("[System] Initialized plot and veins for: " + username);
-            }
+            techDao = adapter.getTechDefinitionDAO();
         }
-        return p;
+        this.techManager = new TechManager(repository, techDao);
+
+        this.serverConfig = repository.loadServerConfig();
+        System.out.println("âš™ï¸ [Core] Config Loaded: StartMoney=" + serverConfig.startMoney() + ", Veins=" + serverConfig.veinRaw());
     }
 
-    // --- FIX: METODO attemptBailout (SOS) ---
-    public boolean attemptBailout(UUID ownerId) {
-        PlayerProfile player = repository.loadPlayerProfile(ownerId);
-        if (player == null || !(repository instanceof MariaDBAdapter adapter)) return false;
+    public TechManager getTechManager() { return techManager; }
+    public MarketManager getMarketManager() { return marketManager; }
 
-        double threshold = adapter.getSosThreshold(); // Recupera da server_gamestate
+    // --- CARICAMENTO SIMULAZIONE (No Unload) ---
 
-        // Verifica se il giocatore Ã¨ effettivamente sotto la soglia di povertÃ 
-        if (player.getMoney() < threshold) {
-            double refill = threshold - player.getMoney();
-            player.setMoney(threshold);
-            repository.savePlayerProfile(player);
-            System.out.println(log(ownerId) + "ðŸš‘ SOS APPROVATO: Saldo ripristinato a $" + threshold);
-            return true;
-        }
-        System.out.println(log(ownerId) + "âŒ SOS NEGATO: Saldo giÃ  sopra la soglia.");
-        return false;
-    }
+    /**
+     * Metodo richiesto da Main.java.
+     * Carica il plot nella simulazione globale se non Ã¨ giÃ  presente.
+     */
+    public void loadPlotFromDB(UUID ownerId) {
+        if (ownerId == null) return;
 
-    public boolean buyItem(UUID playerId, String itemId, int amount) {
-        var stats = blockRegistry.getStats(itemId);
-        double cost = stats.basePrice() * amount;
-        PlayerProfile p = repository.loadPlayerProfile(playerId);
-        if (p == null) return false;
+        // Se Ã¨ giÃ  in memoria, non facciamo nulla (evita IO inutile)
+        if (activeProfileCache.containsKey(ownerId)) return;
 
-        if (!p.isAdmin() && p.getMoney() < cost) {
-            System.out.println(log(playerId) + "ðŸ’¸ Fondi insufficienti per lo shop.");
-            return false;
-        }
-
-        if (!p.isAdmin()) {
-            p.modifyMoney(-cost);
-            repository.savePlayerProfile(p);
-        }
-        repository.modifyInventoryItem(playerId, itemId, amount);
-        System.out.println(log(playerId) + "ðŸ›’ Acquisto: " + amount + "x " + itemId);
-        return true;
-    }
-
-    public void resetUserPlot(UUID ownerId) {
         ioExecutor.submit(() -> {
-            System.out.println(log(ownerId) + "âš ï¸ Reset totale del plot richiesto.");
-            unloadPlot(ownerId);
-            if (repository instanceof MariaDBAdapter db) db.clearPlotData(ownerId);
-            loadPlotFromDB(ownerId);
+            System.out.println("ðŸ“¥ [Sim] Loading chunk for " + ownerId);
+            loadPlotSynchronously(ownerId);
+            PlayerProfile p = repository.loadPlayerProfile(ownerId);
+            if (p != null) activeProfileCache.put(ownerId, p);
         });
     }
 
+    private void loadPlotSynchronously(UUID ownerId) {
+        // Rimuove eventuali dati parziali SOLO di questo player
+        unloadPlotSpecific(ownerId);
+
+        try {
+            // 1. Risorse
+            if (repository instanceof MariaDBAdapter db) {
+                Long pid = db.getPlotId(ownerId);
+                if (pid != null) {
+                    Map<GridPosition, MatterColor> res = db.loadResources(pid);
+                    if (res.isEmpty()) generateDefaultResources(db, pid, res);
+                    playerResources.put(ownerId, res);
+                }
+            }
+            // 2. Macchine
+            List<PlotObject> dtos = repository.loadPlotMachines(ownerId);
+            for (PlotObject d : dtos) {
+                PlacedMachine m = MachineFactory.createFromModel(d, ownerId);
+                if (m != null) internalAddMachine(ownerId, m);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void unloadPlotSpecific(UUID ownerId) {
+        playerGrids.remove(ownerId);
+        playerResources.remove(ownerId);
+        // Rimuove dalla simulazione solo le macchine di questo utente
+        synchronized (tickingMachines) {
+            tickingMachines.removeIf(m -> m.getOwnerId().equals(ownerId));
+        }
+    }
+
+    // --- LOGICA DI GIOCO & CAP ---
+
     public boolean placeMachine(UUID ownerId, GridPosition pos, String typeId, Direction orientation) {
-        PlayerProfile player = repository.loadPlayerProfile(ownerId);
+        PlayerProfile player = getCachedProfile(ownerId);
         if (player == null) return false;
 
-        // Requisito: Trivelle solo su vene [cite: 673-674]
-        if (typeId.equals("drill_mk1")) {
-            Map<GridPosition, MatterColor> res = playerResources.get(ownerId);
-            if (res == null || !res.containsKey(pos)) {
-                System.out.println(log(ownerId) + "ðŸš« Fallito: Trivella piazzata fuori vena a " + pos);
-                return false;
-            }
-        }
-
-        boolean isAdmin = player.isAdmin();
-        if (!isAdmin && repository.getInventoryItemCount(ownerId, typeId) <= 0) {
-            System.out.println(log(ownerId) + "ðŸŽ’ Fallito: Inventario vuoto.");
+        // 1. Tech Check
+        if (!techManager.canBuyItem(player, typeId)) {
+            System.err.println("ðŸ”’ [Game] Tech mancante: " + typeId);
             return false;
         }
 
-        var stats = blockRegistry.getStats(typeId);
-        Vector3Int dim = stats.dimensions();
-        Vector3Int effDim = (orientation == Direction.EAST || orientation == Direction.WEST) ? new Vector3Int(dim.z(), dim.y(), dim.x()) : dim;
+        // 2. Vein Check (Drill)
+        if (typeId.equals("drill_mk1")) {
+            Map<GridPosition, MatterColor> res = playerResources.get(ownerId);
+            if (res == null || !res.containsKey(pos)) return false;
+        }
 
+        // 3. Inventory Check
+        if (!player.isAdmin() && repository.getInventoryItemCount(ownerId, typeId) <= 0) return false;
+
+        // 4. Area Check
+        Vector3Int dim = blockRegistry.getDimensions(typeId);
+        Vector3Int effDim = (orientation == Direction.EAST || orientation == Direction.WEST) ? new Vector3Int(dim.z(), dim.y(), dim.x()) : dim;
         if (!isAreaClear(ownerId, pos, effDim)) return false;
 
-        if (!isAdmin) repository.modifyInventoryItem(ownerId, typeId, -1);
+        // Esegui Piazzamento
+        if (!player.isAdmin()) repository.modifyInventoryItem(ownerId, typeId, -1);
 
         PlotObject dto = new PlotObject(null, null, pos.x(), pos.y(), pos.z(), typeId, null);
         PlacedMachine m = MachineFactory.createFromModel(dto, ownerId);
         if (m == null) return false;
 
         m.setOrientation(orientation);
+        m.setGridContext(this);
         if (m instanceof DrillMachine drill) drill.setResourceToMine(playerResources.get(ownerId).get(pos));
 
         internalAddMachine(ownerId, m);
         m.onPlace(worldAdapter);
         repository.createMachine(ownerId, m);
-        System.out.println(log(ownerId) + "âœ… Piazzato " + typeId + " a " + pos);
         return true;
     }
 
-    // --- METODI DI SUPPORTO (Snapshots, Market, Inventory) ---
-    public MarketManager getMarketManager() { return marketManager; }
-    public Map<GridPosition, PlacedMachine> getAllMachinesSnapshot() {
-        Map<GridPosition, PlacedMachine> all = new HashMap<>();
-        for (var map : playerGrids.values()) all.putAll(map);
-        return all;
+    public boolean buyItem(UUID playerId, String itemId, int amount) {
+        PlayerProfile p = getCachedProfile(playerId);
+        if (p == null) return false;
+
+        if (!techManager.canBuyItem(p, itemId)) {
+            System.err.println("ðŸ”’ [Shop] Tech mancante per " + itemId);
+            return false;
+        }
+
+        // --- CAP SYSTEM ---
+        if (!p.isAdmin() && !checkItemCap(playerId, itemId, amount)) return false;
+
+        double cost = blockRegistry.getStats(itemId).basePrice() * amount;
+        if (!p.isAdmin() && p.getMoney() < cost) return false;
+
+        if (!p.isAdmin()) {
+            p.modifyMoney(-cost);
+            repository.savePlayerProfile(p);
+            activeProfileCache.put(playerId, p); // Update Cache
+        }
+        repository.modifyInventoryItem(playerId, itemId, amount);
+        return true;
     }
 
-    // ... (loadPlotFromDB, internalAddMachine, generateDefaultResources rimangono identici)
-    public void loadPlotFromDB(UUID ownerId) {
+    private boolean checkItemCap(UUID playerId, String itemId, int incomingAmount) {
+        int inInventory = repository.getInventoryItemCount(playerId, itemId);
+        Map<GridPosition, PlacedMachine> placed = playerGrids.get(playerId);
+        long placedCount = (placed != null) ? placed.values().stream().filter(m -> m.getTypeId().equals(itemId)).count() : 0;
+        long total = inInventory + placedCount + incomingAmount;
+
+        // Nexus: Max 1
+        if (itemId.equals("nexus_core") && total > 1) {
+            System.err.println("ðŸš« CAP: Massimo 1 Nexus consentito.");
+            return false;
+        }
+        // Trivelle: Max <= Numero Vene
+        if (itemId.equals("drill_mk1")) {
+            Map<GridPosition, MatterColor> veins = playerResources.get(playerId);
+            int totalVeins = (veins != null) ? veins.size() : 0;
+            if (total > totalVeins) {
+                System.err.println("ðŸš« CAP: Max trivelle raggiunto (" + totalVeins + ")");
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // --- PLAYER MANAGEMENT ---
+
+    public PlayerProfile createNewPlayer(String username) {
+        this.serverConfig = repository.loadServerConfig(); // Reload config
+        UUID newUuid = UUID.randomUUID();
+        PlayerProfile p = new PlayerProfile(newUuid);
+        p.setUsername(username);
+        p.setMoney(serverConfig.startMoney()); // Config Money
+        p.setRank(PlayerProfile.PlayerRank.PLAYER);
+
+        repository.savePlayerProfile(p);
+        activeProfileCache.put(p.getPlayerId(), p);
+
+        // Starter Kit
+        repository.modifyInventoryItem(newUuid, "drill_mk1", 1);
+        repository.modifyInventoryItem(newUuid, "nexus_core", 1);
+        repository.modifyInventoryItem(newUuid, "conveyor_belt", 1);
+
+        if (repository instanceof MariaDBAdapter adapter) {
+            PlotDAO plotDAO = new PlotDAO(adapter.getDbManager());
+            Long plotId = plotDAO.createPlot(newUuid, 1, 0, 0);
+            if (plotId != null) generateDefaultResources(adapter, plotId, new HashMap<>());
+        }
+        return p;
+    }
+
+    public void deletePlayer(UUID ownerId) {
+        unloadPlotSpecific(ownerId);
+        activeProfileCache.remove(ownerId);
+        repository.deletePlayerFull(ownerId);
+        System.out.println("ðŸ’€ [Manager] Player " + ownerId + " eliminato.");
+    }
+
+    public boolean attemptBailout(UUID ownerId) {
+        PlayerProfile player = getCachedProfile(ownerId);
+        if (player == null) return false;
+
+        this.serverConfig = repository.loadServerConfig();
+        if (player.getMoney() < serverConfig.sosThreshold()) {
+            player.setMoney(serverConfig.sosThreshold());
+            repository.savePlayerProfile(player);
+            activeProfileCache.put(ownerId, player);
+            return true;
+        }
+        return false;
+    }
+
+    public void resetUserPlot(UUID ownerId) {
         ioExecutor.submit(() -> {
-            try {
-                unloadPlot(ownerId);
-                if (repository instanceof MariaDBAdapter db) {
-                    Long pid = db.getPlotId(ownerId);
-                    if (pid != null) {
-                        Map<GridPosition, MatterColor> res = db.loadResources(pid);
-                        if (res.isEmpty()) generateDefaultResources(db, pid, res);
-                        playerResources.put(ownerId, res);
-                    }
-                }
-                List<PlotObject> dtos = repository.loadPlotMachines(ownerId);
-                for(PlotObject d : dtos) {
-                    PlacedMachine m = MachineFactory.createFromModel(d, ownerId);
-                    if(m!=null) internalAddMachine(ownerId, m);
-                }
-            } catch(Exception e) { e.printStackTrace(); }
+            unloadPlotSpecific(ownerId);
+            if (repository instanceof MariaDBAdapter db) db.clearPlotData(ownerId);
+            loadPlotSynchronously(ownerId);
         });
     }
 
-    private void generateDefaultResources(MariaDBAdapter db, Long plotId, Map<GridPosition, MatterColor> cache) {
-        Random rnd = new Random();
-        for (int i = 0; i < 3; i++) createResource(db, plotId, cache, rnd.nextInt(15)+2, 0, rnd.nextInt(15)+2, MatterColor.RAW);
-        createResource(db, plotId, cache, rnd.nextInt(15)+2, 0, rnd.nextInt(15)+2, MatterColor.RED);
-        createResource(db, plotId, cache, rnd.nextInt(15)+2, 0, rnd.nextInt(15)+2, MatterColor.BLUE);
-    }
-
-    private void createResource(MariaDBAdapter db, Long pid, Map<GridPosition, MatterColor> c, int x, int y, int z, MatterColor t) {
-        if(c.containsKey(new GridPosition(x,y,z))) return;
-        db.saveResource(pid, x, z, t); c.put(new GridPosition(x,y,z), t);
-    }
-
-    private void unloadPlot(UUID id) {
-        playerGrids.remove(id); playerResources.remove(id);
-        synchronized(tickingMachines) { tickingMachines.removeIf(m -> m.getOwnerId().equals(id)); }
-    }
-
-    private void internalAddMachine(UUID id, PlacedMachine m) {
-        m.setGridContext(this);
-        Map<GridPosition, PlacedMachine> grid = playerGrids.computeIfAbsent(id, k->new ConcurrentHashMap<>());
-        Vector3Int dim = m.getDimensions(); GridPosition o = m.getPos();
-        for(int x=0;x<dim.x();x++) for(int y=0;y<dim.y();y++) for(int z=0;z<dim.z();z++)
-            grid.put(new GridPosition(o.x()+x, o.y()+y, o.z()+z), m);
-        tickingMachines.add(m);
-    }
+    // --- UTILS ---
 
     public void removeComponent(UUID ownerId, GridPosition pos) {
         PlacedMachine target = getMachineAt(ownerId, pos);
         if (target == null) return;
         repository.modifyInventoryItem(ownerId, target.getTypeId(), 1);
         if (target.getDbId() != null) repository.deleteMachine(target.getDbId());
-        removeFromGridMap(ownerId, target);
-        synchronized (tickingMachines) { tickingMachines.remove(target); }
+
+        synchronized (tickingMachines) {
+            removeFromGridMap(ownerId, target);
+            tickingMachines.remove(target);
+        }
         target.onRemove();
+    }
+
+    public boolean isAreaClear(UUID id, GridPosition o, Vector3Int dim) {
+        Map<GridPosition, PlacedMachine> g = playerGrids.get(id);
+        if (g == null) return true;
+        for(int x = 0; x < dim.x(); x++) {
+            for(int y = 0; y < dim.y(); y++) {
+                for(int z = 0; z < dim.z(); z++) {
+                    GridPosition checkPos = new GridPosition(o.x() + x, o.y() + y, o.z() + z);
+                    if (g.containsKey(checkPos)) return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    public PlacedMachine getMachineAt(UUID id, GridPosition pos) {
+        Map<GridPosition, PlacedMachine> g = playerGrids.get(id);
+        return g != null ? g.get(pos) : null;
+    }
+
+    public void tick(long t) {
+        // Itera su TUTTO il mondo caricato (Multitenant Simulation)
+        synchronized (tickingMachines) {
+            for (PlacedMachine m : tickingMachines) {
+                m.tick(t);
+            }
+        }
+    }
+
+    private void internalAddMachine(UUID id, PlacedMachine m) {
+        m.setGridContext(this);
+        Map<GridPosition, PlacedMachine> grid = playerGrids.computeIfAbsent(id, k -> new ConcurrentHashMap<>());
+        Vector3Int dim = m.getDimensions(); GridPosition o = m.getPos();
+        for(int x=0; x<dim.x(); x++) for(int y=0; y<dim.y(); y++) for(int z=0; z<dim.z(); z++)
+            grid.put(new GridPosition(o.x()+x, o.y()+y, o.z()+z), m);
+        synchronized (tickingMachines) { tickingMachines.add(m); }
     }
 
     private void removeFromGridMap(UUID id, PlacedMachine m) {
         Map<GridPosition, PlacedMachine> grid = playerGrids.get(id);
         if (grid == null) return;
         Vector3Int dim = m.getDimensions(); GridPosition o = m.getPos();
-        for(int x=0;x<dim.x();x++) for(int y=0;y<dim.y();y++) for(int z=0;z<dim.z();z++)
+        for(int x=0; x<dim.x(); x++) for(int y=0; y<dim.y(); y++) for(int z=0; z<dim.z(); z++)
             grid.remove(new GridPosition(o.x()+x, o.y()+y, o.z()+z));
     }
 
-    public PlacedMachine getMachineAt(UUID id, GridPosition pos) {
-        Map<GridPosition, PlacedMachine> g = playerGrids.get(id);
-        return g!=null ? g.get(pos) : null;
+    private void generateDefaultResources(MariaDBAdapter db, Long plotId, Map<GridPosition, MatterColor> cache) {
+        Random rnd = new Random();
+        for (int i = 0; i < serverConfig.veinRaw(); i++) createResource(db, plotId, cache, rnd.nextInt(18)+1, 0, rnd.nextInt(18)+1, MatterColor.RAW);
+        for (int i = 0; i < serverConfig.veinRed(); i++) createResource(db, plotId, cache, rnd.nextInt(18)+1, 0, rnd.nextInt(18)+1, MatterColor.RED);
+        for (int i = 0; i < serverConfig.veinBlue(); i++) createResource(db, plotId, cache, rnd.nextInt(18)+1, 0, rnd.nextInt(18)+1, MatterColor.BLUE);
+        for (int i = 0; i < serverConfig.veinYellow(); i++) createResource(db, plotId, cache, rnd.nextInt(18)+1, 0, rnd.nextInt(18)+1, MatterColor.YELLOW);
     }
 
-    public boolean isAreaClear(UUID id, GridPosition o, Vector3Int dim) {
-        Map<GridPosition, PlacedMachine> g = playerGrids.get(id);
-        if(g==null) return true;
-        for(int x=0;x<dim.x();x++) for(int y=0;y<dim.y();y++) for(int z=0;z<dim.z();z++)
-            if(g.containsKey(new GridPosition(o.x()+x, o.y()+y, o.z()+z))) return false;
-        return true;
+    private void createResource(MariaDBAdapter db, Long pid, Map<GridPosition, MatterColor> c, int x, int y, int z, MatterColor t) {
+        while (c.containsKey(new GridPosition(x, y, z))) {
+            x = new Random().nextInt(18) + 1;
+            z = new Random().nextInt(18) + 1;
+        }
+        db.saveResource(pid, x, z, t);
+        c.put(new GridPosition(x,y,z), t);
     }
 
-    public void tick(long t) {
-        List<PlacedMachine> snap; synchronized(tickingMachines){ snap = new ArrayList<>(tickingMachines); }
-        snap.forEach(m -> m.tick(t));
+    public PlayerProfile getCachedProfile(UUID uuid) {
+        if (uuid == null) return null;
+        return activeProfileCache.computeIfAbsent(uuid, repository::loadPlayerProfile);
     }
 
     public Map<GridPosition, PlacedMachine> getSnapshot(UUID id) {
         Map<GridPosition, PlacedMachine> g = playerGrids.get(id);
-        return g!=null?new HashMap<>(g):Collections.emptyMap();
+        return g != null ? new HashMap<>(g) : Collections.emptyMap();
+    }
+
+    public Map<GridPosition, PlacedMachine> getAllMachinesSnapshot() {
+        Map<GridPosition, PlacedMachine> all = new HashMap<>();
+        for (var map : playerGrids.values()) all.putAll(map);
+        return all;
     }
 
     public Map<GridPosition, MatterColor> getTerrainResources(UUID id) { return playerResources.getOrDefault(id, Collections.emptyMap()); }
     public BlockRegistry getBlockRegistry() { return blockRegistry; }
+}
+
+
+--------------------------------
+FILE: TechManager.java
+--------------------------------
+package com.matterworks.core.managers;
+
+import com.matterworks.core.database.dao.TechDefinitionDAO;
+import com.matterworks.core.domain.player.PlayerProfile;
+import com.matterworks.core.ports.IRepository;
+import java.util.*;
+
+public class TechManager {
+
+    private final IRepository repository;
+    private final TechDefinitionDAO dao;
+
+    public record TechNode(
+            String id,
+            String name,
+            double cost,
+            List<String> parentIds,
+            List<String> unlockItemIds
+    ) {}
+
+    private final Map<String, TechNode> nodes = new LinkedHashMap<>();
+    private final Set<String> baseItems = Set.of("drill_mk1", "conveyor_belt", "nexus_core");
+
+    public TechManager(IRepository repository, TechDefinitionDAO dao) {
+        this.repository = repository;
+        this.dao = dao;
+        loadFromDatabase();
+    }
+
+    public void loadFromDatabase() {
+        nodes.clear();
+        if (dao == null) return;
+
+        List<TechNode> dbNodes = dao.loadAllNodes();
+        for (TechNode node : dbNodes) {
+            nodes.put(node.id(), node);
+        }
+
+        if (nodes.isEmpty()) {
+            System.err.println("!!! TECH TREE EMPTY - Check Database Table 'tech_definitions' !!!");
+        }
+    }
+
+    public boolean canBuyItem(PlayerProfile p, String itemId) {
+        if (p.isAdmin()) return true;
+        if (baseItems.contains(itemId)) return true;
+
+        for (TechNode node : nodes.values()) {
+            if (node.unlockItemIds().contains(itemId)) {
+                return p.hasTech(node.id());
+            }
+        }
+        return false;
+    }
+
+    public boolean unlockNode(PlayerProfile p, String nodeId) {
+        TechNode node = nodes.get(nodeId);
+        if (node == null) return false;
+
+        if (p.hasTech(nodeId)) return false;
+        if (p.getMoney() < node.cost()) return false;
+
+        for (String parentId : node.parentIds()) {
+            if (!p.hasTech(parentId)) return false;
+        }
+
+        p.modifyMoney(-node.cost());
+        p.addTech(nodeId);
+        repository.savePlayerProfile(p);
+        return true;
+    }
+
+    public Collection<TechNode> getAllNodes() { return nodes.values(); }
+    public TechNode getNode(String id) { return nodes.get(id); }
 }
 
 
@@ -3791,9 +4322,9 @@ package com.matterworks.core.ports;
 import com.matterworks.core.domain.machines.PlacedMachine;
 import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.player.PlayerProfile;
+import com.matterworks.core.infrastructure.ServerConfig;
 import com.matterworks.core.model.PlotObject;
 import com.matterworks.core.common.GridPosition;
-import com.matterworks.core.domain.player.PlayerProfile;
 
 import java.util.List;
 import java.util.Map;
@@ -3801,37 +4332,30 @@ import java.util.UUID;
 
 public interface IRepository {
 
+    // --- CONFIG ---
+    ServerConfig loadServerConfig();
+
     // --- PLAYER & PROFILE ---
     PlayerProfile loadPlayerProfile(UUID uuid);
     void savePlayerProfile(PlayerProfile profile);
+    void deletePlayerFull(UUID uuid);
 
     // --- PLOT DATA ---
     List<PlotObject> loadPlotMachines(UUID ownerId);
     Long createMachine(UUID ownerId, PlacedMachine machine);
     void deleteMachine(Long dbId);
-
-    // Aggiornamento batch dei metadati (per autosave)
     void updateMachinesMetadata(List<PlacedMachine> machines);
-
-    // Reset totale del plot
     void clearPlotData(UUID ownerId);
     Long getPlotId(UUID ownerId);
 
-    // --- RISORSE (VENE) ---
+    // --- RISORSE ---
     void saveResource(Long plotId, int x, int z, MatterColor type);
     Map<GridPosition, MatterColor> loadResources(Long plotId);
 
-    // --- INVENTARIO (NUOVI METODI) ---
-    /**
-     * Restituisce la quantitÃ  di un item posseduta dal giocatore.
-     */
+    // --- INVENTARIO ---
     int getInventoryItemCount(UUID ownerId, String itemId);
-
-    /**
-     * Modifica la quantitÃ  di un item (positivo = aggiungi, negativo = rimuovi).
-     */
     void modifyInventoryItem(UUID ownerId, String itemId, int delta);
-    java.util.List<PlayerProfile> getAllPlayers();
+    List<PlayerProfile> getAllPlayers();
 }
 
 

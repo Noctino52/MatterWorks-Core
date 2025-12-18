@@ -11,12 +11,16 @@ public class PlayerProfile {
     private final UUID playerId;
     private String username;
     private double money;
+    private int voidCoins;
+    private int prestigeLevel;
     private PlayerRank rank;
     private Set<String> unlockedTechs = new HashSet<>();
 
     public PlayerProfile(UUID playerId) {
         this.playerId = playerId;
         this.money = 0.0;
+        this.voidCoins = 0;
+        this.prestigeLevel = 0;
         this.rank = PlayerRank.PLAYER;
     }
 
@@ -30,19 +34,20 @@ public class PlayerProfile {
     public void setMoney(double money) { this.money = money; }
     public void modifyMoney(double amount) { this.money += amount; }
 
+    public int getVoidCoins() { return voidCoins; }
+    public void setVoidCoins(int voidCoins) { this.voidCoins = voidCoins; }
+    public void modifyVoidCoins(int amount) { this.voidCoins += amount; }
+
+    public int getPrestigeLevel() { return prestigeLevel; }
+    public void setPrestigeLevel(int level) { this.prestigeLevel = level; }
+
     @Override
     public String toString() {
-        // --- VISUALIZZA USERNAME (SHORT-ID) ---
         String shortId = playerId.toString().substring(0, 8);
         return username + " (" + shortId + ")";
     }
+
     public Set<String> getUnlockedTechs() { return unlockedTechs; }
-
-    public void addTech(String techId) {
-        this.unlockedTechs.add(techId);
-    }
-
-    public boolean hasTech(String techId) {
-        return unlockedTechs.contains(techId);
-    }
+    public void addTech(String techId) { this.unlockedTechs.add(techId); }
+    public boolean hasTech(String techId) { return unlockedTechs.contains(techId); }
 }

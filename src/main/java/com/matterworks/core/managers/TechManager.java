@@ -30,21 +30,19 @@ public class TechManager {
     public void loadFromDatabase() {
         nodes.clear();
         if (dao == null) return;
-
         List<TechNode> dbNodes = dao.loadAllNodes();
         for (TechNode node : dbNodes) {
             nodes.put(node.id(), node);
         }
-
         if (nodes.isEmpty()) {
             System.err.println("!!! TECH TREE EMPTY - Check Database Table 'tech_definitions' !!!");
         }
     }
 
     public boolean canBuyItem(PlayerProfile p, String itemId) {
+        if (p == null) return false;
         if (p.isAdmin()) return true;
         if (baseItems.contains(itemId)) return true;
-
         for (TechNode node : nodes.values()) {
             if (node.unlockItemIds().contains(itemId)) {
                 return p.hasTech(node.id());
@@ -55,8 +53,7 @@ public class TechManager {
 
     public boolean unlockNode(PlayerProfile p, String nodeId) {
         TechNode node = nodes.get(nodeId);
-        if (node == null) return false;
-
+        if (node == null || p == null) return false;
         if (p.hasTech(nodeId)) return false;
         if (p.getMoney() < node.cost()) return false;
 
@@ -67,6 +64,11 @@ public class TechManager {
         p.modifyMoney(-node.cost());
         p.addTech(nodeId);
         repository.savePlayerProfile(p);
+
+        // Log con snapshot completo
+        repository.logTransaction(p, "TECH_UNLOCK", "MONEY", -node.cost(), nodeId);
+
+        System.out.println("🔓 [" + p.getUsername() + "] Research Complete: " + node.name());
         return true;
     }
 
