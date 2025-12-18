@@ -15,12 +15,14 @@ public class MachineDefinitionDAO {
 
     private final DatabaseManager db;
 
-    // JOIN per prendere Prezzo (item_definitions) e Dimensioni (machine_definitions)
+    // Query JOIN aggiornata con le nuove colonne
     private static final String SELECT_JOINED_STATS = """
         SELECT 
             i.id, 
-            i.base_price, 
             i.category,
+            i.base_price, 
+            i.tier,
+            i.model_id,
             m.width, 
             m.height, 
             m.depth
@@ -41,7 +43,12 @@ public class MachineDefinitionDAO {
 
             while (rs.next()) {
                 String id = rs.getString("id");
+
+                // Lettura nuovi campi
+                String category = rs.getString("category");
                 double price = rs.getDouble("base_price");
+                int tier = rs.getInt("tier");
+                String modelId = rs.getString("model_id");
 
                 Vector3Int dim = new Vector3Int(
                         rs.getInt("width"),
@@ -49,7 +56,7 @@ public class MachineDefinitionDAO {
                         rs.getInt("depth")
                 );
 
-                statsMap.put(id, new MachineStats(dim, price, id));
+                statsMap.put(id, new MachineStats(id, dim, price, tier, modelId, category));
             }
         } catch (SQLException e) {
             e.printStackTrace();

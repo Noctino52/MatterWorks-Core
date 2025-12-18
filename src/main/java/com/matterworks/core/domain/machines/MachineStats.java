@@ -3,16 +3,18 @@ package com.matterworks.core.domain.machines;
 import com.matterworks.core.common.Vector3Int;
 
 /**
- * Contiene le statistiche statiche di una macchina caricate dal DB.
- * (Dimensioni, Prezzo, etc.)
+ * DTO che rappresenta i dati statici di una macchina caricati dal DB.
+ * Allineato con la tabella 'item_definitions' e 'machine_definitions'.
  */
 public record MachineStats(
+        String id,          // ID dell'item
         Vector3Int dimensions,
         double basePrice,
-        String nameDisplay // Opzionale: utile per la GUI
+        int tier,           // NEW
+        String modelId,     // NEW
+        String category
 ) {
-    // Statistiche di fallback per blocchi ignoti
     public static MachineStats fallback(String id) {
-        return new MachineStats(Vector3Int.one(), 0.0, id);
+        return new MachineStats(id, Vector3Int.one(), 0.0, 1, "model_missing", "UNKNOWN");
     }
 }
