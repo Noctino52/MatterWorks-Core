@@ -13,6 +13,7 @@ import com.matterworks.core.model.PlotObject;
 import com.matterworks.core.ports.IRepository;
 import com.matterworks.core.ports.IWorldAccess;
 import com.matterworks.core.database.dao.TechDefinitionDAO;
+import com.matterworks.core.database.dao.PlotDAO;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -39,8 +40,8 @@ public class GridManager {
         this.marketManager = new MarketManager(repository);
 
         TechDefinitionDAO techDao = null;
-        if (repository instanceof MariaDBAdapter mariaDBAdapter) {
-            techDao = mariaDBAdapter.getTechDefinitionDAO();
+        if (repository instanceof MariaDBAdapter adapter) {
+            techDao = adapter.getTechDefinitionDAO();
         }
         this.techManager = new TechManager(repository, techDao);
     }
@@ -48,7 +49,6 @@ public class GridManager {
     public TechManager getTechManager() { return techManager; }
     public MarketManager getMarketManager() { return marketManager; }
 
-    // --- FIX: Metodo createNewPlayer Ripristinato [cite: 723-726] ---
     public PlayerProfile createNewPlayer(String username) {
         UUID newUuid = UUID.randomUUID();
         PlayerProfile p = new PlayerProfile(newUuid);
@@ -58,12 +58,10 @@ public class GridManager {
         repository.savePlayerProfile(p);
 
         if (repository instanceof MariaDBAdapter adapter) {
-            // Istanziamo un PlotDAO al volo poiché l'adapter non espone createPlot direttamente
-            com.matterworks.core.database.dao.PlotDAO plotDAO = new com.matterworks.core.database.dao.PlotDAO(adapter.getDbManager());
+            PlotDAO plotDAO = new PlotDAO(adapter.getDbManager());
             Long plotId = plotDAO.createPlot(newUuid, 1, 0, 0);
             if (plotId != null) {
                 generateDefaultResources(adapter, plotId, new HashMap<>());
-                System.out.println("[System] 🆕 Initialized plot for: " + username);
             }
         }
         return p;
@@ -72,22 +70,17 @@ public class GridManager {
     public boolean attemptBailout(UUID ownerId) {
         PlayerProfile player = repository.loadPlayerProfile(ownerId);
         if (player == null || !(repository instanceof MariaDBAdapter adapter)) return false;
-
         double threshold = adapter.getSosThreshold();
         if (player.getMoney() < threshold) {
             player.setMoney(threshold);
             repository.savePlayerProfile(player);
-            System.out.println("[" + player.getUsername() + "] 🚑 SOS APPROVATO: Saldo ripristinato a $" + threshold);
             return true;
         }
-        System.out.println("[" + player.getUsername() + "] ❌ SOS NEGATO: Saldo già sopra la soglia.");
         return false;
     }
 
     public void resetUserPlot(UUID ownerId) {
         ioExecutor.submit(() -> {
-            PlayerProfile p = repository.loadPlayerProfile(ownerId);
-            System.out.println("[" + (p!=null?p.getUsername():"?") + "] ⚠️ Reset totale del plot richiesto.");
             unloadPlot(ownerId);
             if (repository instanceof MariaDBAdapter db) db.clearPlotData(ownerId);
             loadPlotFromDB(ownerId);
@@ -99,7 +92,7 @@ public class GridManager {
         if (p == null) return false;
 
         if (!techManager.canBuyItem(p, itemId)) {
-            System.out.println("[" + p.getUsername() + "] 🔒 ACQUISTO NEGATO: Tecnologia non sbloccata per " + itemId);
+            System.err.println("🔒 LOCK: Ricerca necessaria per " + itemId);
             return false;
         }
 
@@ -111,7 +104,6 @@ public class GridManager {
             repository.savePlayerProfile(p);
         }
         repository.modifyInventoryItem(playerId, itemId, amount);
-        System.out.println("[" + p.getUsername() + "] ✅ Acquistato " + amount + "x " + itemId);
         return true;
     }
 
@@ -120,16 +112,13 @@ public class GridManager {
         if (player == null) return false;
 
         if (!techManager.canBuyItem(player, typeId)) {
-            System.out.println("[" + player.getUsername() + "] 🔒 PIAZZAMENTO NEGATO: Tecnologia non sbloccata per " + typeId);
+            System.err.println("🔒 LOCK: " + player.getUsername() + " non ha la tech per " + typeId);
             return false;
         }
 
         if (typeId.equals("drill_mk1")) {
             Map<GridPosition, MatterColor> res = playerResources.get(ownerId);
-            if (res == null || !res.containsKey(pos)) {
-                System.out.println("[" + player.getUsername() + "] 🚫 Trivella piazzata fuori vena.");
-                return false;
-            }
+            if (res == null || !res.containsKey(pos)) return false;
         }
 
         if (!player.isAdmin() && repository.getInventoryItemCount(ownerId, typeId) <= 0) return false;
@@ -152,7 +141,6 @@ public class GridManager {
         internalAddMachine(ownerId, m);
         m.onPlace(worldAdapter);
         repository.createMachine(ownerId, m);
-        System.out.println("[" + player.getUsername() + "] ✅ Piazzato " + typeId + " a " + pos);
         return true;
     }
 
@@ -166,17 +154,17 @@ public class GridManager {
         target.onRemove();
     }
 
-    public PlacedMachine getMachineAt(UUID id, GridPosition pos) {
-        Map<GridPosition, PlacedMachine> g = playerGrids.get(id);
-        return g != null ? g.get(pos) : null;
-    }
-
     public boolean isAreaClear(UUID id, GridPosition o, Vector3Int dim) {
         Map<GridPosition, PlacedMachine> g = playerGrids.get(id);
         if (g == null) return true;
         for(int x=0; x<dim.x(); x++) for(int y=0; y<dim.y(); y++) for(int z=0; z<dim.z(); z++)
             if(g.containsKey(new GridPosition(o.x()+x, o.y()+y, o.z()+z))) return false;
         return true;
+    }
+
+    public PlacedMachine getMachineAt(UUID id, GridPosition pos) {
+        Map<GridPosition, PlacedMachine> g = playerGrids.get(id);
+        return g != null ? g.get(pos) : null;
     }
 
     public void tick(long t) {
@@ -248,7 +236,9 @@ public class GridManager {
 
     public Map<GridPosition, PlacedMachine> getAllMachinesSnapshot() {
         Map<GridPosition, PlacedMachine> all = new HashMap<>();
-        for (var map : playerGrids.values()) all.putAll(map);
+        for (var map : playerGrids.values()) {
+            all.putAll(map);
+        }
         return all;
     }
 

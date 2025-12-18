@@ -58,7 +58,11 @@ public class FactoryPanel extends JPanel {
     public void setPlayerUuid(UUID uuid) { this.playerUuid = uuid; repaint(); }
     public void setLayer(int y) { this.currentLayer = y; repaint(); }
     public int getCurrentLayer() { return currentLayer; }
-    public void setTool(String toolId) { this.currentTool = toolId; repaint(); }
+    public void setTool(String toolId) {
+        this.currentTool = toolId;
+        // Non facciamo controlli qui: il fantasma deve apparire sempre
+        repaint();
+    }
     public String getCurrentToolName() { return currentTool != null ? currentTool : "None"; }
 
     public void rotate() {

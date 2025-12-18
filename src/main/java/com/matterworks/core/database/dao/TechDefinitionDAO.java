@@ -34,33 +34,27 @@ public class TechDefinitionDAO {
                 String name = rs.getString("name_display");
                 double cost = rs.getDouble("cost_money");
 
-                // Parsing JSON Dependencies
-                String parentJson = rs.getString("parent_node_ids");
-                List<String> parents = new ArrayList<>();
-                if (parentJson != null && !parentJson.equals("null")) {
-                    try {
-                        parents = gson.fromJson(parentJson, new TypeToken<List<String>>(){}.getType());
-                    } catch (Exception ignored) {}
-                }
-                // Fallback per compatibilità con il record Java precedente che accettava un solo parent
-                String primaryParent = (parents != null && !parents.isEmpty()) ? parents.get(0) : null;
+                // Deserializzazione liste JSON
+                List<String> parents = parseJsonList(rs.getString("parent_node_ids"));
+                List<String> unlocks = parseJsonList(rs.getString("unlock_machine_ids"));
 
-                // Parsing JSON Unlocks
-                String unlocksJson = rs.getString("unlock_machine_ids");
-                List<String> unlocks = new ArrayList<>();
-                if (unlocksJson != null && !unlocksJson.equals("null")) {
-                    try {
-                        unlocks = gson.fromJson(unlocksJson, new TypeToken<List<String>>(){}.getType());
-                    } catch (Exception ignored) {}
-                }
-                // Fallback per il record Java precedente
-                String primaryUnlock = (unlocks != null && !unlocks.isEmpty()) ? unlocks.get(0) : "none";
-
-                nodes.add(new TechNode(id, name, cost, primaryParent, primaryUnlock));
+                nodes.add(new TechNode(id, name, cost, parents, unlocks));
             }
         } catch (SQLException e) {
             e.printStackTrace();
         }
         return nodes;
+    }
+
+    private List<String> parseJsonList(String json) {
+        if (json == null || json.isBlank() || json.equals("null")) {
+            return new ArrayList<>();
+        }
+        try {
+            return gson.fromJson(json, new TypeToken<List<String>>(){}.getType());
+        } catch (Exception e) {
+            System.err.println("⚠️ JSON Parse Error in TechDefinitionDAO: " + json);
+            return new ArrayList<>();
+        }
     }
 }

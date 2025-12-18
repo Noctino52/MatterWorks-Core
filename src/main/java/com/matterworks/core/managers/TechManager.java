@@ -8,54 +8,48 @@ import java.util.*;
 public class TechManager {
 
     private final IRepository repository;
-    private final TechDefinitionDAO dao; // Riferimento al DAO specifico
+    private final TechDefinitionDAO dao;
 
-    // Struttura del Nodo Tecnologico
-    public record TechNode(String id, String name, double cost, String parentId, String unlocksItemId) {}
+    public record TechNode(
+            String id,
+            String name,
+            double cost,
+            List<String> parentIds,
+            List<String> unlockItemIds
+    ) {}
 
     private final Map<String, TechNode> nodes = new LinkedHashMap<>();
-
-    // Items che non richiedono tech tree
     private final Set<String> baseItems = Set.of("drill_mk1", "conveyor_belt", "nexus_core");
 
-    // Costruttore aggiornato per ricevere il DAO
     public TechManager(IRepository repository, TechDefinitionDAO dao) {
         this.repository = repository;
         this.dao = dao;
-        initializeTree();
+        loadFromDatabase();
     }
 
-    private void initializeTree() {
-        System.out.println("🧬 Loading Tech Tree from Database...");
-        List<TechNode> dbNodes = dao.loadAllNodes();
+    public void loadFromDatabase() {
+        nodes.clear();
+        if (dao == null) return;
 
-        if (dbNodes.isEmpty()) {
-            System.err.println("⚠️ Nessuna Tech Definition trovata nel DB! Uso fallback.");
-            // Fallback per evitare crash se il DB è vuoto
-            nodes.put("tech_chromator", new TechNode("tech_chromator", "Chromator Tech", 500.0, null, "chromator"));
-            nodes.put("tech_mixer", new TechNode("tech_mixer", "Fluid Mixing", 1500.0, "tech_chromator", "color_mixer"));
-        } else {
-            for (TechNode node : dbNodes) {
-                nodes.put(node.id(), node);
-                System.out.println("   -> Loaded Tech: " + node.name() + " (Unlocks: " + node.unlocksItemId() + ")");
-            }
+        List<TechNode> dbNodes = dao.loadAllNodes();
+        for (TechNode node : dbNodes) {
+            nodes.put(node.id(), node);
+        }
+
+        if (nodes.isEmpty()) {
+            System.err.println("!!! TECH TREE EMPTY - Check Database Table 'tech_definitions' !!!");
         }
     }
 
     public boolean canBuyItem(PlayerProfile p, String itemId) {
-        // Admin bypassa tutto
         if (p.isAdmin()) return true;
-
-        // Item base sempre sbloccati
         if (baseItems.contains(itemId)) return true;
 
-        // Cerca se esiste una tech che sblocca questo item e se il player ce l'ha
         for (TechNode node : nodes.values()) {
-            if (node.unlocksItemId().equals(itemId)) {
+            if (node.unlockItemIds().contains(itemId)) {
                 return p.hasTech(node.id());
             }
         }
-        // Se l'item non è nell'albero ma non è base, è bloccato di default
         return false;
     }
 
@@ -65,12 +59,14 @@ public class TechManager {
 
         if (p.hasTech(nodeId)) return false;
         if (p.getMoney() < node.cost()) return false;
-        if (node.parentId() != null && !p.hasTech(node.parentId())) return false;
+
+        for (String parentId : node.parentIds()) {
+            if (!p.hasTech(parentId)) return false;
+        }
 
         p.modifyMoney(-node.cost());
         p.addTech(nodeId);
         repository.savePlayerProfile(p);
-        System.out.println("🔓 TECNOLOGIA SBLOCCATA: " + node.name());
         return true;
     }
 

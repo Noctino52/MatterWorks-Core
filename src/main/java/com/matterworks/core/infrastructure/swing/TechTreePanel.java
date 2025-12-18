@@ -24,88 +24,102 @@ public class TechTreePanel extends JPanel {
         setBackground(new Color(30, 30, 35));
         setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
 
-        // Titolo
-        JLabel title = new JLabel("R&D Department");
+        renderNodes();
+
+        // Timer di aggiornamento per riflettere i cambiamenti di saldo o sblocchi
+        new Timer(1000, e -> renderNodes()).start();
+    }
+
+    private void renderNodes() {
+        removeAll();
+
+        // Titolo Pannello
+        JLabel title = new JLabel("RESEARCH & DEVELOPMENT");
         title.setForeground(Color.ORANGE);
         title.setFont(new Font("Monospaced", Font.BOLD, 16));
         title.setAlignmentX(Component.CENTER_ALIGNMENT);
         add(title);
         add(Box.createVerticalStrut(15));
 
-        // Rendering Nodi
         TechManager tm = gridManager.getTechManager();
+        PlayerProfile p = repository.loadPlayerProfile(playerUuid);
+
+        if (p == null) return;
+
+        // Itera sui nodi caricati dal DB
         for (TechManager.TechNode node : tm.getAllNodes()) {
-            add(createTechCard(node, tm));
+            add(createTechCard(node, tm, p));
             add(Box.createVerticalStrut(10));
         }
 
-        // Refresh automatico per aggiornare stati (soldi/unlocks)
-        new Timer(1000, e -> {
-            removeAll();
-            add(title);
-            add(Box.createVerticalStrut(15));
-            for (TechManager.TechNode node : tm.getAllNodes()) {
-                add(createTechCard(node, tm));
-                add(Box.createVerticalStrut(10));
-            }
-            revalidate();
-            repaint();
-        }).start();
+        revalidate();
+        repaint();
     }
 
-    private JPanel createTechCard(TechManager.TechNode node, TechManager tm) {
-        PlayerProfile p = repository.loadPlayerProfile(playerUuid);
+    private JPanel createTechCard(TechManager.TechNode node, TechManager tm, PlayerProfile p) {
         boolean unlocked = p.hasTech(node.id());
-        boolean parentUnlocked = (node.parentId() == null) || p.hasTech(node.parentId());
+
+        // Verifica che TUTTI i genitori siano sbloccati (Logica AND)
+        boolean parentsUnlocked = true;
+        for (String parentId : node.parentIds()) {
+            if (!p.hasTech(parentId)) {
+                parentsUnlocked = false;
+                break;
+            }
+        }
+
         boolean canAfford = p.getMoney() >= node.cost();
 
         JPanel card = new JPanel(new BorderLayout(10, 5));
         card.setBackground(new Color(50, 50, 55));
         card.setBorder(BorderFactory.createLineBorder(Color.DARK_GRAY, 1));
-        card.setMaximumSize(new Dimension(300, 60));
-        card.setPreferredSize(new Dimension(300, 60));
+        card.setMaximumSize(new Dimension(310, 70));
+        card.setPreferredSize(new Dimension(310, 70));
 
-        // Info Sinistra
+        // Info: Nome e Dettagli
         JPanel info = new JPanel(new GridLayout(2, 1));
         info.setOpaque(false);
         JLabel lblName = new JLabel(node.name());
         lblName.setForeground(Color.WHITE);
         lblName.setFont(new Font("SansSerif", Font.BOLD, 13));
 
-        JLabel lblCost = new JLabel("$ " + (int)node.cost() + " | Item: " + node.unlocksItemId());
-        lblCost.setForeground(Color.LIGHT_GRAY);
-        lblCost.setFont(new Font("Monospaced", Font.PLAIN, 11));
+        String unlockText = String.join(", ", node.unlockItemIds());
+        JLabel lblDetail = new JLabel("Cost: $" + (int)node.cost() + " | Unlocks: " + unlockText);
+        lblDetail.setForeground(Color.LIGHT_GRAY);
+        lblDetail.setFont(new Font("Monospaced", Font.PLAIN, 10));
 
         info.add(lblName);
-        info.add(lblCost);
+        info.add(lblDetail);
         info.setBorder(BorderFactory.createEmptyBorder(5, 10, 5, 0));
 
-        // Bottone Azione Destra
+        // Bottone Azione
         JButton btnAction = new JButton();
-        btnAction.setPreferredSize(new Dimension(90, 40));
+        btnAction.setPreferredSize(new Dimension(100, 40));
         btnAction.setFont(new Font("SansSerif", Font.BOLD, 11));
         btnAction.setFocusable(false);
 
         if (unlocked) {
             btnAction.setText("ACQUISITO");
-            btnAction.setBackground(Color.GRAY);
-            btnAction.setForeground(Color.DARK_GRAY);
+            btnAction.setBackground(new Color(80, 80, 80));
+            btnAction.setForeground(Color.LIGHT_GRAY);
             btnAction.setEnabled(false);
-        } else if (!parentUnlocked) {
+        } else if (!parentsUnlocked) {
             btnAction.setText("BLOCCATO");
-            btnAction.setBackground(new Color(100, 30, 30)); // Rosso scuro
+            btnAction.setBackground(new Color(120, 40, 40)); // Rosso
             btnAction.setForeground(Color.WHITE);
-            btnAction.setEnabled(false); // Disabilitato perché manca dipendenza
-            btnAction.setToolTipText("Richiede: " + tm.getNode(node.parentId()).name());
+            btnAction.setEnabled(false);
+
+            // Tooltip per mostrare i requisiti
+            if (!node.parentIds().isEmpty()) {
+                btnAction.setToolTipText("Richiede: " + String.join(", ", node.parentIds()));
+            }
         } else {
             btnAction.setText("SBLOCCA");
-            btnAction.setBackground(canAfford ? new Color(30, 120, 30) : new Color(80, 80, 30)); // Verde o Giallo scuro
+            btnAction.setBackground(canAfford ? new Color(40, 140, 40) : new Color(100, 100, 40)); // Verde o Giallo
             btnAction.setForeground(Color.WHITE);
             btnAction.addActionListener(e -> {
                 if (tm.unlockNode(p, node.id())) {
-                    // Force refresh immediato
-                    revalidate();
-                    repaint();
+                    renderNodes(); // Refresh immediato
                 }
             });
         }
