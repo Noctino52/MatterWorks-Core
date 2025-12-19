@@ -3,7 +3,6 @@ package com.matterworks.core.domain.machines;
 import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.database.dao.MachineDefinitionDAO;
 import com.matterworks.core.ports.IWorldAccess;
-
 import java.util.HashMap;
 import java.util.Map;
 
@@ -42,7 +41,7 @@ public class BlockRegistry {
         // Hardcoded Fallback per stabilità in caso di DB mancante
         return switch (blockId) {
             case "nexus_core" -> new Vector3Int(3, 3, 3);
-            case "chromator", "color_mixer", "splitter" -> new Vector3Int(2, 1, 1);
+            case "chromator", "color_mixer", "splitter", "merger" -> new Vector3Int(2, 1, 1); // Merger aggiunto qui
             case "drill_mk1" -> new Vector3Int(1, 2, 1);
             default -> Vector3Int.one();
         };

@@ -40,7 +40,6 @@ public class MatterWorksGUI extends JFrame {
         this.repository = repo;
         this.currentPlayerUuid = initialUuid;
         this.onSave = onSave;
-
         this.factoryPanel = new FactoryPanel(gm, reg, currentPlayerUuid, this::updateLabels);
         this.rightTabbedPane = new JTabbedPane();
         this.rightTabbedPane.setPreferredSize(new Dimension(340, 0));
@@ -124,12 +123,16 @@ public class MatterWorksGUI extends JFrame {
 
         JPanel leftTools = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 5));
         leftTools.setOpaque(false);
+
+        // --- TOOLS BUTTONS ---
         leftTools.add(createToolButton("⛏ Drill", "drill_mk1"));
         leftTools.add(createToolButton("⪠ Belt", "conveyor_belt"));
-        leftTools.add(createToolButton("🔀 Splitter", "splitter")); // NEW
+        leftTools.add(createToolButton("🔀 Splitter", "splitter"));
+        leftTools.add(createToolButton("⭀ Merger", "merger")); // <--- NEW: Pulsante Merger Aggiunto
         leftTools.add(createToolButton("🎨 Chromator", "chromator"));
         leftTools.add(createToolButton("🌪 Mixer", "color_mixer"));
         leftTools.add(createToolButton("🔮 Nexus", "nexus_core"));
+
         leftTools.add(new JSeparator(SwingConstants.VERTICAL) {{ setPreferredSize(new Dimension(5, 25)); }});
         leftTools.add(createSimpleButton("⬇ DOWN", e -> changeLayer(-1)));
         leftTools.add(createSimpleButton("⬆ UP", e -> changeLayer(1)));
@@ -337,7 +340,8 @@ public class MatterWorksGUI extends JFrame {
 
     private JButton createSimpleButton(String text, java.awt.event.ActionListener action) {
         JButton btn = new JButton(text);
-        btn.setFocusable(false); btn.addActionListener(action);
+        btn.setFocusable(false);
+        btn.addActionListener(action);
         btn.setBackground(new Color(70, 70, 70)); btn.setForeground(Color.WHITE);
         return btn;
     }

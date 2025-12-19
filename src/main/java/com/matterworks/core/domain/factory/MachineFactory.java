@@ -48,12 +48,19 @@ public class MachineFactory {
                     "color_mixer",
                     model.getMetaData()
             );
-            // --- NEW: SPLITTER ---
             case "splitter" -> new Splitter(
                     model.getId(),
                     ownerId,
                     pos,
                     "splitter",
+                    model.getMetaData()
+            );
+            // --- NEW: MERGER ---
+            case "merger" -> new Merger(
+                    model.getId(),
+                    ownerId,
+                    pos,
+                    "merger",
                     model.getMetaData()
             );
 

@@ -16,19 +16,18 @@ public class InventoryDebugPanel extends JPanel {
     private final UUID playerUuid;
     private final GridManager gridManager;
 
-    // --- UPDATE: Aggiunto "splitter" alla lista degli item gestiti ---
+    // --- UPDATE: Aggiunto "merger" alla lista ---
     private final String[] itemIds = {
             "drill_mk1",
             "conveyor_belt",
-            "splitter",      // <--- NEW
+            "splitter",
+            "merger",        // <--- NEW: Merger aggiunto qui
             "nexus_core",
             "chromator",
             "color_mixer"
     };
 
     private final Map<String, JLabel> labelMap = new HashMap<>();
-
-    // Timer salvato in campo per poterlo fermare
     private final Timer refreshTimer;
 
     public InventoryDebugPanel(IRepository repository, UUID playerUuid, GridManager gm) {
@@ -39,7 +38,7 @@ public class InventoryDebugPanel extends JPanel {
         this.setPreferredSize(new Dimension(320, 0));
         this.setMinimumSize(new Dimension(320, 0));
 
-        PlayerProfile profile = gridManager.getCachedProfile(playerUuid); // Use cache
+        PlayerProfile profile = gridManager.getCachedProfile(playerUuid);
         boolean isPlayer = (profile != null && profile.getRank() == PlayerProfile.PlayerRank.PLAYER);
 
         setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
@@ -51,14 +50,10 @@ public class InventoryDebugPanel extends JPanel {
             add(Box.createVerticalStrut(8));
         }
 
-        // Timer a 500ms
         refreshTimer = new Timer(500, e -> updateAllLabels());
         refreshTimer.start();
     }
 
-    /**
-     * IMPORTANTE: Ferma il timer per evitare memory leak e CPU usage in background
-     */
     public void dispose() {
         if (refreshTimer != null && refreshTimer.isRunning()) {
             refreshTimer.stop();
@@ -70,7 +65,6 @@ public class InventoryDebugPanel extends JPanel {
         row.setOpaque(false);
         row.setMaximumSize(new Dimension(310, 40));
 
-        // Recupera info prezzi per il tooltip o label (opzionale)
         double price = gridManager.getBlockRegistry().getPrice(itemId);
 
         JLabel lblInfo = new JLabel(itemId + ": 0");
@@ -87,34 +81,25 @@ public class InventoryDebugPanel extends JPanel {
         buttons.setPreferredSize(new Dimension(80, 28));
         buttons.setMinimumSize(new Dimension(80, 28));
 
-        // Bottone ACQUISTA (+)
         JButton btnAdd = createTinyButton("+", () -> {
             if (isPlayer) {
-                // Tenta l'acquisto tramite GridManager (controlla soldi e tech)
                 boolean success = gridManager.buyItem(playerUuid, itemId, 1);
                 if (!success) {
-                    // Feedback visivo semplice (beep o console)
                     System.out.println("Purchase failed: " + itemId);
                 }
             } else {
-                // Admin mode: Spawn diretto
                 repository.modifyInventoryItem(playerUuid, itemId, 1);
             }
         });
         btnAdd.setBackground(new Color(50, 110, 50));
         if (isPlayer) btnAdd.setToolTipText("Buy for $" + price);
 
-        // Bottone VENDI/RIMUOVI (-)
         JButton btnRem = createTinyButton("-", () -> {
             if (isPlayer) {
                 if (repository.getInventoryItemCount(playerUuid, itemId) > 0) {
                     double refund = gridManager.getBlockRegistry().getPrice(itemId) * 0.5;
-                    PlayerProfile p = gridManager.getCachedProfile(playerUuid);
-                    if (p != null) {
-                        // Rimborso del 50%
-                        gridManager.addMoney(playerUuid, refund, "ITEM_SELL", itemId);
-                        repository.modifyInventoryItem(playerUuid, itemId, -1);
-                    }
+                    gridManager.addMoney(playerUuid, refund, "ITEM_SELL", itemId);
+                    repository.modifyInventoryItem(playerUuid, itemId, -1);
                 }
             } else {
                 repository.modifyInventoryItem(playerUuid, itemId, -1);
@@ -131,7 +116,6 @@ public class InventoryDebugPanel extends JPanel {
     }
 
     private void updateAllLabels() {
-        // Safe check: se il pannello non è più visualizzabile, fermati
         if (!this.isDisplayable()) {
             dispose();
             return;

@@ -69,27 +69,40 @@ public class GridManager {
         return activeProfileCache.computeIfAbsent(uuid, repository::loadPlayerProfile);
     }
 
-    // --- GUI ACTIONS ---
+    // --- GUI ACTIONS & PLAYER LIFECYCLE ---
 
     public PlayerProfile createNewPlayer(String username) {
+        // Ricarica la config per essere sicuri di avere i valori aggiornati (es. numero vene)
         this.serverConfig = repository.loadServerConfig();
+
         UUID newUuid = UUID.randomUUID();
         PlayerProfile p = new PlayerProfile(newUuid);
         p.setUsername(username);
         p.setMoney(serverConfig.startMoney());
         p.setRank(PlayerProfile.PlayerRank.PLAYER);
 
+        // 1. Salva il Profilo
         repository.savePlayerProfile(p);
         activeProfileCache.put(newUuid, p);
 
+        // 2. Inventario Iniziale
         repository.modifyInventoryItem(newUuid, "drill_mk1", 1);
         repository.modifyInventoryItem(newUuid, "nexus_core", 1);
-        repository.modifyInventoryItem(newUuid, "conveyor_belt", 1);
+        repository.modifyInventoryItem(newUuid, "conveyor_belt", 10);
 
+        // 3. Creazione Plot e Generazione Vene
         if (repository instanceof MariaDBAdapter adapter) {
             PlotDAO plotDAO = new PlotDAO(adapter.getDbManager());
-            Long plotId = plotDAO.createPlot(newUuid, 1, 0, 0);
-            if (plotId != null) generateDefaultResources(adapter, plotId, new HashMap<>());
+            Long plotId = plotDAO.createPlot(newUuid, 1, 0, 0); // Coordinate World fittizie per ora
+
+            if (plotId != null) {
+                // FIX: Invece di chiamare generateDefaultResources manualmente con una mappa dummy,
+                // invochiamo loadPlotSynchronously.
+                // Questo metodo controlla se le risorse sono vuote (e lo sono, il plot è nuovo)
+                // e chiama internamente generateDefaultResources, salvandole su DB e popolando la cache corretta.
+                System.out.println("🌱 Generazione mondo iniziale per " + username + "...");
+                loadPlotSynchronously(newUuid);
+            }
         }
         return p;
     }
@@ -106,13 +119,21 @@ public class GridManager {
         ioExecutor.submit(() -> {
             synchronized (tickingMachines) {
                 PlayerProfile p = getCachedProfile(ownerId);
+                // Salva (opzionale) e scarica dalla memoria
                 saveAndUnloadSpecific(ownerId);
+
+                // Cancella dati fisici dal DB
                 if (repository instanceof MariaDBAdapter db) db.clearPlotData(ownerId);
+
+                // Ricarica -> Questo triggera la rigenerazione delle risorse perché la mappa sarà vuota
                 loadPlotSynchronously(ownerId);
+
                 if (p != null) repository.logTransaction(p, "PLOT_RESET", "NONE", 0, "user_reset");
             }
         });
     }
+
+    // --- GAMEPLAY & SIMULATION ---
 
     public Map<GridPosition, PlacedMachine> getSnapshot(UUID id) {
         Map<GridPosition, PlacedMachine> g = playerGrids.get(id);
@@ -145,10 +166,8 @@ public class GridManager {
         return false;
     }
 
-    // --- SIMULATION & PLACEMENT ---
-
     public void loadPlotFromDB(UUID ownerId) {
-        if (ownerId == null || activeProfileCache.containsKey(ownerId)) return;
+        if (ownerId == null || activeProfileCache.containsKey(ownerId) && playerGrids.containsKey(ownerId)) return;
         ioExecutor.submit(() -> {
             loadPlotSynchronously(ownerId);
             PlayerProfile p = repository.loadPlayerProfile(ownerId);
@@ -157,18 +176,29 @@ public class GridManager {
     }
 
     private void loadPlotSynchronously(UUID ownerId) {
+        // Pulizia stato precedente
         playerGrids.remove(ownerId);
         playerResources.remove(ownerId);
         synchronized(tickingMachines) { tickingMachines.removeIf(m -> m.getOwnerId().equals(ownerId)); }
+
         try {
+            // 1. Caricamento / Generazione Risorse
             if (repository instanceof MariaDBAdapter db) {
                 Long pid = db.getPlotId(ownerId);
                 if (pid != null) {
                     Map<GridPosition, MatterColor> res = db.loadResources(pid);
-                    if (res.isEmpty()) generateDefaultResources(db, pid, res);
+
+                    // AUTO-FIX: Se il plot esiste ma non ha risorse (appena creato o resettato),
+                    // generiamo le risorse di default basate sulla config del server.
+                    if (res.isEmpty()) {
+                        generateDefaultResources(db, pid, res);
+                    }
+
                     playerResources.put(ownerId, res);
                 }
             }
+
+            // 2. Caricamento Macchine
             List<com.matterworks.core.model.PlotObject> dtos = repository.loadPlotMachines(ownerId);
             for (com.matterworks.core.model.PlotObject d : dtos) {
                 PlacedMachine m = MachineFactory.createFromModel(d, ownerId);
@@ -297,11 +327,13 @@ public class GridManager {
         while (c.containsKey(new GridPosition(x, y, z))) {
             x = new Random().nextInt(18) + 1; z = new Random().nextInt(18) + 1;
         }
-        db.saveResource(pid, x, z, t); c.put(new GridPosition(x,y,z), t);
+        db.saveResource(pid, x, z, t);
+        c.put(new GridPosition(x,y,z), t);
     }
 
     public Map<GridPosition, MatterColor> getTerrainResources(UUID id) { return playerResources.getOrDefault(id, Collections.emptyMap()); }
     public BlockRegistry getBlockRegistry() { return blockRegistry; }
+
     public Map<GridPosition, PlacedMachine> getAllMachinesSnapshot() {
         Map<GridPosition, PlacedMachine> all = new HashMap<>();
         for (var map : playerGrids.values()) all.putAll(map);
