@@ -24,13 +24,11 @@ public class MatterWorksGUI extends JFrame {
     private final FactoryPanel factoryPanel;
     private final JTabbedPane rightTabbedPane;
     private final JPanel glassPane;
-
     private JComboBox<Object> playerSelector;
     private JLabel lblMoney, lblTool, lblOrient, lblLayer, lblPlotId;
 
     private final Timer repaintTimer;
     private final Timer economyTimer;
-
     private UUID currentPlayerUuid;
     private List<PlayerProfile> cachedPlayerList = new ArrayList<>();
 
@@ -106,12 +104,12 @@ public class MatterWorksGUI extends JFrame {
 
     private JPanel createTopContainer() {
         JPanel container = new JPanel(new BorderLayout());
+
         JPanel header = new JPanel(new FlowLayout(FlowLayout.LEFT, 20, 10));
         header.setBackground(new Color(45, 45, 48));
 
         playerSelector = new JComboBox<>();
         refreshPlayerList(true);
-
         playerSelector.addActionListener(e -> {
             if (!glassPane.isVisible()) handlePlayerSwitch();
         });
@@ -128,6 +126,7 @@ public class MatterWorksGUI extends JFrame {
         leftTools.setOpaque(false);
         leftTools.add(createToolButton("⛏ Drill", "drill_mk1"));
         leftTools.add(createToolButton("⪠ Belt", "conveyor_belt"));
+        leftTools.add(createToolButton("🔀 Splitter", "splitter")); // NEW
         leftTools.add(createToolButton("🎨 Chromator", "chromator"));
         leftTools.add(createToolButton("🌪 Mixer", "color_mixer"));
         leftTools.add(createToolButton("🔮 Nexus", "nexus_core"));
@@ -167,6 +166,7 @@ public class MatterWorksGUI extends JFrame {
 
         toolbar.add(leftTools, BorderLayout.WEST);
         toolbar.add(rightSystem, BorderLayout.EAST);
+
         container.add(header, BorderLayout.NORTH);
         container.add(toolbar, BorderLayout.SOUTH);
         return container;
@@ -174,7 +174,6 @@ public class MatterWorksGUI extends JFrame {
 
     private void handleDeletePlayer() {
         if (currentPlayerUuid == null) return;
-
         int confirm = JOptionPane.showConfirmDialog(this,
                 "ELIMINARE DEFINITIVAMENTE QUESTO GIOCATORE?",
                 "Delete Player", JOptionPane.YES_NO_OPTION, JOptionPane.ERROR_MESSAGE);
@@ -227,7 +226,6 @@ public class MatterWorksGUI extends JFrame {
     }
 
     private void updateTabs() {
-        // Dispose old panels (Anti-Lag Fix)
         for (Component c : rightTabbedPane.getComponents()) {
             if (c instanceof InventoryDebugPanel) ((InventoryDebugPanel) c).dispose();
             if (c instanceof TechTreePanel) ((TechTreePanel) c).dispose();
@@ -244,7 +242,6 @@ public class MatterWorksGUI extends JFrame {
 
     private void handlePlayerSwitch() {
         Object sel = playerSelector.getSelectedItem();
-
         if (sel instanceof PlayerProfile p) {
             UUID newUuid = p.getPlayerId();
             if (newUuid.equals(this.currentPlayerUuid)) return;
@@ -253,9 +250,7 @@ public class MatterWorksGUI extends JFrame {
 
             new Thread(() -> {
                 try {
-                    // Assicura caricamento in memoria (no unload)
                     gridManager.loadPlotFromDB(newUuid);
-
                     SwingUtilities.invokeLater(() -> {
                         this.currentPlayerUuid = newUuid;
                         factoryPanel.setPlayerUuid(newUuid);
@@ -269,7 +264,6 @@ public class MatterWorksGUI extends JFrame {
                     setLoading(false);
                 }
             }).start();
-
         } else if ("--- ADD NEW PLAYER ---".equals(sel)) {
             String n = JOptionPane.showInputDialog("Name:");
             if (n != null && !n.isBlank()) {

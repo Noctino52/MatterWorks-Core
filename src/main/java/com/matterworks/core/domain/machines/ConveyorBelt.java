@@ -44,14 +44,12 @@ public class ConveyorBelt extends PlacedMachine {
 
     private void pushToNeighbor(long currentTick) {
         if (gridManager == null) return;
-
         Vector3Int dirVec = orientation.toVector();
         GridPosition targetPos = new GridPosition(
                 pos.x() + dirVec.x(),
                 pos.y() + dirVec.y(),
                 pos.z() + dirVec.z()
         );
-
         PlacedMachine neighbor = getNeighborAt(targetPos);
         boolean moved = false;
 
@@ -59,14 +57,18 @@ public class ConveyorBelt extends PlacedMachine {
             moved = nextBelt.insertItem(currentItem, currentTick);
         }
         else if (neighbor instanceof NexusMachine nexus) {
-            // FIX CRUCIALE: Passiamo 'this.pos' (la posizione del nastro)
-            // Il Nexus userà questa coordinata per verificare se il nastro è davanti a una porta valida.
             moved = nexus.insertItem(currentItem, this.pos);
         }
         else if (neighbor instanceof ProcessorMachine processor) {
-            // Anche i processori ora richiedono la posizione di origine
             moved = processor.insertItem(currentItem, this.pos);
         }
+        // --- FIX: Aggiunta supporto per lo Splitter ---
+        else if (neighbor instanceof Splitter splitter) {
+            // Lo Splitter richiede la posizione di origine (this.pos)
+            // per verificare se stiamo entrando dal retro.
+            moved = splitter.insertItem(currentItem, this.pos);
+        }
+        // ----------------------------------------------
 
         if (moved) {
             this.currentItem = null;

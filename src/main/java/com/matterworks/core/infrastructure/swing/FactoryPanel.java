@@ -7,6 +7,7 @@ import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.domain.machines.BlockRegistry;
 import com.matterworks.core.domain.machines.ConveyorBelt;
 import com.matterworks.core.domain.machines.PlacedMachine;
+import com.matterworks.core.domain.machines.Splitter; // Import necessario
 import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.managers.GridManager;
 
@@ -45,10 +46,12 @@ public class FactoryPanel extends JPanel {
             @Override
             public void mouseMoved(MouseEvent e) { updateMousePos(e.getX(), e.getY()); repaint(); }
         });
+
         this.addMouseListener(new MouseAdapter() {
             @Override
             public void mouseClicked(MouseEvent e) { requestFocusInWindow(); handleMouseClick(e); repaint(); }
         });
+
         this.addKeyListener(new KeyAdapter() {
             @Override
             public void keyPressed(KeyEvent e) { if (e.getKeyCode() == KeyEvent.VK_R) rotate(); }
@@ -60,7 +63,6 @@ public class FactoryPanel extends JPanel {
     public int getCurrentLayer() { return currentLayer; }
     public void setTool(String toolId) {
         this.currentTool = toolId;
-        // Non facciamo controlli qui: il fantasma deve apparire sempre
         repaint();
     }
     public String getCurrentToolName() { return currentTool != null ? currentTool : "None"; }
@@ -116,6 +118,7 @@ public class FactoryPanel extends JPanel {
             MatterColor type = entry.getValue();
             int x = OFFSET_X + (pos.x() * CELL_SIZE);
             int z = OFFSET_Y + (pos.z() * CELL_SIZE);
+
             g.setColor(getColorFromStr(type.name(), 100));
             g.fillRect(x, z, CELL_SIZE, CELL_SIZE);
             g.setColor(Color.WHITE);
@@ -144,21 +147,32 @@ public class FactoryPanel extends JPanel {
     private void drawSingleMachine(Graphics2D g, PlacedMachine m) {
         int x = OFFSET_X + (m.getPos().x() * CELL_SIZE);
         int z = OFFSET_Y + (m.getPos().z() * CELL_SIZE);
-        int w = m.getDimensions().x() * CELL_SIZE;
-        int h = m.getDimensions().z() * CELL_SIZE;
+
+        // Calcola dimensioni visive in base all'orientamento
+        // Se è EST/OVEST, scambia Width e Depth nel bounding box visivo
+        Vector3Int dims = m.getDimensions(); // getDimensions() gestisce già lo swap W/D nel dominio
+
+        int w = dims.x() * CELL_SIZE;
+        int h = dims.z() * CELL_SIZE;
 
         g.setColor(getColorForType(m.getTypeId()));
         g.fillRect(x + 2, z + 2, w - 4, h - 4);
 
+        // --- Logica porte specifica per tipo ---
         if (m.getTypeId().equals("nexus_core")) {
             drawNexusPorts(g, m, x, z, w, h);
         } else if (m.getTypeId().equals("chromator") || m.getTypeId().equals("color_mixer")) {
             drawProcessorPorts(g, m, x, z, w, h);
+        } else if (m.getTypeId().equals("splitter")) {
+            drawSplitterPorts(g, m, x, z, w, h);
         } else {
             drawStandardPorts(g, m, x, z, w, h);
         }
 
+        // Draw Items
         if (m instanceof ConveyorBelt belt) drawBeltItem(g, belt, x, z);
+        if (m instanceof Splitter splitter) drawSplitterItem(g, splitter, x, z); // NEW: Item nello splitter
+
         drawDirectionArrow(g, x, z, w, h, m.getOrientation());
     }
 
@@ -166,10 +180,22 @@ public class FactoryPanel extends JPanel {
         int p = 8;
         Point out = null, in = null;
         switch (m.getOrientation()) {
-            case NORTH -> { out = new Point(x + w/2 - p/2, z); in = new Point(x + w/2 - p/2, z + h - p); }
-            case SOUTH -> { out = new Point(x + w/2 - p/2, z + h - p); in = new Point(x + w/2 - p/2, z); }
-            case EAST  -> { out = new Point(x + w - p, z + h/2 - p/2); in = new Point(x, z + h/2 - p/2); }
-            case WEST  -> { out = new Point(x, z + h/2 - p/2); in = new Point(x + w - p, z + h/2 - p/2); }
+            case NORTH -> {
+                out = new Point(x + w/2 - p/2, z);
+                in = new Point(x + w/2 - p/2, z + h - p);
+            }
+            case SOUTH -> {
+                out = new Point(x + w/2 - p/2, z + h - p);
+                in = new Point(x + w/2 - p/2, z);
+            }
+            case EAST  -> {
+                out = new Point(x + w - p, z + h/2 - p/2);
+                in = new Point(x, z + h/2 - p/2);
+            }
+            case WEST  -> {
+                out = new Point(x, z + h/2 - p/2);
+                in = new Point(x + w - p, z + h/2 - p/2);
+            }
         }
         if (out != null) drawPort(g, out, Color.GREEN);
         if (in != null && !m.getTypeId().equals("drill_mk1")) drawPort(g, in, Color.BLUE);
@@ -178,39 +204,104 @@ public class FactoryPanel extends JPanel {
     private void drawNexusPorts(Graphics2D g, PlacedMachine m, int x, int z, int w, int h) {
         if (currentLayer - m.getPos().y() <= 1) {
             int p = 8;
-            drawPort(g, new Point(x + w/2 - p/2, z), Color.BLUE);
-            drawPort(g, new Point(x + w/2 - p/2, z + h - p), Color.BLUE);
-            drawPort(g, new Point(x, z + h/2 - p/2), Color.BLUE);
-            drawPort(g, new Point(x + w - p, z + h/2 - p/2), Color.BLUE);
+            // 4 Porte cardinali
+            drawPort(g, new Point(x + w/2 - p/2, z), Color.BLUE);         // Nord
+            drawPort(g, new Point(x + w/2 - p/2, z + h - p), Color.BLUE); // Sud
+            drawPort(g, new Point(x, z + h/2 - p/2), Color.BLUE);         // Ovest
+            drawPort(g, new Point(x + w - p, z + h/2 - p/2), Color.BLUE); // Est
         }
     }
 
     private void drawProcessorPorts(Graphics2D g, PlacedMachine m, int x, int z, int w, int h) {
-        int p = 8; int c = CELL_SIZE;
+        int p = 8;
+        int c = CELL_SIZE;
         boolean isChroma = m.getTypeId().equals("chromator");
-        Color colS0 = isChroma ? Color.CYAN : Color.BLUE; // S0: Material/Input1
-        Color colS1 = isChroma ? Color.MAGENTA : Color.BLUE; // S1: Color/Input2
+        // Colori per input
+        Color colS0 = isChroma ? Color.CYAN : Color.BLUE; // Input Main
+        Color colS1 = isChroma ? Color.MAGENTA : Color.BLUE; // Input Secondario
 
         switch (m.getOrientation()) {
             case NORTH -> {
-                drawPort(g, new Point(x + c/2 - p/2, z), Color.GREEN); // Out
-                drawPort(g, new Point(x + c/2 - p/2, z + h - p), colS0); // In 0
-                drawPort(g, new Point(x + (c*3)/2 - p/2, z + h - p), colS1); // In 1
+                // Out (Centro Top)
+                drawPort(g, new Point(x + c/2 - p/2, z), Color.GREEN);
+                // In 0 (Sinistra Bottom - relativa al blocco)
+                drawPort(g, new Point(x + c/2 - p/2, z + h - p), colS0);
+                // In 1 (Destra Bottom - secondo blocco)
+                drawPort(g, new Point(x + (c*3)/2 - p/2, z + h - p), colS1);
             }
             case SOUTH -> {
+                // Out (Centro Bottom)
                 drawPort(g, new Point(x + (c*3)/2 - p/2, z + h - p), Color.GREEN);
+                // In 0 (Sinistra Top relativa)
                 drawPort(g, new Point(x + (c*3)/2 - p/2, z), colS0);
+                // In 1 (Destra Top relativa)
                 drawPort(g, new Point(x + c/2 - p/2, z), colS1);
             }
             case EAST -> {
+                // Out (Destra Centro)
                 drawPort(g, new Point(x + w - p, z + c/2 - p/2), Color.GREEN);
+                // In 0 (Sinistra Top)
                 drawPort(g, new Point(x, z + c/2 - p/2), colS0);
+                // In 1 (Sinistra Bottom)
                 drawPort(g, new Point(x, z + (c*3)/2 - p/2), colS1);
             }
             case WEST -> {
+                // Out (Sinistra Centro)
                 drawPort(g, new Point(x, z + (c*3)/2 - p/2), Color.GREEN);
+                // In 0 (Destra Bottom)
                 drawPort(g, new Point(x + w - p, z + (c*3)/2 - p/2), colS0);
+                // In 1 (Destra Top)
                 drawPort(g, new Point(x + w - p, z + c/2 - p/2), colS1);
+            }
+        }
+    }
+
+    /**
+     * Disegna le porte dello Splitter.
+     * 1 Input (Retro dell'Anchor)
+     * 2 Output (Fronte dell'Anchor e Fronte dell'Estensione)
+     */
+    private void drawSplitterPorts(Graphics2D g, PlacedMachine m, int x, int z, int w, int h) {
+        int p = 8;
+        int c = CELL_SIZE; // Dimensione di un singolo blocco
+
+        switch (m.getOrientation()) {
+            case NORTH -> {
+                // Input: Sud dell'Anchor (x, z+1) -> Visivamente Bottom-Left
+                drawPort(g, new Point(x + c/2 - p/2, z + c - p), Color.BLUE);
+
+                // Out A: Nord dell'Anchor -> Top-Left
+                drawPort(g, new Point(x + c/2 - p/2, z), Color.GREEN);
+                // Out B: Nord dell'Estensione (x+1, z) -> Top-Right
+                drawPort(g, new Point(x + c + c/2 - p/2, z), Color.GREEN);
+            }
+            case SOUTH -> {
+                // Input: Nord dell'Anchor (x, z-1) -> Top-Right visivamente (per come è ruotato South)
+                // Anchor a SUD è il blocco più a destra visivamente
+                drawPort(g, new Point(x + c + c/2 - p/2, z), Color.BLUE);
+
+                // Out A: Sud dell'Anchor -> Bottom-Right
+                drawPort(g, new Point(x + c + c/2 - p/2, z + c - p), Color.GREEN);
+                // Out B: Sud dell'Estensione -> Bottom-Left
+                drawPort(g, new Point(x + c/2 - p/2, z + c - p), Color.GREEN);
+            }
+            case EAST -> {
+                // Input: Ovest dell'Anchor -> Left-Top
+                drawPort(g, new Point(x, z + c/2 - p/2), Color.BLUE);
+
+                // Out A: Est dell'Anchor -> Right-Top
+                drawPort(g, new Point(x + c - p, z + c/2 - p/2), Color.GREEN);
+                // Out B: Est dell'Estensione -> Right-Bottom
+                drawPort(g, new Point(x + c - p, z + c + c/2 - p/2), Color.GREEN);
+            }
+            case WEST -> {
+                // Input: Est dell'Anchor -> Right-Bottom
+                drawPort(g, new Point(x + c - p, z + c + c/2 - p/2), Color.BLUE);
+
+                // Out A: Ovest dell'Anchor -> Left-Bottom
+                drawPort(g, new Point(x, z + c + c/2 - p/2), Color.GREEN);
+                // Out B: Ovest dell'Estensione -> Left-Top
+                drawPort(g, new Point(x, z + c/2 - p/2), Color.GREEN);
             }
         }
     }
@@ -225,37 +316,70 @@ public class FactoryPanel extends JPanel {
     private void drawBeltItem(Graphics2D g, ConveyorBelt belt, int x, int z) {
         JsonObject meta = belt.serialize();
         if (meta.has("currentItem")) {
-            JsonObject item = meta.getAsJsonObject("currentItem");
-            String colorStr = item.has("color") ? item.get("color").getAsString() : "RAW";
-            String shapeStr = (item.has("shape") && !item.get("shape").isJsonNull()) ? item.get("shape").getAsString() : "LIQUID";
-            g.setColor(getColorFromStr(colorStr, 255));
-            int size = 18; int pad = (CELL_SIZE - size) / 2;
-            if ("CUBE".equals(shapeStr)) g.fillRect(x + pad, z + pad, size, size);
-            else g.fillOval(x + pad, z + pad, size, size);
-            g.setColor(Color.WHITE); g.drawRect(x + pad, z + pad, size, size);
+            drawItemShape(g, meta.getAsJsonObject("currentItem"), x, z);
         }
+    }
+
+    private void drawSplitterItem(Graphics2D g, Splitter splitter, int x, int z) {
+        JsonObject meta = splitter.serialize();
+        // Lo Splitter ora usa "items" array invece di "currentItem", prendiamo il primo slot
+        if (meta.has("items") && meta.getAsJsonArray("items").size() > 0) {
+            var item = meta.getAsJsonArray("items").get(0);
+            if (!item.isJsonNull() && item.isJsonObject()) {
+                // Disegniamo l'item al centro dell'Anchor
+                drawItemShape(g, item.getAsJsonObject(), x, z);
+            }
+        }
+    }
+
+    private void drawItemShape(Graphics2D g, JsonObject item, int x, int z) {
+        String colorStr = item.has("color") ? item.get("color").getAsString() : "RAW";
+        String shapeStr = (item.has("shape") && !item.get("shape").isJsonNull())
+                ? item.get("shape").getAsString() : "LIQUID";
+
+        g.setColor(getColorFromStr(colorStr, 255));
+        int size = 18;
+        int pad = (CELL_SIZE - size) / 2;
+
+        if ("CUBE".equals(shapeStr)) {
+            g.fillRect(x + pad, z + pad, size, size);
+        } else {
+            g.fillOval(x + pad, z + pad, size, size);
+        }
+
+        g.setColor(Color.WHITE);
+        g.drawRect(x + pad, z + pad, size, size);
     }
 
     private void drawGhost(Graphics2D g) {
         if (mouseHoverPos == null || currentTool == null) return;
         Vector3Int dim = registry.getDimensions(currentTool);
+
+        // Calcolo dimensioni per ghost
+        int dimX = dim.x();
+        int dimZ = dim.z();
         if (currentOrientation == Direction.EAST || currentOrientation == Direction.WEST) {
-            dim = new Vector3Int(dim.z(), dim.y(), dim.x());
+            dimX = dim.z();
+            dimZ = dim.x();
         }
+
         g.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.4f));
         int x = OFFSET_X + (mouseHoverPos.x() * CELL_SIZE);
         int z = OFFSET_Y + (mouseHoverPos.z() * CELL_SIZE);
+
         g.setColor(getColorForType(currentTool));
-        g.fillRect(x, z, dim.x() * CELL_SIZE, dim.z() * CELL_SIZE);
+        g.fillRect(x, z, dimX * CELL_SIZE, dimZ * CELL_SIZE);
         g.setColor(Color.WHITE);
-        g.drawRect(x, z, dim.x() * CELL_SIZE, dim.z() * CELL_SIZE);
-        drawDirectionArrow(g, x, z, dim.x() * CELL_SIZE, dim.z() * CELL_SIZE, currentOrientation);
+        g.drawRect(x, z, dimX * CELL_SIZE, dimZ * CELL_SIZE);
+
+        drawDirectionArrow(g, x, z, dimX * CELL_SIZE, dimZ * CELL_SIZE, currentOrientation);
         g.setComposite(AlphaComposite.SrcOver);
     }
 
     private void drawDirectionArrow(Graphics2D g, int x, int y, int w, int h, Direction dir) {
         g.setColor(Color.YELLOW);
-        int cx = x + w / 2; int cy = y + h / 2;
+        int cx = x + w / 2;
+        int cy = y + h / 2;
         switch (dir) {
             case NORTH -> g.fillOval(cx - 3, y + 2, 6, 6);
             case SOUTH -> g.fillOval(cx - 3, y + h - 8, 6, 6);
@@ -282,6 +406,7 @@ public class FactoryPanel extends JPanel {
             case "nexus_core" -> new Color(150, 0, 150);
             case "chromator" -> new Color(255, 140, 0);
             case "color_mixer" -> new Color(0, 200, 200);
+            case "splitter" -> new Color(100, 149, 237); // Cornflower Blue
             default -> Color.RED;
         };
     }

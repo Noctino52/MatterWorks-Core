@@ -22,7 +22,6 @@ public class BlockRegistry {
     public void loadFromDatabase() {
         System.out.println("📋 Caricamento definizioni blocchi dal DB...");
         Map<String, MachineStats> dbDefs = definitionDAO.loadAllDefinitions();
-
         statsCache.putAll(dbDefs);
 
         dbDefs.forEach((id, stats) ->
@@ -39,8 +38,14 @@ public class BlockRegistry {
         if (statsCache.containsKey(blockId)) {
             return statsCache.get(blockId).dimensions();
         }
-        // Fallback per blocchi non definiti nel DB ma presenti nel mondo
-        return Vector3Int.one();
+
+        // Hardcoded Fallback per stabilità in caso di DB mancante
+        return switch (blockId) {
+            case "nexus_core" -> new Vector3Int(3, 3, 3);
+            case "chromator", "color_mixer", "splitter" -> new Vector3Int(2, 1, 1);
+            case "drill_mk1" -> new Vector3Int(1, 2, 1);
+            default -> Vector3Int.one();
+        };
     }
 
     public double getPrice(String blockId) {

@@ -18,9 +18,8 @@ public class MachineFactory {
                     pos,
                     "drill_mk1",
                     model.getMetaData(),
-                    1
+                    1 // Default tier
             );
-
             case "conveyor_belt" -> new ConveyorBelt(
                     model.getId(),
                     ownerId,
@@ -28,8 +27,6 @@ public class MachineFactory {
                     "conveyor_belt",
                     model.getMetaData()
             );
-
-            // NEW: Creazione Nexus
             case "nexus_core" -> new NexusMachine(
                     model.getId(),
                     ownerId,
@@ -44,8 +41,21 @@ public class MachineFactory {
                     "chromator",
                     model.getMetaData()
             );
-            case "color_mixer" -> new ColorMixer(model.getId(), ownerId, pos, "color_mixer", model.getMetaData());
-
+            case "color_mixer" -> new ColorMixer(
+                    model.getId(),
+                    ownerId,
+                    pos,
+                    "color_mixer",
+                    model.getMetaData()
+            );
+            // --- NEW SPLITTER IMPLEMENTATION ---
+            case "splitter" -> new Splitter(
+                    model.getId(),
+                    ownerId,
+                    pos,
+                    "splitter",
+                    model.getMetaData()
+            );
 
             default -> {
                 System.err.println("Unknown machine type: " + model.getTypeId());
