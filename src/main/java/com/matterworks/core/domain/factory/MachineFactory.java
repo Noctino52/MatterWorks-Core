@@ -1,71 +1,38 @@
 package com.matterworks.core.domain.factory;
 
+import com.google.gson.JsonObject;
 import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.domain.machines.*;
-import com.matterworks.core.model.PlotObject;
-
 import java.util.UUID;
 
 public class MachineFactory {
 
-    public static PlacedMachine createFromModel(PlotObject model, UUID ownerId) {
+    public static PlacedMachine createFromModel(com.matterworks.core.model.PlotObject model, UUID ownerId) {
         GridPosition pos = new GridPosition(model.getX(), model.getY(), model.getZ());
+        JsonObject metadata = model.getMetaData();
+        if (metadata == null) metadata = new JsonObject();
+        Long dbId = model.getId();
+        String typeId = model.getTypeId();
 
-        return switch (model.getTypeId()) {
-            case "drill_mk1" -> new DrillMachine(
-                    model.getId(),
-                    ownerId,
-                    pos,
-                    "drill_mk1",
-                    model.getMetaData(),
-                    1 // Default Tier
-            );
-            case "conveyor_belt" -> new ConveyorBelt(
-                    model.getId(),
-                    ownerId,
-                    pos,
-                    "conveyor_belt",
-                    model.getMetaData()
-            );
-            case "nexus_core" -> new NexusMachine(
-                    model.getId(),
-                    ownerId,
-                    pos,
-                    "nexus_core",
-                    model.getMetaData()
-            );
-            case "chromator" -> new Chromator(
-                    model.getId(),
-                    ownerId,
-                    pos,
-                    "chromator",
-                    model.getMetaData()
-            );
-            case "color_mixer" -> new ColorMixer(
-                    model.getId(),
-                    ownerId,
-                    pos,
-                    "color_mixer",
-                    model.getMetaData()
-            );
-            case "splitter" -> new Splitter(
-                    model.getId(),
-                    ownerId,
-                    pos,
-                    "splitter",
-                    model.getMetaData()
-            );
-            // --- NEW: MERGER ---
-            case "merger" -> new Merger(
-                    model.getId(),
-                    ownerId,
-                    pos,
-                    "merger",
-                    model.getMetaData()
-            );
+        return switch (typeId) {
+            // FIX: Aggiunto parametro '1' (Tier) al costruttore DrillMachine
+            case "drill_mk1" -> new DrillMachine(dbId, ownerId, pos, typeId, metadata, 1);
+
+            case "conveyor_belt" -> new ConveyorBelt(dbId, ownerId, pos, typeId, metadata);
+            case "nexus_core" -> new NexusMachine(dbId, ownerId, pos, typeId, metadata);
+            case "chromator" -> new Chromator(dbId, ownerId, pos, typeId, metadata);
+            case "color_mixer" -> new ColorMixer(dbId, ownerId, pos, typeId, metadata);
+            case "splitter" -> new Splitter(dbId, ownerId, pos, typeId, metadata);
+            case "merger" -> new Merger(dbId, ownerId, pos, typeId, metadata);
+
+            // --- NUOVI MACCHINARI ---
+            case "lift" -> new LiftMachine(dbId, ownerId, pos, typeId, metadata);
+            case "dropper" -> new DropperMachine(dbId, ownerId, pos, typeId, metadata);
 
             default -> {
-                System.err.println("Unknown machine type: " + model.getTypeId());
+                System.err.println("MachineFactory: Unknown machine type '" + typeId + "'.");
+                // FIX: Restituisce null invece di StructuralBlock per evitare ClassCastException
+                // Il GridManager dovrà gestire il null (lo fa già nel metodo loadPlotSynchronously: "if (m != null)")
                 yield null;
             }
         };

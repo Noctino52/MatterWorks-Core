@@ -6,7 +6,7 @@ import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.domain.machines.BlockRegistry;
 import com.matterworks.core.domain.machines.ConveyorBelt;
-import com.matterworks.core.domain.machines.Merger; // Import necessario
+import com.matterworks.core.domain.machines.Merger;
 import com.matterworks.core.domain.machines.PlacedMachine;
 import com.matterworks.core.domain.machines.Splitter;
 import com.matterworks.core.domain.matter.MatterColor;
@@ -27,7 +27,6 @@ public class FactoryPanel extends JPanel {
     private final int CELL_SIZE = 40;
     private final int OFFSET_X = 50;
     private final int OFFSET_Y = 50;
-
     private String currentTool = "drill_mk1";
     private Direction currentOrientation = Direction.NORTH;
     private int currentLayer = 0;
@@ -139,6 +138,7 @@ public class FactoryPanel extends JPanel {
     private void drawMachines(Graphics2D g) {
         Map<GridPosition, PlacedMachine> machines = gridManager.getSnapshot(playerUuid);
         for (PlacedMachine m : machines.values()) {
+            // Controlla se la macchina interseca il layer corrente
             if (currentLayer >= m.getPos().y() && currentLayer < m.getPos().y() + m.getDimensions().y()) {
                 drawSingleMachine(g, m);
             }
@@ -150,8 +150,17 @@ public class FactoryPanel extends JPanel {
         int z = OFFSET_Y + (m.getPos().z() * CELL_SIZE);
 
         Vector3Int dims = m.getDimensions();
+
+        // Calcola dimensioni 2D (sul piano XZ)
+        // Nota: Lift e Dropper sono 1x2x1, quindi su pianta sono sempre 1x1
         int w = dims.x() * CELL_SIZE;
         int h = dims.z() * CELL_SIZE;
+
+        // Correzione rotazione per oggetti non quadrati (non si applica a Lift/Dropper che sono 1x1 di base)
+        if (m.getOrientation() == Direction.EAST || m.getOrientation() == Direction.WEST) {
+            w = dims.z() * CELL_SIZE;
+            h = dims.x() * CELL_SIZE;
+        }
 
         g.setColor(getColorForType(m.getTypeId()));
         g.fillRect(x + 2, z + 2, w - 4, h - 4);
@@ -164,8 +173,10 @@ public class FactoryPanel extends JPanel {
         } else if (m.getTypeId().equals("splitter")) {
             drawSplitterPorts(g, m, x, z, w, h);
         } else if (m.getTypeId().equals("merger")) {
-            // --- NEW: Rendering porte Merger ---
             drawMergerPorts(g, m, x, z, w, h);
+        } else if (m.getTypeId().equals("lift") || m.getTypeId().equals("dropper")) {
+            // --- NEW: Rendering Verticale ---
+            drawVerticalPorts(g, m, x, z, w, h);
         } else {
             drawStandardPorts(g, m, x, z, w, h);
         }
@@ -173,47 +184,98 @@ public class FactoryPanel extends JPanel {
         // Draw Items
         if (m instanceof ConveyorBelt belt) drawBeltItem(g, belt, x, z);
         if (m instanceof Splitter splitter) drawSplitterItem(g, splitter, x, z);
-        if (m instanceof Merger merger) drawMergerItem(g, merger, x, z); // --- NEW: Render items dentro il Merger
+        if (m instanceof Merger merger) drawMergerItem(g, merger, x, z);
 
         drawDirectionArrow(g, x, z, w, h, m.getOrientation());
     }
 
-    // --- NEW: METODO DISEGNO PORTE MERGER ---
+    // --- NEW: LOGICA PORTE VERTICALI ---
+    private void drawVerticalPorts(Graphics2D g, PlacedMachine m, int x, int z, int w, int h) {
+        int p = 8;
+        int c = CELL_SIZE;
+        int relativeY = currentLayer - m.getPos().y(); // 0 = base, 1 = alto
+        boolean isLift = m.getTypeId().equals("lift");
+
+        // Calcola punti (uguali per entrambi i layer, cambia solo il colore)
+        Point front = null; // Fronte (Uscita standard)
+        Point back = null;  // Retro (Ingresso standard)
+
+        switch (m.getOrientation()) {
+            case NORTH -> {
+                front = new Point(x + c/2 - p/2, z);
+                back = new Point(x + c/2 - p/2, z + c - p);
+            }
+            case SOUTH -> {
+                front = new Point(x + c/2 - p/2, z + c - p);
+                back = new Point(x + c/2 - p/2, z);
+            }
+            case EAST -> {
+                front = new Point(x + c - p, z + c/2 - p/2);
+                back = new Point(x, z + c/2 - p/2);
+            }
+            case WEST -> {
+                front = new Point(x, z + c/2 - p/2);
+                back = new Point(x + c - p, z + c/2 - p/2);
+            }
+        }
+
+        // LIFT Logic
+        if (isLift) {
+            if (relativeY == 0) {
+                // Base: Input dal retro (BLUE), Simbolo UP
+                if (back != null) drawPort(g, back, Color.BLUE);
+                drawSymbol(g, x, z, "^", Color.WHITE);
+            } else {
+                // Alto: Output sul fronte (GREEN)
+                if (front != null) drawPort(g, front, Color.GREEN);
+                drawSymbol(g, x, z, "OUT", Color.YELLOW);
+            }
+        }
+        // DROPPER Logic
+        else {
+            if (relativeY == 1) {
+                // Alto: Input dal retro (BLUE), Simbolo DOWN
+                if (back != null) drawPort(g, back, Color.BLUE);
+                drawSymbol(g, x, z, "v", Color.WHITE);
+            } else {
+                // Base: Output sul fronte (GREEN)
+                if (front != null) drawPort(g, front, Color.GREEN);
+                drawSymbol(g, x, z, "OUT", Color.YELLOW);
+            }
+        }
+    }
+
+    private void drawSymbol(Graphics2D g, int x, int y, String sym, Color c) {
+        g.setColor(c);
+        g.setFont(new Font("Monospaced", Font.BOLD, 20));
+        g.drawString(sym, x + 12, y + 25);
+    }
+
+    // --- Fine NEW Vertical Logic ---
+
     private void drawMergerPorts(Graphics2D g, PlacedMachine m, int x, int z, int w, int h) {
         int p = 8;
         int c = CELL_SIZE;
 
         switch (m.getOrientation()) {
             case NORTH -> {
-                // Out: Nord (Top Left)
                 drawPort(g, new Point(x + c/2 - p/2, z), Color.GREEN);
-                // In A: Sud Anchor (Bottom Left)
                 drawPort(g, new Point(x + c/2 - p/2, z + c - p), Color.BLUE);
-                // In B: Sud Ext (Bottom Right)
                 drawPort(g, new Point(x + c + c/2 - p/2, z + c - p), Color.BLUE);
             }
             case SOUTH -> {
-                // Out: Sud (Bottom Right)
                 drawPort(g, new Point(x + c + c/2 - p/2, z + c - p), Color.GREEN);
-                // In A: Nord Anchor (Top Right)
                 drawPort(g, new Point(x + c + c/2 - p/2, z), Color.BLUE);
-                // In B: Nord Ext (Top Left)
                 drawPort(g, new Point(x + c/2 - p/2, z), Color.BLUE);
             }
             case EAST -> {
-                // Out: Est (Right Top)
                 drawPort(g, new Point(x + c - p, z + c/2 - p/2), Color.GREEN);
-                // In A: Ovest Anchor (Left Top)
                 drawPort(g, new Point(x, z + c/2 - p/2), Color.BLUE);
-                // In B: Ovest Ext (Left Bottom)
                 drawPort(g, new Point(x, z + c + c/2 - p/2), Color.BLUE);
             }
             case WEST -> {
-                // Out: Ovest (Left Bottom)
                 drawPort(g, new Point(x, z + c + c/2 - p/2), Color.GREEN);
-                // In A: Est Anchor (Right Bottom)
                 drawPort(g, new Point(x + c - p, z + c + c/2 - p/2), Color.BLUE);
-                // In B: Est Ext (Right Top)
                 drawPort(g, new Point(x + c - p, z + c/2 - p/2), Color.BLUE);
             }
         }
@@ -319,8 +381,6 @@ public class FactoryPanel extends JPanel {
         g.drawRect(pt.x, pt.y, 8, 8);
     }
 
-    // --- Draw Items Helpers ---
-
     private void drawBeltItem(Graphics2D g, ConveyorBelt belt, int x, int z) {
         JsonObject meta = belt.serialize();
         if (meta.has("currentItem")) {
@@ -338,10 +398,8 @@ public class FactoryPanel extends JPanel {
         }
     }
 
-    // --- NEW: Draw Merger Item ---
     private void drawMergerItem(Graphics2D g, Merger merger, int x, int z) {
         JsonObject meta = merger.serialize();
-        // Il Merger usa lo stesso formato di inventario "items" array dello Splitter
         if (meta.has("items") && meta.getAsJsonArray("items").size() > 0) {
             var item = meta.getAsJsonArray("items").get(0);
             if (!item.isJsonNull() && item.isJsonObject()) {
@@ -423,8 +481,12 @@ public class FactoryPanel extends JPanel {
             case "nexus_core" -> new Color(150, 0, 150);
             case "chromator" -> new Color(255, 140, 0);
             case "color_mixer" -> new Color(0, 200, 200);
-            case "splitter" -> new Color(100, 149, 237); // Cornflower Blue
-            case "merger" -> new Color(70, 130, 180);    // Steel Blue per Merger
+            case "splitter" -> new Color(100, 149, 237);
+            case "merger" -> new Color(70, 130, 180);
+            // --- NEW COLORS ---
+            case "lift" -> new Color(0, 139, 139);      // Dark Cyan
+            case "dropper" -> new Color(139, 0, 139);   // Dark Magenta
+
             default -> Color.RED;
         };
     }

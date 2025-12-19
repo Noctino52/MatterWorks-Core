@@ -16,12 +16,15 @@ public class InventoryDebugPanel extends JPanel {
     private final UUID playerUuid;
     private final GridManager gridManager;
 
-    // --- UPDATE: Aggiunto "merger" alla lista ---
     private final String[] itemIds = {
             "drill_mk1",
             "conveyor_belt",
             "splitter",
-            "merger",        // <--- NEW: Merger aggiunto qui
+            "merger",
+            // --- NEW ITEMS ---
+            "lift",
+            "dropper",
+            // ----------------
             "nexus_core",
             "chromator",
             "color_mixer"

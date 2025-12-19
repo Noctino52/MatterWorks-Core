@@ -128,9 +128,13 @@ public class MatterWorksGUI extends JFrame {
         leftTools.add(createToolButton("⛏ Drill", "drill_mk1"));
         leftTools.add(createToolButton("⪠ Belt", "conveyor_belt"));
         leftTools.add(createToolButton("🔀 Splitter", "splitter"));
-        leftTools.add(createToolButton("⭀ Merger", "merger")); // <--- NEW: Pulsante Merger Aggiunto
+        leftTools.add(createToolButton("⭐ Merger", "merger"));
+        // --- NEW BUTTONS ---
+        leftTools.add(createToolButton("⬆ Lift", "lift"));
+        leftTools.add(createToolButton("⬇ Drop", "dropper"));
+        // -------------------
         leftTools.add(createToolButton("🎨 Chromator", "chromator"));
-        leftTools.add(createToolButton("🌪 Mixer", "color_mixer"));
+        leftTools.add(createToolButton("🌀 Mixer", "color_mixer"));
         leftTools.add(createToolButton("🔮 Nexus", "nexus_core"));
 
         leftTools.add(new JSeparator(SwingConstants.VERTICAL) {{ setPreferredSize(new Dimension(5, 25)); }});
@@ -184,7 +188,6 @@ public class MatterWorksGUI extends JFrame {
         if (confirm == JOptionPane.YES_OPTION) {
             setLoading(true);
             UUID toDelete = currentPlayerUuid;
-
             new Thread(() -> {
                 gridManager.deletePlayer(toDelete);
 
