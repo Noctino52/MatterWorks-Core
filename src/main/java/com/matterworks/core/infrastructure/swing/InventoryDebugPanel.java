@@ -3,6 +3,7 @@ package com.matterworks.core.infrastructure.swing;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.managers.GridManager;
 import com.matterworks.core.ports.IRepository;
+
 import javax.swing.*;
 import java.awt.*;
 import java.util.HashMap;
@@ -14,7 +15,17 @@ public class InventoryDebugPanel extends JPanel {
     private final IRepository repository;
     private final UUID playerUuid;
     private final GridManager gridManager;
-    private final String[] itemIds = {"drill_mk1", "conveyor_belt", "nexus_core", "chromator", "color_mixer"};
+
+    // --- UPDATE: Aggiunto "splitter" alla lista degli item gestiti ---
+    private final String[] itemIds = {
+            "drill_mk1",
+            "conveyor_belt",
+            "splitter",      // <--- NEW
+            "nexus_core",
+            "chromator",
+            "color_mixer"
+    };
+
     private final Map<String, JLabel> labelMap = new HashMap<>();
 
     // Timer salvato in campo per poterlo fermare
@@ -59,9 +70,16 @@ public class InventoryDebugPanel extends JPanel {
         row.setOpaque(false);
         row.setMaximumSize(new Dimension(310, 40));
 
+        // Recupera info prezzi per il tooltip o label (opzionale)
+        double price = gridManager.getBlockRegistry().getPrice(itemId);
+
         JLabel lblInfo = new JLabel(itemId + ": 0");
         lblInfo.setForeground(Color.WHITE);
         lblInfo.setFont(new Font("Monospaced", Font.BOLD, 12));
+        if (isPlayer) {
+            lblInfo.setToolTipText("Price: $" + price);
+        }
+
         labelMap.put(itemId, lblInfo);
 
         JPanel buttons = new JPanel(new GridLayout(1, 2, 5, 0));
@@ -69,20 +87,32 @@ public class InventoryDebugPanel extends JPanel {
         buttons.setPreferredSize(new Dimension(80, 28));
         buttons.setMinimumSize(new Dimension(80, 28));
 
+        // Bottone ACQUISTA (+)
         JButton btnAdd = createTinyButton("+", () -> {
-            if (isPlayer) gridManager.buyItem(playerUuid, itemId, 1);
-            else repository.modifyInventoryItem(playerUuid, itemId, 1);
+            if (isPlayer) {
+                // Tenta l'acquisto tramite GridManager (controlla soldi e tech)
+                boolean success = gridManager.buyItem(playerUuid, itemId, 1);
+                if (!success) {
+                    // Feedback visivo semplice (beep o console)
+                    System.out.println("Purchase failed: " + itemId);
+                }
+            } else {
+                // Admin mode: Spawn diretto
+                repository.modifyInventoryItem(playerUuid, itemId, 1);
+            }
         });
         btnAdd.setBackground(new Color(50, 110, 50));
+        if (isPlayer) btnAdd.setToolTipText("Buy for $" + price);
 
+        // Bottone VENDI/RIMUOVI (-)
         JButton btnRem = createTinyButton("-", () -> {
             if (isPlayer) {
                 if (repository.getInventoryItemCount(playerUuid, itemId) > 0) {
                     double refund = gridManager.getBlockRegistry().getPrice(itemId) * 0.5;
                     PlayerProfile p = gridManager.getCachedProfile(playerUuid);
                     if (p != null) {
-                        p.modifyMoney(refund);
-                        repository.savePlayerProfile(p);
+                        // Rimborso del 50%
+                        gridManager.addMoney(playerUuid, refund, "ITEM_SELL", itemId);
                         repository.modifyInventoryItem(playerUuid, itemId, -1);
                     }
                 }

@@ -18,7 +18,7 @@ public class MachineFactory {
                     pos,
                     "drill_mk1",
                     model.getMetaData(),
-                    1 // Default tier
+                    1 // Default Tier
             );
             case "conveyor_belt" -> new ConveyorBelt(
                     model.getId(),
@@ -48,7 +48,7 @@ public class MachineFactory {
                     "color_mixer",
                     model.getMetaData()
             );
-            // --- NEW SPLITTER IMPLEMENTATION ---
+            // --- NEW: SPLITTER ---
             case "splitter" -> new Splitter(
                     model.getId(),
                     ownerId,

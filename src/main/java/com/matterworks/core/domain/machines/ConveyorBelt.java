@@ -62,13 +62,11 @@ public class ConveyorBelt extends PlacedMachine {
         else if (neighbor instanceof ProcessorMachine processor) {
             moved = processor.insertItem(currentItem, this.pos);
         }
-        // --- FIX: Aggiunta supporto per lo Splitter ---
+        // --- SUPPORT SPLITTER INPUT ---
         else if (neighbor instanceof Splitter splitter) {
-            // Lo Splitter richiede la posizione di origine (this.pos)
-            // per verificare se stiamo entrando dal retro.
+            // Passiamo this.pos per permettere allo splitter di validare l'ingresso (deve essere dal retro)
             moved = splitter.insertItem(currentItem, this.pos);
         }
-        // ----------------------------------------------
 
         if (moved) {
             this.currentItem = null;
