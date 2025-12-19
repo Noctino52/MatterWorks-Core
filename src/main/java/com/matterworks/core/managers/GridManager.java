@@ -13,8 +13,6 @@ import com.matterworks.core.infrastructure.ServerConfig;
 import com.matterworks.core.model.PlotObject;
 import com.matterworks.core.ports.IRepository;
 import com.matterworks.core.ports.IWorldAccess;
-import com.matterworks.core.database.dao.TechDefinitionDAO;
-import com.matterworks.core.database.dao.PlotDAO;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -55,12 +53,9 @@ public class GridManager {
     public void addMoney(UUID playerId, double amount, String actionType, String itemId) {
         PlayerProfile p = getCachedProfile(playerId);
         if (p == null) return;
-
         p.modifyMoney(amount);
         repository.savePlayerProfile(p);
         repository.logTransaction(p, actionType, "MONEY", amount, itemId);
-
-        // Sincronizza cache per la GUI
         activeProfileCache.put(playerId, p);
     }
 
@@ -69,10 +64,9 @@ public class GridManager {
         return activeProfileCache.computeIfAbsent(uuid, repository::loadPlayerProfile);
     }
 
-    // --- GUI ACTIONS & PLAYER LIFECYCLE ---
+    // --- PLAYER LIFECYCLE ---
 
     public PlayerProfile createNewPlayer(String username) {
-        // Ricarica la config per essere sicuri di avere i valori aggiornati (es. numero vene)
         this.serverConfig = repository.loadServerConfig();
 
         UUID newUuid = UUID.randomUUID();
@@ -81,32 +75,26 @@ public class GridManager {
         p.setMoney(serverConfig.startMoney());
         p.setRank(PlayerProfile.PlayerRank.PLAYER);
 
-        // 1. Salva il Profilo
         repository.savePlayerProfile(p);
         activeProfileCache.put(newUuid, p);
 
-        // 2. Inventario Iniziale
+        // Starter Inventory
         repository.modifyInventoryItem(newUuid, "drill_mk1", 1);
         repository.modifyInventoryItem(newUuid, "nexus_core", 1);
         repository.modifyInventoryItem(newUuid, "conveyor_belt", 10);
 
-        // 3. Creazione Plot e Generazione Vene
-        if (repository instanceof MariaDBAdapter adapter) {
-            PlotDAO plotDAO = new PlotDAO(adapter.getDbManager());
-            Long plotId = plotDAO.createPlot(newUuid, 1, 0, 0); // Coordinate World fittizie per ora
-
+        if (repository instanceof MariaDBAdapter db) {
+            // FIX: Ora usa db.createPlot che abbiamo aggiunto in MariaDBAdapter
+            Long plotId = db.createPlot(newUuid, 1, 0, 0);
             if (plotId != null) {
-                // FIX: Invece di chiamare generateDefaultResources manualmente con una mappa dummy,
-                // invochiamo loadPlotSynchronously.
-                // Questo metodo controlla se le risorse sono vuote (e lo sono, il plot è nuovo)
-                // e chiama internamente generateDefaultResources, salvandole su DB e popolando la cache corretta.
-                System.out.println("🌱 Generazione mondo iniziale per " + username + "...");
+                // Carichiamo subito il plot, che genererà le risorse se mancanti
                 loadPlotSynchronously(newUuid);
             }
         }
         return p;
     }
 
+    // --- FIX: Metodo deletePlayer (Richiesto da MatterWorksGUI) ---
     public void deletePlayer(UUID ownerId) {
         synchronized (tickingMachines) {
             saveAndUnloadSpecific(ownerId);
@@ -114,20 +102,15 @@ public class GridManager {
         }
         repository.deletePlayerFull(ownerId);
     }
+    // -------------------------------------------------------------
 
     public void resetUserPlot(UUID ownerId) {
         ioExecutor.submit(() -> {
             synchronized (tickingMachines) {
                 PlayerProfile p = getCachedProfile(ownerId);
-                // Salva (opzionale) e scarica dalla memoria
                 saveAndUnloadSpecific(ownerId);
-
-                // Cancella dati fisici dal DB
-                if (repository instanceof MariaDBAdapter db) db.clearPlotData(ownerId);
-
-                // Ricarica -> Questo triggera la rigenerazione delle risorse perché la mappa sarà vuota
-                loadPlotSynchronously(ownerId);
-
+                repository.clearPlotData(ownerId);
+                loadPlotSynchronously(ownerId); // Trigger rigenerazione risorse
                 if (p != null) repository.logTransaction(p, "PLOT_RESET", "NONE", 0, "user_reset");
             }
         });
@@ -135,10 +118,12 @@ public class GridManager {
 
     // --- GAMEPLAY & SIMULATION ---
 
+    // --- FIX: Metodo getSnapshot (Richiesto da FactoryPanel) ---
     public Map<GridPosition, PlacedMachine> getSnapshot(UUID id) {
         Map<GridPosition, PlacedMachine> g = playerGrids.get(id);
         return g != null ? new HashMap<>(g) : Collections.emptyMap();
     }
+    // ------------------------------------------------------------
 
     public boolean buyItem(UUID playerId, String itemId, int amount) {
         PlayerProfile p = getCachedProfile(playerId);
@@ -176,29 +161,22 @@ public class GridManager {
     }
 
     private void loadPlotSynchronously(UUID ownerId) {
-        // Pulizia stato precedente
         playerGrids.remove(ownerId);
         playerResources.remove(ownerId);
         synchronized(tickingMachines) { tickingMachines.removeIf(m -> m.getOwnerId().equals(ownerId)); }
 
         try {
-            // 1. Caricamento / Generazione Risorse
             if (repository instanceof MariaDBAdapter db) {
                 Long pid = db.getPlotId(ownerId);
                 if (pid != null) {
                     Map<GridPosition, MatterColor> res = db.loadResources(pid);
-
-                    // AUTO-FIX: Se il plot esiste ma non ha risorse (appena creato o resettato),
-                    // generiamo le risorse di default basate sulla config del server.
                     if (res.isEmpty()) {
                         generateDefaultResources(db, pid, res);
                     }
-
                     playerResources.put(ownerId, res);
                 }
             }
 
-            // 2. Caricamento Macchine
             List<com.matterworks.core.model.PlotObject> dtos = repository.loadPlotMachines(ownerId);
             for (com.matterworks.core.model.PlotObject d : dtos) {
                 PlacedMachine m = MachineFactory.createFromModel(d, ownerId);
@@ -212,6 +190,21 @@ public class GridManager {
             for (PlacedMachine m : tickingMachines) m.tick(t);
         }
     }
+
+    // --- METODO PLACE STRUCTURE (Richiesto) ---
+    public boolean placeStructure(UUID ownerId, GridPosition pos, String nativeBlockId) {
+        // Bypass inventario, piazzamento diretto
+        if (!isAreaClear(ownerId, pos, Vector3Int.one())) return false;
+
+        StructuralBlock block = new StructuralBlock(ownerId, pos, nativeBlockId);
+        block.setGridContext(this);
+
+        internalAddMachine(ownerId, block);
+        block.onPlace(worldAdapter);
+        repository.createMachine(ownerId, block);
+        return true;
+    }
+    // ------------------------------------------
 
     public boolean placeMachine(UUID ownerId, GridPosition pos, String typeId, Direction orientation) {
         PlayerProfile p = getCachedProfile(ownerId);
@@ -233,9 +226,11 @@ public class GridManager {
         m.setGridContext(this);
 
         if (m instanceof DrillMachine drill) {
-            MatterColor resAt = playerResources.get(ownerId).get(pos);
-            if (resAt == null) return false;
-            drill.setResourceToMine(resAt);
+            Map<GridPosition, MatterColor> resMap = playerResources.get(ownerId);
+            if (resMap != null) {
+                MatterColor resAt = resMap.get(pos);
+                if (resAt != null) drill.setResourceToMine(resAt);
+            }
         }
 
         internalAddMachine(ownerId, m);
@@ -249,14 +244,23 @@ public class GridManager {
         PlacedMachine target = getMachineAt(ownerId, pos);
         if (target == null) return;
         PlayerProfile p = getCachedProfile(ownerId);
-        repository.modifyInventoryItem(ownerId, target.getTypeId(), 1);
+
+        // Restituisci l'item solo se non è una struttura generica
+        if (!target.getTypeId().equals("STRUCTURE_GENERIC")) {
+            repository.modifyInventoryItem(ownerId, target.getTypeId(), 1);
+        }
+
         if (target.getDbId() != null) repository.deleteMachine(target.getDbId());
+
         synchronized (tickingMachines) {
             removeFromGridMap(ownerId, target);
             tickingMachines.remove(target);
         }
         target.onRemove();
-        if (p != null) repository.logTransaction(p, "REMOVE_MACHINE", "NONE", 0, target.getTypeId());
+
+        if (p != null && !target.getTypeId().equals("STRUCTURE_GENERIC")) {
+            repository.logTransaction(p, "REMOVE_MACHINE", "NONE", 0, target.getTypeId());
+        }
     }
 
     // --- UTILS ---
@@ -280,6 +284,8 @@ public class GridManager {
         Vector3Int dim = m.getDimensions(); GridPosition o = m.getPos();
         for(int x=0; x<dim.x(); x++) for(int y=0; y<dim.y(); y++) for(int z=0; z<dim.z(); z++)
             grid.put(new GridPosition(o.x()+x, o.y()+y, o.z()+z), m);
+
+        // Aggiungi ai ticking machines solo se ha logica (le strutture generiche hanno tick vuoto, ma va bene aggiungerle per semplicità o filtrarle)
         synchronized (tickingMachines) { tickingMachines.add(m); }
     }
 

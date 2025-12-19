@@ -4,11 +4,7 @@ import com.google.gson.JsonObject;
 import com.matterworks.core.common.Direction;
 import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.common.Vector3Int;
-import com.matterworks.core.domain.machines.BlockRegistry;
-import com.matterworks.core.domain.machines.ConveyorBelt;
-import com.matterworks.core.domain.machines.Merger;
-import com.matterworks.core.domain.machines.PlacedMachine;
-import com.matterworks.core.domain.machines.Splitter;
+import com.matterworks.core.domain.machines.*;
 import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.managers.GridManager;
 
@@ -27,6 +23,7 @@ public class FactoryPanel extends JPanel {
     private final int CELL_SIZE = 40;
     private final int OFFSET_X = 50;
     private final int OFFSET_Y = 50;
+
     private String currentTool = "drill_mk1";
     private Direction currentOrientation = Direction.NORTH;
     private int currentLayer = 0;
@@ -61,10 +58,12 @@ public class FactoryPanel extends JPanel {
     public void setPlayerUuid(UUID uuid) { this.playerUuid = uuid; repaint(); }
     public void setLayer(int y) { this.currentLayer = y; repaint(); }
     public int getCurrentLayer() { return currentLayer; }
+
     public void setTool(String toolId) {
         this.currentTool = toolId;
         repaint();
     }
+
     public String getCurrentToolName() { return currentTool != null ? currentTool : "None"; }
 
     public void rotate() {
@@ -92,8 +91,17 @@ public class FactoryPanel extends JPanel {
 
     private void handleMouseClick(MouseEvent e) {
         if (mouseHoverPos == null) return;
+
         if (SwingUtilities.isLeftMouseButton(e)) {
-            gridManager.placeMachine(playerUuid, mouseHoverPos, currentTool, currentOrientation);
+            // --- LOGICA MODIFICATA PER STRUTTURE ---
+            if (currentTool != null && currentTool.startsWith("STRUCTURE:")) {
+                String nativeId = currentTool.substring(10); // Rimuove "STRUCTURE:"
+                // Chiama il nuovo metodo per piazzare bypassando l'inventario
+                gridManager.placeStructure(playerUuid, mouseHoverPos, nativeId);
+            } else {
+                // Comportamento standard (Inventario + Checks)
+                gridManager.placeMachine(playerUuid, mouseHoverPos, currentTool, currentOrientation);
+            }
         } else if (SwingUtilities.isRightMouseButton(e)) {
             gridManager.removeComponent(playerUuid, mouseHoverPos);
         }
@@ -150,22 +158,40 @@ public class FactoryPanel extends JPanel {
         int z = OFFSET_Y + (m.getPos().z() * CELL_SIZE);
 
         Vector3Int dims = m.getDimensions();
-
-        // Calcola dimensioni 2D (sul piano XZ)
-        // Nota: Lift e Dropper sono 1x2x1, quindi su pianta sono sempre 1x1
         int w = dims.x() * CELL_SIZE;
         int h = dims.z() * CELL_SIZE;
 
-        // Correzione rotazione per oggetti non quadrati (non si applica a Lift/Dropper che sono 1x1 di base)
+        // Gestione rotazione dimensioni (esclusi 1x1)
         if (m.getOrientation() == Direction.EAST || m.getOrientation() == Direction.WEST) {
             w = dims.z() * CELL_SIZE;
             h = dims.x() * CELL_SIZE;
         }
 
+        // --- GESTIONE RENDER STRUTTURE GENERICHE ---
+        if (m.getTypeId().equals("STRUCTURE_GENERIC")) {
+            g.setColor(new Color(80, 80, 80)); // Grigio scuro per blocchi statici
+            g.fillRect(x + 2, z + 2, w - 4, h - 4);
+
+            // Tentativo di disegnare l'ID nativo sopra
+            g.setColor(Color.WHITE);
+            g.setFont(new Font("SansSerif", Font.PLAIN, 10));
+            // Recupera l'ID nativo dai metadati (se presente)
+            String nativeId = "Block";
+            JsonObject meta = m.serialize();
+            if (meta.has("native_id")) {
+                nativeId = meta.get("native_id").getAsString();
+                // Mostra solo la parte dopo ':' per brevità
+                if (nativeId.contains(":")) nativeId = nativeId.split(":")[1];
+            }
+            g.drawString(nativeId, x + 5, z + 25);
+            return; // Le strutture non hanno porte o frecce
+        }
+        // -------------------------------------------
+
         g.setColor(getColorForType(m.getTypeId()));
         g.fillRect(x + 2, z + 2, w - 4, h - 4);
 
-        // --- Logica porte specifica per tipo ---
+        // --- Rendering Porte ---
         if (m.getTypeId().equals("nexus_core")) {
             drawNexusPorts(g, m, x, z, w, h);
         } else if (m.getTypeId().equals("chromator") || m.getTypeId().equals("color_mixer")) {
@@ -175,7 +201,6 @@ public class FactoryPanel extends JPanel {
         } else if (m.getTypeId().equals("merger")) {
             drawMergerPorts(g, m, x, z, w, h);
         } else if (m.getTypeId().equals("lift") || m.getTypeId().equals("dropper")) {
-            // --- NEW: Rendering Verticale ---
             drawVerticalPorts(g, m, x, z, w, h);
         } else {
             drawStandardPorts(g, m, x, z, w, h);
@@ -189,56 +214,35 @@ public class FactoryPanel extends JPanel {
         drawDirectionArrow(g, x, z, w, h, m.getOrientation());
     }
 
-    // --- NEW: LOGICA PORTE VERTICALI ---
+    // --- LOGICA PORTE (VERTICAL, MERGER, ETC) ---
+
     private void drawVerticalPorts(Graphics2D g, PlacedMachine m, int x, int z, int w, int h) {
         int p = 8;
         int c = CELL_SIZE;
-        int relativeY = currentLayer - m.getPos().y(); // 0 = base, 1 = alto
+        int relativeY = currentLayer - m.getPos().y();
         boolean isLift = m.getTypeId().equals("lift");
-
-        // Calcola punti (uguali per entrambi i layer, cambia solo il colore)
-        Point front = null; // Fronte (Uscita standard)
-        Point back = null;  // Retro (Ingresso standard)
+        Point front = null, back = null;
 
         switch (m.getOrientation()) {
-            case NORTH -> {
-                front = new Point(x + c/2 - p/2, z);
-                back = new Point(x + c/2 - p/2, z + c - p);
-            }
-            case SOUTH -> {
-                front = new Point(x + c/2 - p/2, z + c - p);
-                back = new Point(x + c/2 - p/2, z);
-            }
-            case EAST -> {
-                front = new Point(x + c - p, z + c/2 - p/2);
-                back = new Point(x, z + c/2 - p/2);
-            }
-            case WEST -> {
-                front = new Point(x, z + c/2 - p/2);
-                back = new Point(x + c - p, z + c/2 - p/2);
-            }
+            case NORTH -> { front = new Point(x + c/2 - p/2, z); back = new Point(x + c/2 - p/2, z + c - p); }
+            case SOUTH -> { front = new Point(x + c/2 - p/2, z + c - p); back = new Point(x + c/2 - p/2, z); }
+            case EAST -> { front = new Point(x + c - p, z + c/2 - p/2); back = new Point(x, z + c/2 - p/2); }
+            case WEST -> { front = new Point(x, z + c/2 - p/2); back = new Point(x + c - p, z + c/2 - p/2); }
         }
 
-        // LIFT Logic
         if (isLift) {
             if (relativeY == 0) {
-                // Base: Input dal retro (BLUE), Simbolo UP
                 if (back != null) drawPort(g, back, Color.BLUE);
                 drawSymbol(g, x, z, "^", Color.WHITE);
             } else {
-                // Alto: Output sul fronte (GREEN)
                 if (front != null) drawPort(g, front, Color.GREEN);
                 drawSymbol(g, x, z, "OUT", Color.YELLOW);
             }
-        }
-        // DROPPER Logic
-        else {
+        } else { // Dropper
             if (relativeY == 1) {
-                // Alto: Input dal retro (BLUE), Simbolo DOWN
                 if (back != null) drawPort(g, back, Color.BLUE);
                 drawSymbol(g, x, z, "v", Color.WHITE);
             } else {
-                // Base: Output sul fronte (GREEN)
                 if (front != null) drawPort(g, front, Color.GREEN);
                 drawSymbol(g, x, z, "OUT", Color.YELLOW);
             }
@@ -251,12 +255,8 @@ public class FactoryPanel extends JPanel {
         g.drawString(sym, x + 12, y + 25);
     }
 
-    // --- Fine NEW Vertical Logic ---
-
     private void drawMergerPorts(Graphics2D g, PlacedMachine m, int x, int z, int w, int h) {
-        int p = 8;
-        int c = CELL_SIZE;
-
+        int p = 8; int c = CELL_SIZE;
         switch (m.getOrientation()) {
             case NORTH -> {
                 drawPort(g, new Point(x + c/2 - p/2, z), Color.GREEN);
@@ -282,25 +282,12 @@ public class FactoryPanel extends JPanel {
     }
 
     private void drawStandardPorts(Graphics2D g, PlacedMachine m, int x, int z, int w, int h) {
-        int p = 8;
-        Point out = null, in = null;
+        int p = 8; Point out = null, in = null;
         switch (m.getOrientation()) {
-            case NORTH -> {
-                out = new Point(x + w/2 - p/2, z);
-                in = new Point(x + w/2 - p/2, z + h - p);
-            }
-            case SOUTH -> {
-                out = new Point(x + w/2 - p/2, z + h - p);
-                in = new Point(x + w/2 - p/2, z);
-            }
-            case EAST  -> {
-                out = new Point(x + w - p, z + h/2 - p/2);
-                in = new Point(x, z + h/2 - p/2);
-            }
-            case WEST  -> {
-                out = new Point(x, z + h/2 - p/2);
-                in = new Point(x + w - p, z + h/2 - p/2);
-            }
+            case NORTH -> { out = new Point(x + w/2 - p/2, z); in = new Point(x + w/2 - p/2, z + h - p); }
+            case SOUTH -> { out = new Point(x + w/2 - p/2, z + h - p); in = new Point(x + w/2 - p/2, z); }
+            case EAST  -> { out = new Point(x + w - p, z + h/2 - p/2); in = new Point(x, z + h/2 - p/2); }
+            case WEST  -> { out = new Point(x, z + h/2 - p/2); in = new Point(x + w - p, z + h/2 - p/2); }
         }
         if (out != null) drawPort(g, out, Color.GREEN);
         if (in != null && !m.getTypeId().equals("drill_mk1")) drawPort(g, in, Color.BLUE);
@@ -317,8 +304,7 @@ public class FactoryPanel extends JPanel {
     }
 
     private void drawProcessorPorts(Graphics2D g, PlacedMachine m, int x, int z, int w, int h) {
-        int p = 8;
-        int c = CELL_SIZE;
+        int p = 8; int c = CELL_SIZE;
         boolean isChroma = m.getTypeId().equals("chromator");
         Color colS0 = isChroma ? Color.CYAN : Color.BLUE;
         Color colS1 = isChroma ? Color.MAGENTA : Color.BLUE;
@@ -348,8 +334,7 @@ public class FactoryPanel extends JPanel {
     }
 
     private void drawSplitterPorts(Graphics2D g, PlacedMachine m, int x, int z, int w, int h) {
-        int p = 8;
-        int c = CELL_SIZE;
+        int p = 8; int c = CELL_SIZE;
         switch (m.getOrientation()) {
             case NORTH -> {
                 drawPort(g, new Point(x + c/2 - p/2, z + c - p), Color.BLUE);
@@ -429,7 +414,16 @@ public class FactoryPanel extends JPanel {
 
     private void drawGhost(Graphics2D g) {
         if (mouseHoverPos == null || currentTool == null) return;
-        Vector3Int dim = registry.getDimensions(currentTool);
+
+        Vector3Int dim;
+        // Gestione speciale per strutture che non sono nel registro
+        if (currentTool.startsWith("STRUCTURE:")) {
+            dim = new Vector3Int(1, 1, 1);
+            g.setColor(Color.LIGHT_GRAY);
+        } else {
+            dim = registry.getDimensions(currentTool);
+            g.setColor(getColorForType(currentTool));
+        }
 
         int dimX = dim.x();
         int dimZ = dim.z();
@@ -442,7 +436,6 @@ public class FactoryPanel extends JPanel {
         int x = OFFSET_X + (mouseHoverPos.x() * CELL_SIZE);
         int z = OFFSET_Y + (mouseHoverPos.z() * CELL_SIZE);
 
-        g.setColor(getColorForType(currentTool));
         g.fillRect(x, z, dimX * CELL_SIZE, dimZ * CELL_SIZE);
         g.setColor(Color.WHITE);
         g.drawRect(x, z, dimX * CELL_SIZE, dimZ * CELL_SIZE);
@@ -483,10 +476,8 @@ public class FactoryPanel extends JPanel {
             case "color_mixer" -> new Color(0, 200, 200);
             case "splitter" -> new Color(100, 149, 237);
             case "merger" -> new Color(70, 130, 180);
-            // --- NEW COLORS ---
             case "lift" -> new Color(0, 139, 139);      // Dark Cyan
             case "dropper" -> new Color(139, 0, 139);   // Dark Magenta
-
             default -> Color.RED;
         };
     }

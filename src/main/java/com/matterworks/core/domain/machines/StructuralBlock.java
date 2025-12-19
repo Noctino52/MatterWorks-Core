@@ -1,49 +1,53 @@
 package com.matterworks.core.domain.machines;
 
 import com.google.gson.JsonObject;
+import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.ports.IWorldAccess;
+import java.util.UUID;
 
-/**
- * Rappresenta un blocco statico o strutturale (Muri, Decorazioni).
- * Occupa spazio nella griglia ma non ha logica di tick complessa.
- *
- */
-public class StructuralBlock implements IGridComponent {
+public class StructuralBlock extends PlacedMachine {
 
-    private final String blockId;
-    private final Vector3Int cachedDimensions;
+    public StructuralBlock(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata) {
+        super(dbId, ownerId, typeId, pos, metadata);
+        this.dimensions = new Vector3Int(1, 1, 1);
+    }
 
-    public StructuralBlock(String blockId, Vector3Int dimensions) {
-        this.blockId = blockId;
-        this.cachedDimensions = dimensions;
+    /**
+     * Costruttore di comodo per il piazzamento diretto.
+     */
+    public StructuralBlock(UUID ownerId, GridPosition pos, String nativeBlockId) {
+        super(null, ownerId, "STRUCTURE_GENERIC", pos, new JsonObject());
+        this.metadata.addProperty("native_id", nativeBlockId);
+        this.dimensions = new Vector3Int(1, 1, 1);
+        // Segniamo come sporco per assicurarci che venga salvato al prossimo autosave se necessario
+        markDirty();
+    }
+
+    public String getNativeBlockId() {
+        if (this.metadata.has("native_id")) {
+            return this.metadata.get("native_id").getAsString();
+        }
+        return "hytale:stone"; // Fallback di sicurezza
+    }
+
+    @Override
+    public void tick(long currentTick) {
+        // Nessuna logica di tick: è un blocco strutturale inerte.
     }
 
     @Override
     public void onPlace(IWorldAccess world) {
-        // Logica semplice: piazza il blocco visivo nel mondo
-        // (La posizione viene gestita dal GridManager al momento del piazzamento)
+        // Delega all'adattatore Hytale il piazzamento del blocco fisico
+        if (world != null) {
+            world.setBlock(pos, getNativeBlockId());
+        }
     }
 
     @Override
     public void onRemove() {
-        // Nessuna pulizia speciale necessaria per blocchi stupidi
+        // Nessuna logica di rimozione complessa (inventari, etc.)
     }
 
-    @Override
-    public JsonObject serialize() {
-        // I blocchi strutturali potrebbero non aver bisogno di salvare metadati complessi
-        // o salvano solo il loro ID se necessario.
-        JsonObject json = new JsonObject();
-        json.addProperty("type", "structure");
-        json.addProperty("blockId", blockId);
-        return json;
-    }
-
-    @Override
-    public Vector3Int getDimensions() {
-        return cachedDimensions;
-    }
-
-    public String getBlockId() { return blockId; }
+    // La serializzazione è gestita dalla classe padre PlacedMachine che salva 'metadata'
 }

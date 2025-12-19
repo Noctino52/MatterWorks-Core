@@ -39,6 +39,12 @@ public class MariaDBAdapter implements IRepository {
         this.transactionDAO = new TransactionDAO(dbManager);
     }
 
+    // --- FIX: Metodo aggiunto per risolvere l'errore in GridManager ---
+    public Long createPlot(UUID ownerId, int x, int z, int worldId) {
+        return plotDAO.createPlot(ownerId, x, z, worldId);
+    }
+    // ------------------------------------------------------------------
+
     @Override
     public void logTransaction(PlayerProfile player, String actionType, String currency, double amount, String itemId) {
         transactionDAO.logTransaction(player, actionType, currency, BigDecimal.valueOf(amount), itemId);
