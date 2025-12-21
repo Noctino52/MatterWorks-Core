@@ -8,12 +8,14 @@ import com.matterworks.core.ports.IRepository;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 
 public class GridSaverService {
 
     private final GridManager gridManager;
     private final IRepository repository;
+    private final ReentrantLock saveLock = new ReentrantLock();
 
     public GridSaverService(GridManager gridManager, IRepository repository) {
         this.gridManager = gridManager;
@@ -21,26 +23,44 @@ public class GridSaverService {
     }
 
     public void autoSaveTask() {
-        // FIX: Usa getAllMachinesSnapshot() invece di getSnapshot()
-        // Questo recupera le macchine di TUTTI i giocatori per salvarle.
-        Map<GridPosition, PlacedMachine> allMachines = gridManager.getAllMachinesSnapshot();
+        if (!saveLock.tryLock()) {
+            return;
+        }
 
-        List<PlacedMachine> dirtyMachines = allMachines.values().stream()
-                .filter(PlacedMachine::isDirty)
-                .distinct()
-                .collect(Collectors.toList());
+        try {
+            Map<GridPosition, PlacedMachine> allMachines = gridManager.getAllMachinesSnapshot();
 
-        if (dirtyMachines.isEmpty()) return;
+            List<PlacedMachine> dirtyMachines = allMachines.values().stream()
+                    .filter(pm -> pm != null && pm.isDirty())
+                    .distinct()
+                    .collect(Collectors.toList());
 
-        Map<UUID, List<PlacedMachine>> machinesByOwner = dirtyMachines.stream()
-                .collect(Collectors.groupingBy(PlacedMachine::getOwnerId));
+            if (dirtyMachines.isEmpty()) return;
 
-        System.out.println("💾 AutoSave: Saving dirty machines for " + machinesByOwner.size() + " plots.");
+            Map<UUID, List<PlacedMachine>> machinesByOwner = dirtyMachines.stream()
+                    .filter(pm -> pm.getOwnerId() != null)
+                    .collect(Collectors.groupingBy(PlacedMachine::getOwnerId));
 
-        for (Map.Entry<UUID, List<PlacedMachine>> entry : machinesByOwner.entrySet()) {
-            List<PlacedMachine> toSave = entry.getValue();
-            repository.updateMachinesMetadata(toSave);
-            toSave.forEach(PlacedMachine::cleanDirty);
+            if (machinesByOwner.isEmpty()) return;
+
+            System.out.println("💾 AutoSave: Saving dirty machines for " + machinesByOwner.size() + " plots.");
+
+            for (Map.Entry<UUID, List<PlacedMachine>> entry : machinesByOwner.entrySet()) {
+                UUID ownerId = entry.getKey();
+                List<PlacedMachine> toSave = entry.getValue();
+
+                if (toSave == null || toSave.isEmpty()) continue;
+
+                try {
+                    repository.updateMachinesMetadata(toSave);
+                    toSave.forEach(PlacedMachine::cleanDirty);
+                } catch (RuntimeException ex) {
+                    System.err.println("🚨 AutoSave failed for plot owner " + ownerId + " (dirty kept, will retry).");
+                    ex.printStackTrace();
+                }
+            }
+        } finally {
+            saveLock.unlock();
         }
     }
 }

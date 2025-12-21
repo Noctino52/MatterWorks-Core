@@ -2,13 +2,13 @@ package com.matterworks.core.infrastructure;
 
 import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.database.DatabaseManager;
+import com.matterworks.core.database.UuidUtils;
 import com.matterworks.core.database.dao.*;
 import com.matterworks.core.domain.machines.PlacedMachine;
 import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.model.PlotObject;
 import com.matterworks.core.ports.IRepository;
-import com.matterworks.core.database.UuidUtils;
 
 import java.math.BigDecimal;
 import java.sql.Connection;
@@ -18,6 +18,9 @@ import java.sql.SQLException;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.stream.Collectors;
 
 public class MariaDBAdapter implements IRepository {
 
@@ -29,6 +32,8 @@ public class MariaDBAdapter implements IRepository {
     private final TechDefinitionDAO techDefinitionDAO;
     private final TransactionDAO transactionDAO;
 
+    private final ConcurrentHashMap<UUID, ReentrantLock> plotSaveLocks = new ConcurrentHashMap<>();
+
     public MariaDBAdapter(DatabaseManager dbManager) {
         this.dbManager = dbManager;
         this.playerDAO = new PlayerDAO(dbManager);
@@ -39,11 +44,9 @@ public class MariaDBAdapter implements IRepository {
         this.transactionDAO = new TransactionDAO(dbManager);
     }
 
-    // --- FIX: Metodo aggiunto per risolvere l'errore in GridManager ---
     public Long createPlot(UUID ownerId, int x, int z, int worldId) {
         return plotDAO.createPlot(ownerId, x, z, worldId);
     }
-    // ------------------------------------------------------------------
 
     @Override
     public void logTransaction(PlayerProfile player, String actionType, String currency, double amount, String itemId) {
@@ -66,7 +69,9 @@ public class MariaDBAdapter implements IRepository {
                         rs.getDouble("sos_threshold")
                 );
             }
-        } catch (SQLException e) { e.printStackTrace(); }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
         return new ServerConfig(1000.0, 3, 1, 1, 0, 500.0);
     }
 
@@ -77,26 +82,55 @@ public class MariaDBAdapter implements IRepository {
     @Override
     public void deletePlayerFull(UUID uuid) {
         if (uuid == null) return;
+
         Long plotId = plotDAO.findPlotIdByOwner(uuid);
         try (Connection conn = dbManager.getConnection()) {
             conn.setAutoCommit(false);
             try {
                 if (plotId != null) {
-                    try (PreparedStatement ps = conn.prepareStatement("DELETE FROM plot_machines WHERE plot_id = ?")) { ps.setLong(1, plotId); ps.executeUpdate(); }
-                    try (PreparedStatement ps = conn.prepareStatement("DELETE FROM plot_resources WHERE plot_id = ?")) { ps.setLong(1, plotId); ps.executeUpdate(); }
-                    try (PreparedStatement ps = conn.prepareStatement("DELETE FROM plots WHERE id = ?")) { ps.setLong(1, plotId); ps.executeUpdate(); }
+                    try (PreparedStatement ps = conn.prepareStatement("DELETE FROM plot_machines WHERE plot_id = ?")) {
+                        ps.setLong(1, plotId);
+                        ps.executeUpdate();
+                    }
+                    try (PreparedStatement ps = conn.prepareStatement("DELETE FROM plot_resources WHERE plot_id = ?")) {
+                        ps.setLong(1, plotId);
+                        ps.executeUpdate();
+                    }
+                    try (PreparedStatement ps = conn.prepareStatement("DELETE FROM plots WHERE id = ?")) {
+                        ps.setLong(1, plotId);
+                        ps.executeUpdate();
+                    }
                 }
+
                 byte[] uuidBytes = UuidUtils.asBytes(uuid);
-                try (PreparedStatement ps = conn.prepareStatement("DELETE FROM player_inventory WHERE player_uuid = ?")) { ps.setBytes(1, uuidBytes); ps.executeUpdate(); }
-                try (PreparedStatement ps = conn.prepareStatement("DELETE FROM verification_codes WHERE player_uuid = ?")) { ps.setBytes(1, uuidBytes); ps.executeUpdate(); }
-                try (PreparedStatement ps = conn.prepareStatement("DELETE FROM transactions WHERE player_uuid = ?")) { ps.setBytes(1, uuidBytes); ps.executeUpdate(); }
-                try (PreparedStatement ps = conn.prepareStatement("DELETE FROM players WHERE uuid = ?")) { ps.setBytes(1, uuidBytes); ps.executeUpdate(); }
+
+                try (PreparedStatement ps = conn.prepareStatement("DELETE FROM player_inventory WHERE player_uuid = ?")) {
+                    ps.setBytes(1, uuidBytes);
+                    ps.executeUpdate();
+                }
+                try (PreparedStatement ps = conn.prepareStatement("DELETE FROM verification_codes WHERE player_uuid = ?")) {
+                    ps.setBytes(1, uuidBytes);
+                    ps.executeUpdate();
+                }
+                try (PreparedStatement ps = conn.prepareStatement("DELETE FROM transactions WHERE player_uuid = ?")) {
+                    ps.setBytes(1, uuidBytes);
+                    ps.executeUpdate();
+                }
+                try (PreparedStatement ps = conn.prepareStatement("DELETE FROM players WHERE uuid = ?")) {
+                    ps.setBytes(1, uuidBytes);
+                    ps.executeUpdate();
+                }
+
                 conn.commit();
             } catch (SQLException ex) {
-                conn.rollback();
+                try { conn.rollback(); } catch (SQLException ignore) {}
                 ex.printStackTrace();
-            } finally { conn.setAutoCommit(true); }
-        } catch (SQLException e) { e.printStackTrace(); }
+            } finally {
+                try { conn.setAutoCommit(true); } catch (SQLException ignore) {}
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
     }
 
     @Override public int getInventoryItemCount(UUID ownerId, String itemId) { return inventoryDAO.getItemCount(ownerId, itemId); }
@@ -113,26 +147,116 @@ public class MariaDBAdapter implements IRepository {
 
     @Override
     public void updateMachinesMetadata(List<PlacedMachine> machines) {
-        String sql = "UPDATE plot_machines SET metadata = ? WHERE id = ?";
-        try (Connection conn = dbManager.getConnection(); PreparedStatement stmt = conn.prepareStatement(sql)) {
-            for (PlacedMachine pm : machines) {
-                if (pm.getDbId() == null) continue;
-                stmt.setString(1, pm.serialize().toString());
-                stmt.setLong(2, pm.getDbId());
-                stmt.addBatch();
+        if (machines == null || machines.isEmpty()) return;
+
+        Map<UUID, List<PlacedMachine>> byOwner = machines.stream()
+                .filter(pm -> pm != null && pm.getOwnerId() != null)
+                .collect(Collectors.groupingBy(PlacedMachine::getOwnerId));
+
+        if (byOwner.isEmpty()) return;
+
+        for (Map.Entry<UUID, List<PlacedMachine>> entry : byOwner.entrySet()) {
+            UUID ownerId = entry.getKey();
+            List<PlacedMachine> ownerMachines = entry.getValue();
+            if (ownerMachines == null || ownerMachines.isEmpty()) continue;
+
+            ReentrantLock localLock = plotSaveLocks.computeIfAbsent(ownerId, __ -> new ReentrantLock());
+            localLock.lock();
+            try {
+                updateMachinesMetadataForOwner(ownerId, ownerMachines);
+            } finally {
+                localLock.unlock();
             }
-            stmt.executeBatch();
-        } catch (SQLException e) { e.printStackTrace(); }
+        }
+    }
+
+    private void updateMachinesMetadataForOwner(UUID ownerId, List<PlacedMachine> machines) {
+        List<PlacedMachine> toUpdate = machines.stream()
+                .filter(pm -> pm != null && pm.getDbId() != null)
+                .collect(Collectors.toList());
+
+        if (toUpdate.isEmpty()) return;
+
+        try (Connection conn = dbManager.getConnection()) {
+            conn.setAutoCommit(false);
+            conn.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+
+            try {
+                Long plotId = resolvePlotIdFromMachines(conn, toUpdate);
+                if (plotId == null) {
+                    conn.rollback();
+                    throw new RuntimeException("PlotId not found from machines for ownerId=" + ownerId);
+                }
+
+                lockPlotRowById(conn, plotId);
+
+                String sql = "UPDATE plot_machines SET metadata = ? WHERE id = ?";
+                try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+                    for (PlacedMachine pm : toUpdate) {
+                        stmt.setString(1, pm.serialize().toString());
+                        stmt.setLong(2, pm.getDbId());
+                        stmt.addBatch();
+                    }
+                    stmt.executeBatch();
+                }
+
+                conn.commit();
+            } catch (SQLException ex) {
+                try { conn.rollback(); } catch (SQLException ignore) {}
+                throw new RuntimeException("Failed to update machines metadata for ownerId=" + ownerId, ex);
+            } finally {
+                try { conn.setAutoCommit(true); } catch (SQLException ignore) {}
+            }
+        } catch (SQLException ex) {
+            throw new RuntimeException("DB connection error while saving plot ownerId=" + ownerId, ex);
+        }
+    }
+
+    private Long resolvePlotIdFromMachines(Connection conn, List<PlacedMachine> machines) throws SQLException {
+        Long anyMachineId = null;
+        for (PlacedMachine pm : machines) {
+            if (pm != null && pm.getDbId() != null) {
+                anyMachineId = pm.getDbId();
+                break;
+            }
+        }
+        if (anyMachineId == null) return null;
+
+        String sql = "SELECT plot_id FROM plot_machines WHERE id = ?";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, anyMachineId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return rs.getLong(1);
+                return null;
+            }
+        }
+    }
+
+    private void lockPlotRowById(Connection conn, long plotId) throws SQLException {
+        String sql = "SELECT id FROM plots WHERE id = ? FOR UPDATE";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, plotId);
+            ps.executeQuery();
+        }
     }
 
     @Override
     public void clearPlotData(UUID ownerId) {
         Long plotId = plotDAO.findPlotIdByOwner(ownerId);
         if (plotId == null) return;
+
         try (Connection conn = dbManager.getConnection()) {
-            try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM plot_machines WHERE plot_id = ?")) { stmt.setLong(1, plotId); stmt.executeUpdate(); }
-            try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM plot_resources WHERE plot_id = ?")) { stmt.setLong(1, plotId); stmt.executeUpdate(); }
-        } catch (SQLException e) { e.printStackTrace(); }
+            try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM plot_machines WHERE plot_id = ?")) {
+                stmt.setLong(1, plotId);
+                stmt.executeUpdate();
+            }
+            try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM plot_resources WHERE plot_id = ?")) {
+                stmt.setLong(1, plotId);
+                stmt.executeUpdate();
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
     }
 
     @Override public Long getPlotId(UUID ownerId) { return plotDAO.findPlotIdByOwner(ownerId); }

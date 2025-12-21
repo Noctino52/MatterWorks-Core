@@ -13,50 +13,107 @@ import java.awt.*;
 import java.awt.event.*;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 public class FactoryPanel extends JPanel {
 
     private final GridManager gridManager;
     private final BlockRegistry registry;
-    private UUID playerUuid;
+
+    private volatile UUID playerUuid;
 
     private final int CELL_SIZE = 40;
     private final int OFFSET_X = 50;
     private final int OFFSET_Y = 50;
 
-    private String currentTool = "drill_mk1";
-    private Direction currentOrientation = Direction.NORTH;
-    private int currentLayer = 0;
+    private volatile String currentTool = "drill_mk1";
+    private volatile Direction currentOrientation = Direction.NORTH;
+    private volatile int currentLayer = 0;
 
-    private GridPosition mouseHoverPos = null;
-    private Runnable onStateChange;
+    private volatile GridPosition mouseHoverPos = null;
+    private final Runnable onStateChange;
+
+    private volatile Map<GridPosition, PlacedMachine> cachedMachines = Map.of();
+    private volatile Map<GridPosition, MatterColor> cachedResources = Map.of();
+
+    private final ConcurrentHashMap<Long, String> structureLabelCache = new ConcurrentHashMap<>();
+    private final ScheduledExecutorService cacheExecutor;
+
+    private volatile boolean disposed = false;
+
+    private volatile int lastHoverX = Integer.MIN_VALUE;
+    private volatile int lastHoverZ = Integer.MIN_VALUE;
 
     public FactoryPanel(GridManager gridManager, BlockRegistry registry, UUID playerUuid, Runnable onStateChange) {
         this.gridManager = gridManager;
         this.registry = registry;
         this.playerUuid = playerUuid;
         this.onStateChange = onStateChange;
+
         this.setBackground(new Color(30, 30, 30));
         this.setFocusable(true);
 
         this.addMouseMotionListener(new MouseMotionAdapter() {
             @Override
-            public void mouseMoved(MouseEvent e) { updateMousePos(e.getX(), e.getY()); repaint(); }
+            public void mouseMoved(MouseEvent e) {
+                if (updateMousePos(e.getX(), e.getY())) repaint();
+            }
         });
 
         this.addMouseListener(new MouseAdapter() {
             @Override
-            public void mouseClicked(MouseEvent e) { requestFocusInWindow(); handleMouseClick(e); repaint(); }
+            public void mouseClicked(MouseEvent e) {
+                requestFocusInWindow();
+                handleMouseClick(e);
+                repaint();
+            }
         });
 
         this.addKeyListener(new KeyAdapter() {
             @Override
-            public void keyPressed(KeyEvent e) { if (e.getKeyCode() == KeyEvent.VK_R) rotate(); }
+            public void keyPressed(KeyEvent e) {
+                if (e.getKeyCode() == KeyEvent.VK_R) rotate();
+            }
         });
+
+        this.cacheExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "mw-factory-cache");
+            t.setDaemon(true);
+            return t;
+        });
+
+        this.cacheExecutor.scheduleAtFixedRate(this::refreshCachesSafe, 0, 120, TimeUnit.MILLISECONDS);
     }
 
-    public void setPlayerUuid(UUID uuid) { this.playerUuid = uuid; repaint(); }
-    public void setLayer(int y) { this.currentLayer = y; repaint(); }
+    public void dispose() {
+        disposed = true;
+        try {
+            cacheExecutor.shutdownNow();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    public void forceRefreshNow() {
+        refreshCachesSafe();
+        repaint();
+    }
+
+    public void setPlayerUuid(UUID uuid) {
+        this.playerUuid = uuid;
+        this.mouseHoverPos = null;
+        this.lastHoverX = Integer.MIN_VALUE;
+        this.lastHoverZ = Integer.MIN_VALUE;
+        forceRefreshNow();
+    }
+
+    public void setLayer(int y) {
+        this.currentLayer = y;
+        forceRefreshNow();
+    }
+
     public int getCurrentLayer() { return currentLayer; }
 
     public void setTool(String toolId) {
@@ -67,7 +124,7 @@ public class FactoryPanel extends JPanel {
     public String getCurrentToolName() { return currentTool != null ? currentTool : "None"; }
 
     public void rotate() {
-        switch(currentOrientation) {
+        switch (currentOrientation) {
             case NORTH -> currentOrientation = Direction.EAST;
             case EAST -> currentOrientation = Direction.SOUTH;
             case SOUTH -> currentOrientation = Direction.WEST;
@@ -79,31 +136,99 @@ public class FactoryPanel extends JPanel {
 
     public String getCurrentOrientationName() { return currentOrientation.name(); }
 
-    private void updateMousePos(int x, int y) {
-        int gx = (x - OFFSET_X) / CELL_SIZE;
-        int gz = (y - OFFSET_Y) / CELL_SIZE;
-        if (gx >= 0 && gx <= 20 && gz >= 0 && gz <= 20) {
-            this.mouseHoverPos = new GridPosition(gx, currentLayer, gz);
+    private void refreshCachesSafe() {
+        if (disposed) return;
+
+        UUID u = playerUuid;
+        if (u == null) {
+            cachedMachines = Map.of();
+            cachedResources = Map.of();
+            return;
+        }
+
+        try {
+            Map<GridPosition, PlacedMachine> snap = gridManager.getSnapshot(u);
+            cachedMachines = (snap != null) ? snap : Map.of();
+        } catch (Throwable t) {
+            cachedMachines = Map.of();
+        }
+
+        if (currentLayer == 0) {
+            try {
+                Map<GridPosition, MatterColor> res = gridManager.getTerrainResources(u);
+                cachedResources = (res != null) ? res : Map.of();
+            } catch (Throwable t) {
+                cachedResources = Map.of();
+            }
         } else {
-            this.mouseHoverPos = null;
+            cachedResources = Map.of();
+        }
+
+        try {
+            for (PlacedMachine m : cachedMachines.values()) {
+                if (m == null) continue;
+                if (!"STRUCTURE_GENERIC".equals(m.getTypeId())) continue;
+                Long id = m.getDbId();
+                if (id == null) continue;
+                structureLabelCache.computeIfAbsent(id, __ -> extractStructureLabel(m));
+            }
+        } catch (Throwable ignored) {
         }
     }
 
+    private String extractStructureLabel(PlacedMachine m) {
+        try {
+            JsonObject meta = m.serialize();
+            if (meta != null && meta.has("native_id")) {
+                String nativeId = meta.get("native_id").getAsString();
+                if (nativeId != null && !nativeId.isBlank()) {
+                    if (nativeId.contains(":")) return nativeId.substring(nativeId.indexOf(':') + 1);
+                    return nativeId;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return "Block";
+    }
+
+    private boolean updateMousePos(int x, int y) {
+        int gx = (x - OFFSET_X) / CELL_SIZE;
+        int gz = (y - OFFSET_Y) / CELL_SIZE;
+
+        if (gx >= 0 && gx <= 20 && gz >= 0 && gz <= 20) {
+            if (gx == lastHoverX && gz == lastHoverZ && mouseHoverPos != null && mouseHoverPos.y() == currentLayer) {
+                return false;
+            }
+            lastHoverX = gx;
+            lastHoverZ = gz;
+            mouseHoverPos = new GridPosition(gx, currentLayer, gz);
+            return true;
+        }
+
+        if (mouseHoverPos != null) {
+            mouseHoverPos = null;
+            lastHoverX = Integer.MIN_VALUE;
+            lastHoverZ = Integer.MIN_VALUE;
+            return true;
+        }
+
+        return false;
+    }
+
     private void handleMouseClick(MouseEvent e) {
+        UUID u = playerUuid;
+        if (u == null) return;
         if (mouseHoverPos == null) return;
 
         if (SwingUtilities.isLeftMouseButton(e)) {
-            // --- LOGICA MODIFICATA PER STRUTTURE ---
             if (currentTool != null && currentTool.startsWith("STRUCTURE:")) {
-                String nativeId = currentTool.substring(10); // Rimuove "STRUCTURE:"
-                // Chiama il nuovo metodo per piazzare bypassando l'inventario
-                gridManager.placeStructure(playerUuid, mouseHoverPos, nativeId);
+                String nativeId = currentTool.substring(10);
+                gridManager.placeStructure(u, mouseHoverPos, nativeId);
             } else {
-                // Comportamento standard (Inventario + Checks)
-                gridManager.placeMachine(playerUuid, mouseHoverPos, currentTool, currentOrientation);
+                gridManager.placeMachine(u, mouseHoverPos, currentTool, currentOrientation);
             }
         } else if (SwingUtilities.isRightMouseButton(e)) {
-            gridManager.removeComponent(playerUuid, mouseHoverPos);
+            gridManager.removeComponent(u, mouseHoverPos);
         }
     }
 
@@ -120,10 +245,14 @@ public class FactoryPanel extends JPanel {
     }
 
     private void drawTerrainResources(Graphics2D g) {
-        Map<GridPosition, MatterColor> resources = gridManager.getTerrainResources(playerUuid);
+        Map<GridPosition, MatterColor> resources = cachedResources;
+        if (resources == null || resources.isEmpty()) return;
+
         for (Map.Entry<GridPosition, MatterColor> entry : resources.entrySet()) {
             GridPosition pos = entry.getKey();
             MatterColor type = entry.getValue();
+            if (pos == null || type == null) continue;
+
             int x = OFFSET_X + (pos.x() * CELL_SIZE);
             int z = OFFSET_Y + (pos.z() * CELL_SIZE);
 
@@ -144,9 +273,11 @@ public class FactoryPanel extends JPanel {
     }
 
     private void drawMachines(Graphics2D g) {
-        Map<GridPosition, PlacedMachine> machines = gridManager.getSnapshot(playerUuid);
+        Map<GridPosition, PlacedMachine> machines = cachedMachines;
+        if (machines == null || machines.isEmpty()) return;
+
         for (PlacedMachine m : machines.values()) {
-            // Controlla se la macchina interseca il layer corrente
+            if (m == null) continue;
             if (currentLayer >= m.getPos().y() && currentLayer < m.getPos().y() + m.getDimensions().y()) {
                 drawSingleMachine(g, m);
             }
@@ -161,37 +292,29 @@ public class FactoryPanel extends JPanel {
         int w = dims.x() * CELL_SIZE;
         int h = dims.z() * CELL_SIZE;
 
-        // Gestione rotazione dimensioni (esclusi 1x1)
         if (m.getOrientation() == Direction.EAST || m.getOrientation() == Direction.WEST) {
             w = dims.z() * CELL_SIZE;
             h = dims.x() * CELL_SIZE;
         }
 
-        // --- GESTIONE RENDER STRUTTURE GENERICHE ---
         if (m.getTypeId().equals("STRUCTURE_GENERIC")) {
-            g.setColor(new Color(80, 80, 80)); // Grigio scuro per blocchi statici
+            g.setColor(new Color(80, 80, 80));
             g.fillRect(x + 2, z + 2, w - 4, h - 4);
 
-            // Tentativo di disegnare l'ID nativo sopra
             g.setColor(Color.WHITE);
             g.setFont(new Font("SansSerif", Font.PLAIN, 10));
-            // Recupera l'ID nativo dai metadati (se presente)
+
             String nativeId = "Block";
-            JsonObject meta = m.serialize();
-            if (meta.has("native_id")) {
-                nativeId = meta.get("native_id").getAsString();
-                // Mostra solo la parte dopo ':' per brevità
-                if (nativeId.contains(":")) nativeId = nativeId.split(":")[1];
-            }
+            Long id = m.getDbId();
+            if (id != null) nativeId = structureLabelCache.getOrDefault(id, "Block");
+
             g.drawString(nativeId, x + 5, z + 25);
-            return; // Le strutture non hanno porte o frecce
+            return;
         }
-        // -------------------------------------------
 
         g.setColor(getColorForType(m.getTypeId()));
         g.fillRect(x + 2, z + 2, w - 4, h - 4);
 
-        // --- Rendering Porte ---
         if (m.getTypeId().equals("nexus_core")) {
             drawNexusPorts(g, m, x, z, w, h);
         } else if (m.getTypeId().equals("chromator") || m.getTypeId().equals("color_mixer")) {
@@ -206,15 +329,12 @@ public class FactoryPanel extends JPanel {
             drawStandardPorts(g, m, x, z, w, h);
         }
 
-        // Draw Items
         if (m instanceof ConveyorBelt belt) drawBeltItem(g, belt, x, z);
         if (m instanceof Splitter splitter) drawSplitterItem(g, splitter, x, z);
         if (m instanceof Merger merger) drawMergerItem(g, merger, x, z);
 
         drawDirectionArrow(g, x, z, w, h, m.getOrientation());
     }
-
-    // --- LOGICA PORTE (VERTICAL, MERGER, ETC) ---
 
     private void drawVerticalPorts(Graphics2D g, PlacedMachine m, int x, int z, int w, int h) {
         int p = 8;
@@ -238,7 +358,7 @@ public class FactoryPanel extends JPanel {
                 if (front != null) drawPort(g, front, Color.GREEN);
                 drawSymbol(g, x, z, "OUT", Color.YELLOW);
             }
-        } else { // Dropper
+        } else {
             if (relativeY == 1) {
                 if (back != null) drawPort(g, back, Color.BLUE);
                 drawSymbol(g, x, z, "v", Color.WHITE);
@@ -416,7 +536,6 @@ public class FactoryPanel extends JPanel {
         if (mouseHoverPos == null || currentTool == null) return;
 
         Vector3Int dim;
-        // Gestione speciale per strutture che non sono nel registro
         if (currentTool.startsWith("STRUCTURE:")) {
             dim = new Vector3Int(1, 1, 1);
             g.setColor(Color.LIGHT_GRAY);
@@ -457,7 +576,7 @@ public class FactoryPanel extends JPanel {
     }
 
     private Color getColorFromStr(String c, int alpha) {
-        return switch(c) {
+        return switch (c) {
             case "RED" -> new Color(200, 0, 0, alpha);
             case "BLUE" -> new Color(0, 0, 200, alpha);
             case "YELLOW" -> new Color(200, 200, 0, alpha);
@@ -476,8 +595,8 @@ public class FactoryPanel extends JPanel {
             case "color_mixer" -> new Color(0, 200, 200);
             case "splitter" -> new Color(100, 149, 237);
             case "merger" -> new Color(70, 130, 180);
-            case "lift" -> new Color(0, 139, 139);      // Dark Cyan
-            case "dropper" -> new Color(139, 0, 139);   // Dark Magenta
+            case "lift" -> new Color(0, 139, 139);
+            case "dropper" -> new Color(139, 0, 139);
             default -> Color.RED;
         };
     }
