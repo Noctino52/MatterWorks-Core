@@ -66,7 +66,7 @@ public class MatterWorksGUI extends JFrame {
 
         // Window Setup
         setTitle("MatterWorks Architect - Multi-User Management");
-        setSize(1600, 950);
+        setSize(1480, 900);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setLocationRelativeTo(null);
         setLayout(new BorderLayout());
