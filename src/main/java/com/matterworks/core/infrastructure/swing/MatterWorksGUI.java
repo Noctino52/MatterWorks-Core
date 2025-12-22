@@ -8,6 +8,7 @@ import com.matterworks.core.ports.IRepository;
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.*;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -146,8 +147,9 @@ public class MatterWorksGUI extends JFrame {
                 } catch (Throwable ignored) {}
 
                 for (Component c : rightTabbedPane.getComponents()) {
-                    if (c instanceof InventoryDebugPanel p) p.dispose();
-                    if (c instanceof TechTreePanel p) p.dispose();
+                    safeInvokeNoArgs(c, "dispose");
+                    safeInvokeNoArgs(c, "close");
+                    safeInvokeNoArgs(c, "shutdown");
                 }
 
                 try {
@@ -361,6 +363,7 @@ public class MatterWorksGUI extends JFrame {
                 updateLabels();
                 updateEconomyLabels();
 
+                factoryPanel.forceRefreshNow();
                 setLoading(false);
             }
         };
@@ -392,11 +395,6 @@ public class MatterWorksGUI extends JFrame {
     }
 
     private void updateTabs() {
-        for (Component c : rightTabbedPane.getComponents()) {
-            if (c instanceof InventoryDebugPanel p) p.dispose();
-            if (c instanceof TechTreePanel p) p.dispose();
-        }
-
         rightTabbedPane.removeAll();
 
         if (currentPlayerUuid != null) {
@@ -627,5 +625,14 @@ public class MatterWorksGUI extends JFrame {
         lbl.setForeground(color);
         lbl.setFont(new Font("Monospaced", Font.BOLD, size));
         return lbl;
+    }
+
+    private static void safeInvokeNoArgs(Object target, String methodName) {
+        if (target == null || methodName == null) return;
+        try {
+            Method m = target.getClass().getMethod(methodName);
+            m.invoke(target);
+        } catch (Throwable ignored) {
+        }
     }
 }
