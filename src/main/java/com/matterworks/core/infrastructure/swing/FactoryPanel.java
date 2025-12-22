@@ -12,9 +12,13 @@ import javax.swing.*;
 import java.awt.*;
 import java.awt.event.*;
 import java.awt.image.BufferedImage;
+import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 public class FactoryPanel extends JPanel {
 
@@ -35,28 +39,38 @@ public class FactoryPanel extends JPanel {
     private final GridManager gridManager;
     private final BlockRegistry registry;
 
-    private UUID playerUuid;
+    private volatile UUID playerUuid;
 
-    private String currentTool = "drill_mk1";
-    private Direction currentOrientation = Direction.NORTH;
-    private int currentLayer = 0;
+    private volatile String currentTool = "drill_mk1";
+    private volatile Direction currentOrientation = Direction.NORTH;
+    private volatile int currentLayer = 0;
 
-    private GridPosition mouseHoverPos = null;
+    private volatile GridPosition mouseHoverPos = null;
     private final Runnable onStateChange;
 
     private volatile BufferedImage gridImage;
     private volatile int gridImageW = -1;
     private volatile int gridImageH = -1;
 
+    private volatile Map<GridPosition, PlacedMachine> cachedMachines = Map.of();
+    private volatile Map<GridPosition, MatterColor> cachedResources = Map.of();
+
     private final IdentityHashMap<PlacedMachine, JsonObject> metaCache = new IdentityHashMap<>();
     private final IdentityHashMap<PlacedMachine, Long> metaCacheNanos = new IdentityHashMap<>();
     private static final long META_CACHE_TTL_NANOS = 150_000_000L;
 
-    private String cachedGhostTool = null;
-    private Direction cachedGhostOri = null;
-    private Vector3Int cachedGhostDim = null;
-
     private volatile boolean disposed = false;
+
+    private final ScheduledExecutorService refreshExec;
+    private volatile long lastFingerprint = 0L;
+    private volatile boolean repaintQueued = false;
+
+    private volatile String cachedGhostTool = null;
+    private volatile Direction cachedGhostOri = null;
+    private volatile Vector3Int cachedGhostDim = null;
+
+    private volatile int lastHoverGX = Integer.MIN_VALUE;
+    private volatile int lastHoverGZ = Integer.MIN_VALUE;
 
     public FactoryPanel(GridManager gridManager, BlockRegistry registry, UUID playerUuid, Runnable onStateChange) {
         this.gridManager = gridManager;
@@ -71,8 +85,8 @@ public class FactoryPanel extends JPanel {
         addMouseMotionListener(new MouseMotionAdapter() {
             @Override
             public void mouseMoved(MouseEvent e) {
-                updateMousePos(e.getX(), e.getY());
-                repaint(0, 0, getWidth(), getHeight());
+                boolean changed = updateMousePos(e.getX(), e.getY());
+                if (changed) repaintCoalesced();
             }
         });
 
@@ -81,7 +95,7 @@ public class FactoryPanel extends JPanel {
             public void mouseClicked(MouseEvent e) {
                 requestFocusInWindow();
                 handleMouseClick(e);
-                repaint(0, 0, getWidth(), getHeight());
+                forceRefreshNow();
             }
         });
 
@@ -91,12 +105,29 @@ public class FactoryPanel extends JPanel {
                 if (e.getKeyCode() == KeyEvent.VK_R) rotate();
             }
         });
+
+        refreshExec = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "mw-factorypanel-refresh");
+            t.setDaemon(true);
+            return t;
+        });
+
+        // refresh frequente ma OFF-EDT: paint disegna SOLO cache
+        refreshExec.scheduleWithFixedDelay(this::refreshCacheLoop, 0, 180, TimeUnit.MILLISECONDS);
     }
 
     public void dispose() {
         disposed = true;
-        metaCache.clear();
-        metaCacheNanos.clear();
+        try { refreshExec.shutdownNow(); } catch (Throwable ignored) {}
+
+        cachedMachines = Map.of();
+        cachedResources = Map.of();
+
+        synchronized (metaCache) {
+            metaCache.clear();
+            metaCacheNanos.clear();
+        }
+
         gridImage = null;
         cachedGhostTool = null;
         cachedGhostOri = null;
@@ -104,12 +135,13 @@ public class FactoryPanel extends JPanel {
     }
 
     public void forceRefreshNow() {
-        metaCache.clear();
-        metaCacheNanos.clear();
-        cachedGhostTool = null;
-        cachedGhostOri = null;
-        cachedGhostDim = null;
-        repaint(0, 0, getWidth(), getHeight());
+        if (disposed) return;
+        invalidateGhostCache();
+        synchronized (metaCache) {
+            metaCache.clear();
+            metaCacheNanos.clear();
+        }
+        refreshOnce(true);
     }
 
     @Override
@@ -121,11 +153,17 @@ public class FactoryPanel extends JPanel {
 
     public void setPlayerUuid(UUID uuid) {
         this.playerUuid = uuid;
+        mouseHoverPos = null;
+        lastHoverGX = Integer.MIN_VALUE;
+        lastHoverGZ = Integer.MIN_VALUE;
         forceRefreshNow();
     }
 
     public void setLayer(int y) {
         this.currentLayer = y;
+        mouseHoverPos = null;
+        lastHoverGX = Integer.MIN_VALUE;
+        lastHoverGZ = Integer.MIN_VALUE;
         forceRefreshNow();
     }
 
@@ -135,10 +173,8 @@ public class FactoryPanel extends JPanel {
 
     public void setTool(String toolId) {
         this.currentTool = toolId;
-        cachedGhostTool = null;
-        cachedGhostOri = null;
-        cachedGhostDim = null;
-        repaint(0, 0, getWidth(), getHeight());
+        invalidateGhostCache();
+        repaintCoalesced();
     }
 
     public String getCurrentToolName() {
@@ -152,42 +188,163 @@ public class FactoryPanel extends JPanel {
             case SOUTH -> currentOrientation = Direction.WEST;
             case WEST -> currentOrientation = Direction.NORTH;
         }
-        cachedGhostTool = null;
-        cachedGhostOri = null;
-        cachedGhostDim = null;
+        invalidateGhostCache();
         if (onStateChange != null) onStateChange.run();
-        repaint(0, 0, getWidth(), getHeight());
+        repaintCoalesced();
     }
 
     public String getCurrentOrientationName() {
         return currentOrientation.name();
     }
 
-    private void updateMousePos(int x, int y) {
+    private void invalidateGhostCache() {
+        cachedGhostTool = null;
+        cachedGhostOri = null;
+        cachedGhostDim = null;
+    }
+
+    private boolean updateMousePos(int x, int y) {
         int gx = (x - OFFSET_X) / CELL_SIZE;
         int gz = (y - OFFSET_Y) / CELL_SIZE;
+
         if (gx >= 0 && gx < GRID_SIZE && gz >= 0 && gz < GRID_SIZE) {
-            this.mouseHoverPos = new GridPosition(gx, currentLayer, gz);
-        } else {
-            this.mouseHoverPos = null;
+            if (gx == lastHoverGX && gz == lastHoverGZ && mouseHoverPos != null && mouseHoverPos.y() == currentLayer) {
+                return false;
+            }
+            lastHoverGX = gx;
+            lastHoverGZ = gz;
+            mouseHoverPos = new GridPosition(gx, currentLayer, gz);
+            return true;
         }
+
+        if (mouseHoverPos != null) {
+            mouseHoverPos = null;
+            lastHoverGX = Integer.MIN_VALUE;
+            lastHoverGZ = Integer.MIN_VALUE;
+            return true;
+        }
+
+        return false;
     }
 
     private void handleMouseClick(MouseEvent e) {
         if (disposed) return;
-        if (playerUuid == null) return;
+        UUID u = playerUuid;
+        if (u == null) return;
         if (mouseHoverPos == null) return;
 
         if (SwingUtilities.isLeftMouseButton(e)) {
             if (currentTool != null && currentTool.startsWith("STRUCTURE:")) {
                 String nativeId = currentTool.substring(10);
-                gridManager.placeStructure(playerUuid, mouseHoverPos, nativeId);
+                gridManager.placeStructure(u, mouseHoverPos, nativeId);
             } else {
-                gridManager.placeMachine(playerUuid, mouseHoverPos, currentTool, currentOrientation);
+                gridManager.placeMachine(u, mouseHoverPos, currentTool, currentOrientation);
             }
         } else if (SwingUtilities.isRightMouseButton(e)) {
-            gridManager.removeComponent(playerUuid, mouseHoverPos);
+            gridManager.removeComponent(u, mouseHoverPos);
         }
+    }
+
+    private void refreshCacheLoop() {
+        refreshOnce(false);
+    }
+
+    private void refreshOnce(boolean forceRepaint) {
+        if (disposed) return;
+
+        UUID u = playerUuid;
+        Map<GridPosition, PlacedMachine> machines;
+        Map<GridPosition, MatterColor> resources;
+
+        try {
+            if (u == null) {
+                machines = Map.of();
+                resources = Map.of();
+            } else {
+                Map<GridPosition, PlacedMachine> snap = gridManager.getSnapshot(u);
+                machines = (snap == null || snap.isEmpty()) ? Map.of() : new HashMap<>(snap);
+
+                if (currentLayer == 0) {
+                    Map<GridPosition, MatterColor> res = gridManager.getTerrainResources(u);
+                    resources = (res == null || res.isEmpty()) ? Map.of() : new HashMap<>(res);
+                } else {
+                    resources = Map.of();
+                }
+            }
+        } catch (Throwable t) {
+            machines = Map.of();
+            resources = Map.of();
+        }
+
+        cachedMachines = machines;
+        cachedResources = resources;
+
+        long fp = computeFingerprint(machines, resources, currentLayer);
+        boolean changed = fp != lastFingerprint;
+        lastFingerprint = fp;
+
+        if (forceRepaint || changed) repaintCoalesced();
+    }
+
+    private long computeFingerprint(Map<GridPosition, PlacedMachine> machines, Map<GridPosition, MatterColor> resources, int layer) {
+        long h = 1469598103934665603L; // FNV offset
+        h = fnv64(h, layer);
+
+        if (machines != null && !machines.isEmpty()) {
+            for (Map.Entry<GridPosition, PlacedMachine> e : machines.entrySet()) {
+                GridPosition p = e.getKey();
+                PlacedMachine m = e.getValue();
+                if (p == null || m == null) continue;
+
+                h = fnv64(h, p.hashCode());
+                Long id = m.getDbId();
+                h = fnv64(h, id != null ? id.hashCode() : System.identityHashCode(m));
+
+                String t = m.getTypeId();
+                if (t != null) h = fnv64(h, t.hashCode());
+
+                Direction d = m.getOrientation();
+                if (d != null) h = fnv64(h, d.ordinal());
+
+                Vector3Int dim = m.getDimensions();
+                if (dim != null) {
+                    h = fnv64(h, dim.x());
+                    h = fnv64(h, dim.y());
+                    h = fnv64(h, dim.z());
+                }
+
+                h = fnv64(h, m.isDirty() ? 1 : 0);
+            }
+        }
+
+        if (resources != null && !resources.isEmpty()) {
+            for (Map.Entry<GridPosition, MatterColor> e : resources.entrySet()) {
+                GridPosition p = e.getKey();
+                MatterColor c = e.getValue();
+                if (p == null || c == null) continue;
+                h = fnv64(h, p.hashCode());
+                h = fnv64(h, c.ordinal());
+            }
+        }
+
+        return h;
+    }
+
+    private long fnv64(long h, int v) {
+        h ^= (v & 0xFFFFFFFFL);
+        h *= 1099511628211L;
+        return h;
+    }
+
+    private void repaintCoalesced() {
+        if (disposed) return;
+        if (repaintQueued) return;
+        repaintQueued = true;
+
+        SwingUtilities.invokeLater(() -> {
+            repaintQueued = false;
+            if (!disposed) repaint(0, 0, getWidth(), getHeight());
+        });
     }
 
     @Override
@@ -200,10 +357,12 @@ public class FactoryPanel extends JPanel {
         g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF);
         g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_OFF);
 
-        if (currentLayer == 0) drawTerrainResources(g2);
+        if (currentLayer == 0) drawTerrainResourcesCached(g2);
+
         BufferedImage img = gridImage;
         if (img != null) g2.drawImage(img, 0, 0, null);
-        drawMachines(g2);
+
+        drawMachinesCached(g2);
         drawGhost(g2);
     }
 
@@ -242,9 +401,8 @@ public class FactoryPanel extends JPanel {
         gridImageH = h;
     }
 
-    private void drawTerrainResources(Graphics2D g) {
-        if (playerUuid == null) return;
-        Map<GridPosition, MatterColor> resources = gridManager.getTerrainResources(playerUuid);
+    private void drawTerrainResourcesCached(Graphics2D g) {
+        Map<GridPosition, MatterColor> resources = cachedResources;
         if (resources == null || resources.isEmpty()) return;
 
         g.setFont(FONT_TINY);
@@ -266,9 +424,8 @@ public class FactoryPanel extends JPanel {
         }
     }
 
-    private void drawMachines(Graphics2D g) {
-        if (playerUuid == null) return;
-        Map<GridPosition, PlacedMachine> machines = gridManager.getSnapshot(playerUuid);
+    private void drawMachinesCached(Graphics2D g) {
+        Map<GridPosition, PlacedMachine> machines = cachedMachines;
         if (machines == null || machines.isEmpty()) return;
 
         IdentityHashMap<PlacedMachine, Boolean> seen = new IdentityHashMap<>();
@@ -324,8 +481,6 @@ public class FactoryPanel extends JPanel {
         String type = m.getTypeId();
         if ("nexus_core".equals(type)) {
             drawNexusPorts(g, x, z, w, h);
-        } else if ("chromator".equals(type) || "color_mixer".equals(type)) {
-            drawStandardPorts(g, m, x, z, w, h);
         } else if ("splitter".equals(type)) {
             drawSplitterPorts(g, m, x, z, w, h);
         } else if ("merger".equals(type)) {
@@ -345,19 +500,21 @@ public class FactoryPanel extends JPanel {
 
     private JsonObject getMetaCached(PlacedMachine m) {
         long now = System.nanoTime();
-        Long last = metaCacheNanos.get(m);
-        if (last != null && (now - last) <= META_CACHE_TTL_NANOS) {
-            return metaCache.get(m);
+        synchronized (metaCache) {
+            Long last = metaCacheNanos.get(m);
+            if (last != null && (now - last) <= META_CACHE_TTL_NANOS) {
+                return metaCache.get(m);
+            }
+            JsonObject meta;
+            try {
+                meta = m.serialize();
+            } catch (Throwable ex) {
+                meta = null;
+            }
+            metaCache.put(m, meta);
+            metaCacheNanos.put(m, now);
+            return meta;
         }
-        JsonObject meta;
-        try {
-            meta = m.serialize();
-        } catch (Throwable ex) {
-            meta = null;
-        }
-        metaCache.put(m, meta);
-        metaCacheNanos.put(m, now);
-        return meta;
     }
 
     private void drawVerticalPorts(Graphics2D g, PlacedMachine m, int x, int z) {
@@ -505,16 +662,18 @@ public class FactoryPanel extends JPanel {
     }
 
     private void drawGhost(Graphics2D g) {
-        if (mouseHoverPos == null || currentTool == null) return;
+        GridPosition hover = mouseHoverPos;
+        String tool = currentTool;
+        if (hover == null || tool == null) return;
 
         Vector3Int dim = getGhostDimsCached();
         int dimX = dim.x();
         int dimZ = dim.z();
 
-        int x = OFFSET_X + (mouseHoverPos.x() * CELL_SIZE);
-        int z = OFFSET_Y + (mouseHoverPos.z() * CELL_SIZE);
+        int x = OFFSET_X + (hover.x() * CELL_SIZE);
+        int z = OFFSET_Y + (hover.z() * CELL_SIZE);
 
-        Color fill = currentTool.startsWith("STRUCTURE:") ? Color.LIGHT_GRAY : getColorForType(currentTool);
+        Color fill = tool.startsWith("STRUCTURE:") ? Color.LIGHT_GRAY : getColorForType(tool);
 
         Composite old = g.getComposite();
         g.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.35f));
@@ -529,16 +688,18 @@ public class FactoryPanel extends JPanel {
     }
 
     private Vector3Int getGhostDimsCached() {
-        if (currentTool == null) return Vector3Int.one();
-        if (cachedGhostDim != null && currentTool.equals(cachedGhostTool) && currentOrientation == cachedGhostOri) {
+        String tool = currentTool;
+        if (tool == null) return Vector3Int.one();
+
+        if (cachedGhostDim != null && tool.equals(cachedGhostTool) && currentOrientation == cachedGhostOri) {
             return cachedGhostDim;
         }
 
         Vector3Int base;
-        if (currentTool.startsWith("STRUCTURE:")) {
+        if (tool.startsWith("STRUCTURE:")) {
             base = new Vector3Int(1, 1, 1);
         } else {
-            base = registry.getDimensions(currentTool);
+            base = registry.getDimensions(tool);
             if (base == null) base = Vector3Int.one();
         }
 
@@ -549,7 +710,7 @@ public class FactoryPanel extends JPanel {
             dimZ = base.x();
         }
 
-        cachedGhostTool = currentTool;
+        cachedGhostTool = tool;
         cachedGhostOri = currentOrientation;
         cachedGhostDim = new Vector3Int(dimX, base.y(), dimZ);
         return cachedGhostDim;
