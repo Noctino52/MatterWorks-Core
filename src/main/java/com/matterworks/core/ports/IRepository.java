@@ -40,4 +40,8 @@ public interface IRepository {
     // --- INVENTARIO ---
     int getInventoryItemCount(UUID ownerId, String itemId);
     void modifyInventoryItem(UUID ownerId, String itemId, int delta);
+
+    // --- SESSIONS ---
+    void openPlayerSession(UUID playerUuid);
+    void closePlayerSession(UUID playerUuid);
 }

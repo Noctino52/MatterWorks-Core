@@ -70,7 +70,7 @@ public class Main {
                     db.createPlot(id, 1, 0, 0);
                 }
 
-                gridManager.loadPlotFromDB(id);
+                gridManager.preloadPlotFromDB(id);
             } catch (Exception e) {
                 errors++;
                 e.printStackTrace();

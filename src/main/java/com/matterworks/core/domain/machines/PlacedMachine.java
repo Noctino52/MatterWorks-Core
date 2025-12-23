@@ -30,7 +30,11 @@ public abstract class PlacedMachine implements IGridComponent {
 
         this.orientation = Direction.NORTH;
         if (this.metadata.has("orientation")) {
-            this.orientation = Direction.valueOf(this.metadata.get("orientation").getAsString());
+            try {
+                this.orientation = Direction.valueOf(this.metadata.get("orientation").getAsString());
+            } catch (Exception ignored) {
+                this.orientation = Direction.NORTH;
+            }
         }
 
         this.dimensions = new Vector3Int(1, 1, 1);
@@ -44,36 +48,18 @@ public abstract class PlacedMachine implements IGridComponent {
         return dimensions;
     }
 
-    // --- NUOVO METODO HELPER PER I VICINI ---
     protected PlacedMachine getNeighborAt(GridPosition targetPos) {
         if (gridManager == null) return null;
-        // Chiede al GM la macchina in quella posizione MA nello stesso universo (ownerId)
         return gridManager.getMachineAt(this.ownerId, targetPos);
     }
 
     public void setOrientation(Direction orientation) {
-        this.orientation = orientation;
-        this.metadata.addProperty("orientation", orientation.name());
+        this.orientation = orientation != null ? orientation : Direction.NORTH;
+        this.metadata.addProperty("orientation", this.orientation.name());
         markDirty();
-    }
-    public Direction getNeighborDirection(GridPosition neighborPos) {
-        int dx = neighborPos.x() - this.pos.x();
-        int dy = neighborPos.y() - this.pos.y();
-        int dz = neighborPos.z() - this.pos.z();
-
-        if (dx == 1) return Direction.EAST;
-        if (dx == -1) return Direction.WEST;
-        if (dz == 1) return Direction.SOUTH;
-        if (dz == -1) return Direction.NORTH;
-        if (dy == 1) return Direction.UP;
-        if (dy == -1) return Direction.DOWN;
-
-        return null; // Non adiacente
     }
 
     public UUID getOwnerId() { return ownerId; }
-    public void cleanDirty() { this.isDirty = false; }
-
     public GridPosition getPos() { return pos; }
     public String getTypeId() { return typeId; }
     public Direction getOrientation() { return orientation; }
@@ -85,12 +71,23 @@ public abstract class PlacedMachine implements IGridComponent {
 
     public void markDirty() { this.isDirty = true; }
     public boolean isDirty() { return isDirty; }
+    public void cleanDirty() { this.isDirty = false; }
 
     public abstract void tick(long currentTick);
 
-    public void onPlace(IWorldAccess world) {}
-    public void onRemove() {}
+    @Override
+    public void onPlace(IWorldAccess world) {
+    }
 
+    @Override
+    public void onRemove(IWorldAccess world) {
+        onRemove();
+    }
+
+    public void onRemove() {
+    }
+
+    @Override
     public JsonObject serialize() {
         metadata.addProperty("orientation", orientation.name());
         return metadata;

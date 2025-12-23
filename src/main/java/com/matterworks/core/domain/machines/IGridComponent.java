@@ -4,13 +4,17 @@ import com.google.gson.JsonObject;
 import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.ports.IWorldAccess;
 
-/**
- * Interfaccia base per qualsiasi oggetto piazzabile sulla griglia.
- *
- */
 public interface IGridComponent {
+
     void onPlace(IWorldAccess world);
-    void onRemove();
+
+    void onRemove(IWorldAccess world);
+
+    default void onRemove() {
+        onRemove(null);
+    }
+
     JsonObject serialize();
+
     Vector3Int getDimensions();
 }
