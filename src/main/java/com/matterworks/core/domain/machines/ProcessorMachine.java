@@ -31,7 +31,6 @@ public abstract class ProcessorMachine extends PlacedMachine {
     public abstract boolean insertItem(MatterPayload item, GridPosition fromPos);
 
     protected boolean insertIntoBuffer(int slotIndex, MatterPayload item) {
-        if (item == null) return false;
         if (inputBuffer.getCountInSlot(slotIndex) >= MAX_INPUT_STACK) return false;
         if (inputBuffer.insertIntoSlot(slotIndex, item)) {
             saveState();
@@ -54,26 +53,38 @@ public abstract class ProcessorMachine extends PlacedMachine {
         GridPosition targetPos = getOutputPosition();
         PlacedMachine neighbor = getNeighborAt(targetPos);
 
+        // debug utile
+        metadata.addProperty("ejectTarget", String.valueOf(targetPos));
+        metadata.addProperty("ejectNeighbor", neighbor == null ? "null" : neighbor.getClass().getSimpleName() + "/" + neighbor.getTypeId());
+
         if (neighbor instanceof ConveyorBelt belt) {
             MatterPayload item = outputBuffer.extractFirst();
             if (item != null) {
                 if (belt.insertItem(item, currentTick)) {
+                    metadata.addProperty("ejectResult", "OK->BELT");
                     saveState();
                 } else {
-                    outputBuffer.insert(item); // rollback
+                    outputBuffer.insert(item);
+                    metadata.addProperty("ejectResult", "BELT_FULL");
+                    saveState();
                 }
             }
         } else if (neighbor instanceof NexusMachine nexus) {
             MatterPayload item = outputBuffer.extractFirst();
             if (item != null) {
-                // ✅ IMPORTANT: al Nexus devi passare la posizione ORIGINE (cella del macchinario),
-                // non la targetPos che sta dentro al volume del Nexus.
+                // ✅ FIX: fromPos deve essere la posizione del SENDER (macchina), non targetPos
                 if (nexus.insertItem(item, this.pos)) {
+                    metadata.addProperty("ejectResult", "OK->NEXUS");
                     saveState();
                 } else {
                     outputBuffer.insert(item);
+                    metadata.addProperty("ejectResult", "NEXUS_REJECT");
+                    saveState();
                 }
             }
+        } else {
+            metadata.addProperty("ejectResult", "NO_VALID_TARGET");
+            markDirty();
         }
     }
 

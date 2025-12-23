@@ -35,30 +35,40 @@ public class BlockRegistry {
     }
 
     public Vector3Int getDimensions(String blockId) {
+        if (blockId == null) return Vector3Int.one();
+
         if (statsCache.containsKey(blockId)) {
-            return statsCache.get(blockId).dimensions();
+            Vector3Int d = statsCache.get(blockId).dimensions();
+            return d != null ? d : Vector3Int.one();
         }
 
-        // Hardcoded fallback (stabilità)
+        // Hardcoded fallback per stabilità in caso di DB mancante
         return switch (blockId) {
             case "nexus_core" -> new Vector3Int(3, 3, 3);
-            case "chromator", "color_mixer", "splitter", "merger", "smoothing", "cutting" -> new Vector3Int(2, 1, 1);
+
+            case "chromator", "color_mixer", "splitter", "merger" -> new Vector3Int(2, 1, 1);
+
+            // ✅ GDD
+            case "smoothing", "cutting" -> new Vector3Int(2, 1, 1);
+
+            // ✅ componenti base
+            case "conveyor_belt" -> Vector3Int.one();
             case "drill_mk1" -> new Vector3Int(1, 2, 1);
+            case "lift", "dropper" -> new Vector3Int(1, 2, 1);
+
             default -> Vector3Int.one();
         };
     }
 
     public double getPrice(String blockId) {
-        if (statsCache.containsKey(blockId)) {
-            return statsCache.get(blockId).basePrice();
-        }
+        if (blockId == null) return 0.0;
+        if (statsCache.containsKey(blockId)) return statsCache.get(blockId).basePrice();
         return 0.0;
     }
 
     public String getModelId(String blockId) {
-        if (statsCache.containsKey(blockId)) {
-            return statsCache.get(blockId).modelId();
-        }
+        if (blockId == null) return "model_missing";
+        if (statsCache.containsKey(blockId)) return statsCache.get(blockId).modelId();
         return "model_missing";
     }
 }

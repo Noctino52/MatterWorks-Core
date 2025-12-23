@@ -399,8 +399,21 @@ final class FactoryPanelRenderer {
         int size = 18;
         int pad = (CELL_SIZE - size) / 2;
 
-        if ("CUBE".equals(shapeStr)) g.fillRect(x + pad, z + pad, size, size);
-        else g.fillOval(x + pad, z + pad, size, size);
+        if ("CUBE".equals(shapeStr)) {
+            g.fillRect(x + pad, z + pad, size, size);
+        } else if ("PYRAMID".equals(shapeStr)) {
+            int x0 = x + pad + size / 2;
+            int y0 = z + pad;
+            int x1 = x + pad;
+            int y1 = z + pad + size;
+            int x2 = x + pad + size;
+            int y2 = z + pad + size;
+            Polygon tri = new Polygon(new int[]{x0, x1, x2}, new int[]{y0, y1, y2}, 3);
+            g.fillPolygon(tri);
+        } else {
+            g.fillOval(x + pad, z + pad, size, size);
+        }
+
 
         g.setColor(Color.WHITE);
         g.drawRect(x + pad, z + pad, size, size);

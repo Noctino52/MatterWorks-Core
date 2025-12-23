@@ -1,84 +1,142 @@
 package com.matterworks.core.domain.machines;
 
 import com.google.gson.JsonObject;
+import com.matterworks.core.common.Direction;
 import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.domain.matter.MatterPayload;
 import com.matterworks.core.domain.matter.MatterShape;
 import com.matterworks.core.domain.matter.Recipe;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
-/**
- * DB typeId: "smoothing"
- * Trasforma: CUBE -> SPHERE (mantiene colore + effetti)
- */
 public class ShaperMachine extends ProcessorMachine {
 
-    private static final long PROCESS_TICKS = 40; // ~2s
+    private static final long PROCESS_TICKS = 40;
 
     public ShaperMachine(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata) {
         super(dbId, ownerId, pos, typeId, metadata);
         this.dimensions = new Vector3Int(2, 1, 1);
     }
 
+    private Vector3Int getEffectiveDims() {
+        Vector3Int base = (dimensions != null) ? dimensions : Vector3Int.one();
+        if (orientation == Direction.EAST || orientation == Direction.WEST) {
+            return new Vector3Int(base.z(), base.y(), base.x()); // swap x/z
+        }
+        return base;
+    }
+
+    /**
+     * pos potrebbe essere QUALSIASI cella della footprint.
+     * Proviamo tutte le origini possibili (origin = pos - offsetWithinFootprint).
+     */
+    private List<GridPosition> candidateOrigins() {
+        Vector3Int eff = getEffectiveDims();
+        List<GridPosition> origins = new ArrayList<>(eff.x() * eff.z());
+
+        for (int ox = 0; ox < eff.x(); ox++) {
+            for (int oz = 0; oz < eff.z(); oz++) {
+                origins.add(new GridPosition(pos.x() - ox, pos.y(), pos.z() - oz));
+            }
+        }
+        return origins;
+    }
+
+    private List<GridPosition> frontCells(GridPosition origin) {
+        Vector3Int eff = getEffectiveDims();
+        int x = origin.x(), y = origin.y(), z = origin.z();
+        List<GridPosition> out = new ArrayList<>(Math.max(eff.x(), eff.z()));
+
+        switch (orientation) {
+            case NORTH -> { int frontZ = z - 1; for (int dx = 0; dx < eff.x(); dx++) out.add(new GridPosition(x + dx, y, frontZ)); }
+            case SOUTH -> { int frontZ = z + eff.z(); for (int dx = 0; dx < eff.x(); dx++) out.add(new GridPosition(x + dx, y, frontZ)); }
+            case EAST  -> { int frontX = x + eff.x(); for (int dz = 0; dz < eff.z(); dz++) out.add(new GridPosition(frontX, y, z + dz)); }
+            case WEST  -> { int frontX = x - 1; for (int dz = 0; dz < eff.z(); dz++) out.add(new GridPosition(frontX, y, z + dz)); }
+        }
+        return out;
+    }
+
+    private List<GridPosition> backCells(GridPosition origin) {
+        Vector3Int eff = getEffectiveDims();
+        int x = origin.x(), y = origin.y(), z = origin.z();
+        List<GridPosition> in = new ArrayList<>(Math.max(eff.x(), eff.z()));
+
+        switch (orientation) {
+            case NORTH -> { int backZ = z + eff.z(); for (int dx = 0; dx < eff.x(); dx++) in.add(new GridPosition(x + dx, y, backZ)); }
+            case SOUTH -> { int backZ = z - 1; for (int dx = 0; dx < eff.x(); dx++) in.add(new GridPosition(x + dx, y, backZ)); }
+            case EAST  -> { int backX = x - 1; for (int dz = 0; dz < eff.z(); dz++) in.add(new GridPosition(backX, y, z + dz)); }
+            case WEST  -> { int backX = x + eff.x(); for (int dz = 0; dz < eff.z(); dz++) in.add(new GridPosition(backX, y, z + dz)); }
+        }
+        return in;
+    }
+
     @Override
     public boolean insertItem(MatterPayload item, GridPosition fromPos) {
-        if (item == null) return false;
-        if (fromPos == null) return false;
+        if (item == null || fromPos == null) return false;
         if (item.shape() != MatterShape.CUBE) return false;
 
-        // stesso schema geometrico del Chromator (back a 2 celle)
-        int slot = getSlotForPosition(fromPos);
-        if (slot == -1) return false;
-
-        // usiamo solo slot 0 (macchina 1-input)
-        return insertIntoBuffer(0, item);
+        // ✅ input SOLO dal BACK (ma robusto all'anchor)
+        for (GridPosition origin : candidateOrigins()) {
+            for (GridPosition p : backCells(origin)) {
+                if (fromPos.equals(p)) return insertIntoBuffer(0, item);
+            }
+        }
+        return false;
     }
 
     @Override
     protected GridPosition getOutputPosition() {
-        int x = pos.x(); int y = pos.y(); int z = pos.z();
-        return switch (orientation) {
-            case NORTH -> new GridPosition(x, y, z - 1);
-            case SOUTH -> new GridPosition(x + 1, y, z + 1);
-            case EAST  -> new GridPosition(x + 1, y, z);
-            case WEST  -> new GridPosition(x - 1, y, z + 1);
-            default -> pos;
-        };
+        // compat: "prima front cell" per un origin generico
+        return frontCells(candidateOrigins().get(0)).get(0);
     }
 
-    private int getSlotForPosition(GridPosition senderPos) {
-        int x = pos.x(); int y = pos.y(); int z = pos.z();
-        GridPosition s0, s1;
+    private void tryEjectFrontOnlyAnchorRobust(long currentTick) {
+        if (outputBuffer.isEmpty() || gridManager == null) return;
 
-        switch (orientation) {
-            case NORTH -> { s0 = new GridPosition(x, y, z + 1);     s1 = new GridPosition(x + 1, y, z + 1); }
-            case SOUTH -> { s0 = new GridPosition(x + 1, y, z - 1); s1 = new GridPosition(x, y, z - 1); }
-            case EAST  -> { s0 = new GridPosition(x - 1, y, z);     s1 = new GridPosition(x - 1, y, z + 1); }
-            case WEST  -> { s0 = new GridPosition(x + 1, y, z + 1); s1 = new GridPosition(x + 1, y, z); }
-            default -> { return -1; }
+        MatterPayload item = outputBuffer.extractFirst();
+        if (item == null) return;
+
+        // ✅ output SOLO sul FRONT (ma robusto all'anchor)
+        for (GridPosition origin : candidateOrigins()) {
+            for (GridPosition target : frontCells(origin)) {
+                PlacedMachine neighbor = getNeighborAt(target);
+                if (neighbor == null) continue;
+
+                if (neighbor instanceof ConveyorBelt belt) {
+                    if (belt.insertItem(item, currentTick)) {
+                        metadata.addProperty("lastEject", "OK");
+                        saveState();
+                        return;
+                    }
+                } else if (neighbor instanceof NexusMachine nexus) {
+                    if (nexus.insertItem(item, this.pos)) {
+                        metadata.addProperty("lastEject", "OK");
+                        saveState();
+                        return;
+                    }
+                }
+            }
         }
 
-        if (senderPos.equals(s0)) return 0;
-        if (senderPos.equals(s1)) return 1;
-        return -1;
+        // rollback
+        outputBuffer.insert(item);
+        metadata.addProperty("lastEject", "NO_FRONT_TARGET");
+        saveState();
     }
 
     @Override
     public void tick(long currentTick) {
-        super.tryEjectItem(currentTick);
+        tryEjectFrontOnlyAnchorRobust(currentTick);
 
         if (currentRecipe != null) {
-            if (currentTick >= finishTick) {
-                completeProcessing();
-            }
+            if (currentTick >= finishTick) completeProcessing();
             return;
         }
 
         if (outputBuffer.getCount() >= MAX_OUTPUT_STACK) return;
-
         if (inputBuffer.getCountInSlot(0) <= 0) return;
 
         MatterPayload in = inputBuffer.getItemInSlot(0);
