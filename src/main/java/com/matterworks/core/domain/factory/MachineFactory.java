@@ -24,7 +24,11 @@ public class MachineFactory {
             case "splitter" -> new Splitter(dbId, ownerId, pos, typeId, metadata);
             case "merger" -> new Merger(dbId, ownerId, pos, typeId, metadata);
 
-            // --- NUOVO CASO PER BLOCCHI STRUTTURALI ---
+            // NEW: Shaper/Cutting (typeId DB)
+            case "smoothing" -> new ShaperMachine(dbId, ownerId, pos, typeId, metadata);
+            case "cutting" -> new CuttingMachine(dbId, ownerId, pos, typeId, metadata);
+
+            // Strutture
             case "STRUCTURE_GENERIC" -> new StructuralBlock(dbId, ownerId, pos, typeId, metadata);
 
             default -> null;

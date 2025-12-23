@@ -5,6 +5,7 @@ import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.domain.inventory.MachineInventory;
 import com.matterworks.core.domain.matter.MatterPayload;
 import com.matterworks.core.domain.matter.Recipe;
+
 import java.util.UUID;
 
 public abstract class ProcessorMachine extends PlacedMachine {
@@ -30,6 +31,7 @@ public abstract class ProcessorMachine extends PlacedMachine {
     public abstract boolean insertItem(MatterPayload item, GridPosition fromPos);
 
     protected boolean insertIntoBuffer(int slotIndex, MatterPayload item) {
+        if (item == null) return false;
         if (inputBuffer.getCountInSlot(slotIndex) >= MAX_INPUT_STACK) return false;
         if (inputBuffer.insertIntoSlot(slotIndex, item)) {
             saveState();
@@ -58,13 +60,15 @@ public abstract class ProcessorMachine extends PlacedMachine {
                 if (belt.insertItem(item, currentTick)) {
                     saveState();
                 } else {
-                    outputBuffer.insert(item); // Rollback se nastro pieno
+                    outputBuffer.insert(item); // rollback
                 }
             }
         } else if (neighbor instanceof NexusMachine nexus) {
             MatterPayload item = outputBuffer.extractFirst();
             if (item != null) {
-                if (nexus.insertItem(item, targetPos)) {
+                // ✅ IMPORTANT: al Nexus devi passare la posizione ORIGINE (cella del macchinario),
+                // non la targetPos che sta dentro al volume del Nexus.
+                if (nexus.insertItem(item, this.pos)) {
                     saveState();
                 } else {
                     outputBuffer.insert(item);

@@ -1,14 +1,15 @@
 package com.matterworks.core.infrastructure.swing;
 
-import com.matterworks.core.domain.machines.BlockRegistry;
-import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.infrastructure.MariaDBAdapter;
+import com.matterworks.core.domain.player.PlayerProfile;
+import com.matterworks.core.domain.machines.BlockRegistry;
 import com.matterworks.core.managers.GridManager;
 import com.matterworks.core.ports.IRepository;
 
 import javax.swing.*;
 import java.awt.*;
-import java.awt.event.*;
+import java.awt.event.WindowAdapter;
+import java.awt.event.WindowEvent;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -23,16 +24,11 @@ public class MatterWorksGUI extends JFrame {
     private final Runnable onSave;
 
     private final FactoryPanel factoryPanel;
-    private final JTabbedPane rightTabbedPane;
-
+    private final JTabbedPane rightTabbedPane = new JTabbedPane();
     private final JPanel glassPane;
-    private JComboBox<Object> playerSelector;
 
-    private JLabel lblMoney;
-    private JLabel lblTool;
-    private JLabel lblOrient;
-    private JLabel lblLayer;
-    private JLabel lblPlotId;
+    private final TopBarPanel topBar;
+    private final StatusBarPanel statusBar = new StatusBarPanel();
 
     private final Timer economyTimer;
     private final Timer heartbeatTimer;
@@ -74,12 +70,10 @@ public class MatterWorksGUI extends JFrame {
                 this::requestEconomyRefresh
         );
 
-        this.rightTabbedPane = new JTabbedPane();
         this.rightTabbedPane.setPreferredSize(new Dimension(340, 0));
 
         this.glassPane = new JPanel() {
-            @Override
-            protected void paintComponent(Graphics g) {
+            @Override protected void paintComponent(Graphics g) {
                 g.setColor(new Color(0, 0, 0, 180));
                 g.fillRect(0, 0, getWidth(), getHeight());
                 g.setColor(Color.WHITE);
@@ -90,9 +84,27 @@ public class MatterWorksGUI extends JFrame {
             }
         };
         glassPane.setOpaque(false);
-        glassPane.addMouseListener(new MouseAdapter() {});
-        glassPane.addMouseMotionListener(new MouseAdapter() {});
+        glassPane.addMouseListener(new java.awt.event.MouseAdapter() {});
+        glassPane.addMouseMotionListener(new java.awt.event.MouseAdapter() {});
         setGlassPane(glassPane);
+
+        // top bar callbacks
+        this.topBar = new TopBarPanel(
+                this::selectTool,
+                this::buyToolRightClick,
+                this::changeLayer,
+                this::selectStructureTool,
+                this::handleSOS,
+                this::handleSave,
+                this::handleReset,
+                this::handleDeletePlayer
+        );
+
+        refreshPlayerList(true);
+        topBar.getPlayerSelector().addActionListener(e -> {
+            if (suppressPlayerEvents) return;
+            if (!glassPane.isVisible() && !isSwitching) handlePlayerSwitch();
+        });
 
         setTitle("MatterWorks Architect - Multi-User Management");
         setSize(1480, 900);
@@ -100,11 +112,9 @@ public class MatterWorksGUI extends JFrame {
         setLayout(new BorderLayout());
         setDefaultCloseOperation(WindowConstants.DO_NOTHING_ON_CLOSE);
 
-        JPanel topContainer = createTopContainer();
         updateTabs();
-        JPanel statusBar = createStatusBar();
 
-        add(topContainer, BorderLayout.NORTH);
+        add(topBar, BorderLayout.NORTH);
         add(factoryPanel, BorderLayout.CENTER);
         add(rightTabbedPane, BorderLayout.EAST);
         add(statusBar, BorderLayout.SOUTH);
@@ -119,10 +129,7 @@ public class MatterWorksGUI extends JFrame {
         heartbeatTimer.start();
 
         addWindowListener(new WindowAdapter() {
-            @Override
-            public void windowClosing(WindowEvent e) {
-                shutdownAndExit();
-            }
+            @Override public void windowClosing(WindowEvent e) { shutdownAndExit(); }
         });
 
         setVisible(true);
@@ -141,161 +148,80 @@ public class MatterWorksGUI extends JFrame {
         }
     }
 
+    // ===== TopBar actions =====
+
+    private void selectTool(String itemId) {
+        factoryPanel.setTool(itemId);
+        factoryPanel.requestFocusInWindow();
+        updateLabels();
+        if (currentPlayerUuid != null) gridManager.touchPlayer(currentPlayerUuid);
+    }
+
+    private void buyToolRightClick(String itemId, Integer amount) {
+        UUID u = currentPlayerUuid;
+        if (u == null) return;
+        runOffEdt(() -> {
+            gridManager.touchPlayer(u);
+            boolean ok = gridManager.buyItem(u, itemId, amount != null ? amount : 1);
+            if (ok) SwingUtilities.invokeLater(this::updateEconomyLabelsForce);
+        });
+    }
+
+    private void selectStructureTool(String nativeId) {
+        factoryPanel.setTool("STRUCTURE:" + nativeId);
+        factoryPanel.requestFocusInWindow();
+        updateLabels();
+    }
+
+    private void changeLayer(Integer delta) {
+        int d = (delta != null ? delta : 0);
+        int newY = Math.max(0, factoryPanel.getCurrentLayer() + d);
+        factoryPanel.setLayer(newY);
+        factoryPanel.requestFocusInWindow();
+        updateLabels();
+    }
+
+    private void handleSOS() {
+        if (currentPlayerUuid == null) return;
+        gridManager.touchPlayer(currentPlayerUuid);
+        if (gridManager.attemptBailout(currentPlayerUuid)) {
+            JOptionPane.showMessageDialog(this, "SOS approved! Funds granted.");
+            updateEconomyLabelsForce();
+        }
+    }
+
+    private void handleSave() {
+        if (currentPlayerUuid != null) gridManager.touchPlayer(currentPlayerUuid);
+        onSave.run();
+        updateEconomyLabelsForce();
+    }
+
+    private void handleReset() {
+        if (currentPlayerUuid == null) return;
+        int res = JOptionPane.showConfirmDialog(
+                this,
+                "Reset plot? All progress will be lost.",
+                "Reset",
+                JOptionPane.YES_NO_OPTION
+        );
+        if (res == JOptionPane.YES_OPTION) {
+            gridManager.touchPlayer(currentPlayerUuid);
+            gridManager.resetUserPlot(currentPlayerUuid);
+            factoryPanel.forceRefreshNow();
+            updateEconomyLabelsForce();
+        }
+    }
+
     private void requestEconomyRefresh() {
         SwingUtilities.invokeLater(this::updateEconomyLabelsForce);
     }
 
-    // ==========================================================
-    // UI CONSTRUCTION
-    // ==========================================================
-
-    private JPanel createTopContainer() {
-        JPanel container = new JPanel(new BorderLayout());
-
-        JPanel header = new JPanel(new FlowLayout(FlowLayout.LEFT, 20, 10));
-        header.setBackground(new Color(45, 45, 48));
-
-        JLabel activeLabel = new JLabel("ACTIVE USER:");
-        activeLabel.setForeground(Color.WHITE);
-
-        playerSelector = new JComboBox<>();
-        refreshPlayerList(true);
-
-        playerSelector.addActionListener(e -> {
-            if (suppressPlayerEvents) return;
-            if (!glassPane.isVisible() && !isSwitching) handlePlayerSwitch();
-        });
-
-        lblMoney = createLabel("MONEY: $---", Color.GREEN, 16);
-
-        header.add(activeLabel);
-        header.add(playerSelector);
-        header.add(lblMoney);
-
-        JPanel toolbar = new JPanel(new BorderLayout());
-        toolbar.setBackground(new Color(60, 60, 65));
-
-        JPanel leftTools = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 5));
-        leftTools.setOpaque(false);
-
-        leftTools.add(createToolButton("Drill", "drill_mk1"));
-        leftTools.add(createToolButton("Belt", "conveyor_belt"));
-        leftTools.add(createToolButton("Splitter", "splitter"));
-        leftTools.add(createToolButton("Merger", "merger"));
-        leftTools.add(createToolButton("Lift", "lift"));
-        leftTools.add(createToolButton("Drop", "dropper"));
-        leftTools.add(createToolButton("Chromator", "chromator"));
-        leftTools.add(createToolButton("Mixer", "color_mixer"));
-        leftTools.add(createToolButton("Nexus", "nexus_core"));
-
-        leftTools.add(new JSeparator(SwingConstants.VERTICAL) {{
-            setPreferredSize(new Dimension(5, 25));
-        }});
-
-        JButton btnStructure = createSimpleButton("Structure", e -> {
-            String blockId = JOptionPane.showInputDialog(
-                    this,
-                    "Enter Native Block ID (e.g., hytale:stone):",
-                    "hytale:stone"
-            );
-            if (blockId != null && !blockId.isBlank()) {
-                factoryPanel.setTool("STRUCTURE:" + blockId);
-                factoryPanel.requestFocusInWindow();
-                updateLabels();
-            }
-        });
-        btnStructure.setBackground(new Color(100, 100, 100));
-        leftTools.add(btnStructure);
-
-        leftTools.add(new JSeparator(SwingConstants.VERTICAL) {{
-            setPreferredSize(new Dimension(5, 25));
-        }});
-
-        leftTools.add(createSimpleButton("DOWN", e -> changeLayer(-1)));
-        leftTools.add(createSimpleButton("UP", e -> changeLayer(1)));
-
-        JPanel rightSystem = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 5));
-        rightSystem.setOpaque(false);
-
-        JButton btnSOS = createSimpleButton("SOS", e -> {
-            if (currentPlayerUuid == null) return;
-            gridManager.touchPlayer(currentPlayerUuid);
-            if (gridManager.attemptBailout(currentPlayerUuid)) {
-                JOptionPane.showMessageDialog(this, "SOS approved! Funds granted.");
-                updateEconomyLabelsForce();
-            }
-        });
-        btnSOS.setBackground(new Color(220, 150, 0));
-
-        JButton btnSave = createSimpleButton("SAVE", e -> {
-            if (currentPlayerUuid != null) gridManager.touchPlayer(currentPlayerUuid);
-            onSave.run();
-            updateEconomyLabelsForce();
-        });
-        btnSave.setBackground(new Color(0, 100, 200));
-
-        JButton btnReset = createSimpleButton("RESET", e -> {
-            if (currentPlayerUuid == null) return;
-            int res = JOptionPane.showConfirmDialog(
-                    this,
-                    "Reset plot? All progress will be lost.",
-                    "Reset",
-                    JOptionPane.YES_NO_OPTION
-            );
-            if (res == JOptionPane.YES_OPTION) {
-                gridManager.touchPlayer(currentPlayerUuid);
-                gridManager.resetUserPlot(currentPlayerUuid);
-                factoryPanel.forceRefreshNow();
-                updateEconomyLabelsForce();
-            }
-        });
-        btnReset.setBackground(new Color(180, 0, 0));
-
-        JButton btnDelete = createSimpleButton("DELETE", e -> handleDeletePlayer());
-        btnDelete.setBackground(Color.BLACK);
-        btnDelete.setForeground(Color.RED);
-        btnDelete.setBorder(BorderFactory.createLineBorder(Color.RED, 1));
-
-        rightSystem.add(btnSOS);
-        rightSystem.add(btnSave);
-        rightSystem.add(btnReset);
-        rightSystem.add(btnDelete);
-
-        toolbar.add(leftTools, BorderLayout.WEST);
-        toolbar.add(rightSystem, BorderLayout.EAST);
-
-        container.add(header, BorderLayout.NORTH);
-        container.add(toolbar, BorderLayout.SOUTH);
-        return container;
-    }
-
-    private JPanel createStatusBar() {
-        JPanel statusPanel = new JPanel(new BorderLayout());
-        statusPanel.setBackground(new Color(35, 35, 35));
-
-        JPanel leftStatus = new JPanel(new FlowLayout(FlowLayout.LEFT, 20, 5));
-        leftStatus.setOpaque(false);
-
-        lblTool = createLabel("TOOL: ---", Color.WHITE, 12);
-        lblOrient = createLabel("DIR: ---", Color.WHITE, 12);
-        lblLayer = createLabel("LAYER: 0", Color.CYAN, 12);
-
-        leftStatus.add(lblTool);
-        leftStatus.add(lblOrient);
-        leftStatus.add(lblLayer);
-
-        lblPlotId = createLabel("PLOT ID: #---", Color.LIGHT_GRAY, 12);
-
-        statusPanel.add(leftStatus, BorderLayout.WEST);
-        statusPanel.add(lblPlotId, BorderLayout.EAST);
-
-        return statusPanel;
-    }
+    // ===== Tabs =====
 
     private void updateTabs() {
         for (Component c : rightTabbedPane.getComponents()) {
-            if (c instanceof InventoryDebugPanel) ((InventoryDebugPanel) c).dispose();
-            if (c instanceof TechTreePanel) ((TechTreePanel) c).dispose();
+            if (c instanceof InventoryDebugPanel p) p.dispose();
+            if (c instanceof TechTreePanel p) p.dispose();
         }
 
         rightTabbedPane.removeAll();
@@ -304,18 +230,14 @@ public class MatterWorksGUI extends JFrame {
             rightTabbedPane.addTab("Shop", new InventoryDebugPanel(repository, currentPlayerUuid, gridManager, this::requestEconomyRefresh));
             rightTabbedPane.addTab("Tech Tree", new TechTreePanel(repository, currentPlayerUuid, gridManager));
         } else {
-            rightTabbedPane.addTab("Info", new JPanel() {{
-                add(new JLabel("No Player Selected"));
-            }});
+            rightTabbedPane.addTab("Info", new JPanel() {{ add(new JLabel("No Player Selected")); }});
         }
     }
 
-    // ==========================================================
-    // SWITCHING / SESSION
-    // ==========================================================
+    // ===== Switching / Session =====
 
     private void handlePlayerSwitch() {
-        Object sel = playerSelector.getSelectedItem();
+        Object sel = topBar.getPlayerSelector().getSelectedItem();
 
         if (sel instanceof PlayerProfile p) {
             UUID newUuid = p.getPlayerId();
@@ -384,7 +306,6 @@ public class MatterWorksGUI extends JFrame {
                 JOptionPane.YES_NO_OPTION,
                 JOptionPane.ERROR_MESSAGE
         );
-
         if (confirm != JOptionPane.YES_OPTION) return;
 
         UUID toDelete = currentPlayerUuid;
@@ -449,16 +370,12 @@ public class MatterWorksGUI extends JFrame {
 
     private void safeOpenSession(UUID uuid) {
         if (uuid == null) return;
-        if (repository instanceof MariaDBAdapter a) {
-            a.openPlayerSession(uuid);
-        }
+        if (repository instanceof MariaDBAdapter a) a.openPlayerSession(uuid);
     }
 
     private void safeCloseSession(UUID uuid) {
         if (uuid == null) return;
-        if (repository instanceof MariaDBAdapter a) {
-            a.closePlayerSession(uuid);
-        }
+        if (repository instanceof MariaDBAdapter a) a.closePlayerSession(uuid);
     }
 
     private void shutdownAndExit() {
@@ -475,7 +392,6 @@ public class MatterWorksGUI extends JFrame {
                 SwingUtilities.invokeLater(() -> {
                     try { economyTimer.stop(); } catch (Exception ignored) {}
                     try { heartbeatTimer.stop(); } catch (Exception ignored) {}
-
                     try { factoryPanel.dispose(); } catch (Exception ignored) {}
                     try { dispose(); } catch (Exception ignored) {}
                     try { worker.shutdownNow(); } catch (Exception ignored) {}
@@ -494,11 +410,10 @@ public class MatterWorksGUI extends JFrame {
         });
     }
 
-    // ==========================================================
-    // LIST / LABELS / UTILS
-    // ==========================================================
+    // ===== Labels / List =====
 
     private void refreshPlayerList(boolean forceDb) {
+        JComboBox<Object> playerSelector = topBar.getPlayerSelector();
         if (playerSelector == null) return;
 
         suppressPlayerEvents = true;
@@ -536,12 +451,10 @@ public class MatterWorksGUI extends JFrame {
     }
 
     private void updateEconomyLabelsIfChanged() {
-        if (lblMoney == null || lblPlotId == null) return;
-
         UUID u = currentPlayerUuid;
         if (u == null) {
-            lblMoney.setText("MONEY: $---");
-            lblPlotId.setText("PLOT ID: ---");
+            topBar.getMoneyLabel().setText("MONEY: $---");
+            statusBar.setPlotId("PLOT ID: ---");
             return;
         }
 
@@ -567,86 +480,31 @@ public class MatterWorksGUI extends JFrame {
         lastPlotIdShown = pid;
         lastAdminShown = isAdmin;
 
-        lblMoney.setText(String.format("MONEY: $%,.2f [%s]", money, rank));
-        lblMoney.setForeground(isAdmin ? new Color(255, 215, 0) : Color.GREEN);
+        topBar.getMoneyLabel().setText(String.format("MONEY: $%,.2f [%s]", money, rank));
+        topBar.getMoneyLabel().setForeground(isAdmin ? new Color(255, 215, 0) : Color.GREEN);
 
-        lblPlotId.setText("PLOT ID: #" + (pid != null ? pid : "ERR"));
+        statusBar.setPlotId("PLOT ID: #" + (pid != null ? pid : "ERR"));
     }
 
     private void updateLabels() {
-        if (lblTool == null) return;
-
         String t = factoryPanel.getCurrentToolName();
         if (t != null && t.startsWith("STRUCTURE:")) t = "STRUCT (" + t.substring(10) + ")";
 
-        lblTool.setText("TOOL: " + (t != null ? t : "---"));
-        lblOrient.setText("DIR: " + factoryPanel.getCurrentOrientationName());
-        lblLayer.setText("LAYER: " + factoryPanel.getCurrentLayer());
-    }
-
-    private void changeLayer(int delta) {
-        int newY = Math.max(0, factoryPanel.getCurrentLayer() + delta);
-        factoryPanel.setLayer(newY);
-        factoryPanel.requestFocusInWindow();
-        updateLabels();
-    }
-
-    private JButton createToolButton(String text, String itemId) {
-        JButton btn = createSimpleButton(text, e -> {
-            factoryPanel.setTool(itemId);
-            factoryPanel.requestFocusInWindow();
-            updateLabels();
-            if (currentPlayerUuid != null) gridManager.touchPlayer(currentPlayerUuid);
-        });
-
-        // buy 1 item con right-click -> OFF-EDT (DB)
-        btn.addMouseListener(new MouseAdapter() {
-            @Override
-            public void mousePressed(MouseEvent e) {
-                if (SwingUtilities.isRightMouseButton(e) && currentPlayerUuid != null) {
-                    UUID u = currentPlayerUuid;
-                    runOffEdt(() -> {
-                        gridManager.touchPlayer(u);
-                        boolean ok = gridManager.buyItem(u, itemId, 1);
-                        if (ok) SwingUtilities.invokeLater(() -> updateEconomyLabelsForce());
-                    });
-                }
-            }
-        });
-
-        return btn;
-    }
-
-    private JButton createSimpleButton(String text, ActionListener action) {
-        JButton btn = new JButton(text);
-        btn.setFocusable(false);
-        btn.addActionListener(action);
-        btn.setBackground(new Color(70, 70, 70));
-        btn.setForeground(Color.WHITE);
-        return btn;
-    }
-
-    private JLabel createLabel(String text, Color color, int size) {
-        JLabel lbl = new JLabel(text);
-        lbl.setForeground(color);
-        lbl.setFont(new Font("Monospaced", Font.BOLD, size));
-        return lbl;
+        statusBar.setTool(t);
+        statusBar.setDir(factoryPanel.getCurrentOrientationName());
+        statusBar.setLayer(factoryPanel.getCurrentLayer());
     }
 
     private void setLoading(boolean loading) {
         SwingUtilities.invokeLater(() -> {
             glassPane.setVisible(loading);
-            if (playerSelector != null) playerSelector.setEnabled(!loading);
+            topBar.getPlayerSelector().setEnabled(!loading);
         });
     }
 
     private void runOffEdt(Runnable r) {
         worker.submit(() -> {
-            try {
-                r.run();
-            } catch (Throwable t) {
-                t.printStackTrace();
-            }
+            try { r.run(); } catch (Throwable t) { t.printStackTrace(); }
         });
     }
 }
