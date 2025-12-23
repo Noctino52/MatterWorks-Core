@@ -41,6 +41,9 @@ final class FactoryPanelRenderer {
     private volatile Direction cachedGhostOri = null;
     private volatile Vector3Int cachedGhostDim = null;
 
+    // machine lookup for this paint frame (cell -> occupant machine)
+    private Map<GridPosition, PlacedMachine> machineGrid = Map.of();
+
     FactoryPanelRenderer(BlockRegistry registry, FactoryPanelController controller, FactoryPanelState state) {
         this.registry = registry;
         this.controller = controller;
@@ -63,10 +66,60 @@ final class FactoryPanelRenderer {
 
         var snap = controller.getSnapshot();
 
+// ✅ cache griglia occupazione per risolvere i port come fa la logica
+        this.machineGrid = buildExpandedOccupancy((snap.machines() != null) ? snap.machines() : Map.of());
+
         if (state.currentLayer == 0) drawTerrainResources(g2, snap.resources());
         drawMachines(g2, snap.machines());
         drawGhost(g2);
+
     }
+
+
+    private Map<GridPosition, PlacedMachine> buildExpandedOccupancy(Map<GridPosition, PlacedMachine> machines) {
+        if (machines == null || machines.isEmpty()) return Map.of();
+
+        // NB: HashMap normale va bene, non serve Concurrent qui (è per il frame corrente)
+        java.util.HashMap<GridPosition, PlacedMachine> out = new java.util.HashMap<>();
+
+        // dedup per istanza (perché machines.values() può contenere duplicati o comunque vogliamo espandere 1 volta)
+        java.util.IdentityHashMap<PlacedMachine, Boolean> seen = new java.util.IdentityHashMap<>();
+
+        for (PlacedMachine m : machines.values()) {
+            if (m == null) continue;
+            if (seen.put(m, Boolean.TRUE) != null) continue;
+
+            GridPosition p = m.getPos();
+            if (p == null) continue;
+
+            // sempre la cella base
+            out.put(p, m);
+
+            // per le 2x1 (incluso smoothing/cutting) espando in modo speculare usando ext offset
+            Vector3Int dim = registry.getDimensions(m.getTypeId());
+            if (dim != null && dim.x() == 2 && dim.z() == 1) {
+                // 2x1 ruotata: la seconda cella dipende dall’orientamento
+                int[] ext = extensionOffset2x1(m.getOrientation());
+                GridPosition p2 = new GridPosition(p.x() + ext[0], p.y(), p.z() + ext[1]);
+                out.put(p2, m);
+                continue;
+            }
+
+            // fallback generico: rettangolo “positivo” (per macchine non-problematiche)
+            // (Se un giorno aggiungi footprint con anchor diverso, si può raffinare, ma per shaper/cutting basta sopra)
+            if (dim != null) {
+                Vector3Int eff = getEffectiveFootprint(m.getTypeId(), m.getOrientation());
+                for (int dx = 0; dx < eff.x(); dx++) {
+                    for (int dz = 0; dz < eff.z(); dz++) {
+                        out.put(new GridPosition(p.x() + dx, p.y(), p.z() + dz), m);
+                    }
+                }
+            }
+        }
+
+        return out;
+    }
+
 
     private void ensureGridImage(int w, int h) {
         if (w <= 0 || h <= 0) return;
@@ -148,7 +201,7 @@ final class FactoryPanelRenderer {
         int x = OFFSET_X + (p.x() * CELL_SIZE);
         int z = OFFSET_Y + (p.z() * CELL_SIZE);
 
-        // ✅ footprint “authoritative”: registry dims + orientation
+        // footprint “authoritative”: registry dims + orientation
         Vector3Int eff = getEffectiveFootprint(m.getTypeId(), m.getOrientation());
         int w = eff.x() * CELL_SIZE;
         int h = eff.z() * CELL_SIZE;
@@ -188,8 +241,8 @@ final class FactoryPanelRenderer {
         } else if ("chromator".equals(type) || "color_mixer".equals(type)) {
             drawTwoInputsOneOutput_2x1(g, m, x, z);
         } else if ("smoothing".equals(type) || "cutting".equals(type)) {
-            // shaper/cutting: 1 porta concettuale front/back ma 2 punti d’aggancio su 2x1
-            drawFrontBackPorts_2x1(g, m, x, z);
+            // ✅ MUST match logic: "pos ± dir, if still self -> step again until outside footprint"
+            drawShaperCuttingPortsSingle(g, m, x, z);
         } else if ("lift".equals(type) || "dropper".equals(type)) {
             drawVerticalPorts(g, m, x, z);
         } else {
@@ -205,11 +258,40 @@ final class FactoryPanelRenderer {
         drawDirectionDot(g, x, z, w, h, m.getOrientation());
     }
 
-    // --- helper: disegna un port sul bordo di UNA cella della footprint ---
+    // ======= Machine lookup (cell -> occupant) =======
+
+    private PlacedMachine getMachineAt(GridPosition p) {
+        if (p == null) return null;
+        Map<GridPosition, PlacedMachine> grid = machineGrid;
+        if (grid == null || grid.isEmpty()) return null;
+        return grid.get(p);
+    }
+
+    /**
+     * Replica ESATTA della logica stepOutOfSelf:
+     * parte da start, se la cella è ancora occupata dalla stessa istanza di m,
+     * avanza di un altro step nella stessa direzione finché esce (max 3 step).
+     */
+    private GridPosition resolvePortCellOutsideFootprint(PlacedMachine m, GridPosition start, Direction stepDir) {
+        GridPosition p = start;
+        Vector3Int step = stepDir.toVector();
+
+        for (int i = 0; i < 3; i++) {
+            PlacedMachine at = getMachineAt(p);
+            if (at == null || at != m) return p;
+            p = new GridPosition(p.x() + step.x(), p.y() + step.y(), p.z() + step.z());
+        }
+        return p;
+    }
+
+
+    // ======= Ports drawing helpers =======
+
+    // draw a port on the EDGE of a specific cell (relative to base cell)
     private void drawPortOnCellEdge(Graphics2D g, int baseX, int baseZ, int cellDx, int cellDz, Direction edge, Color c) {
         int p = 8;
-        int cellX = baseX + cellDx * CELL_SIZE;
-        int cellZ = baseZ + cellDz * CELL_SIZE;
+        int cellX = (baseX + cellDx * CELL_SIZE);
+        int cellZ = (baseZ + cellDz * CELL_SIZE);
 
         Point pt = switch (edge) {
             case NORTH -> new Point(cellX + CELL_SIZE / 2 - p / 2, cellZ);
@@ -221,55 +303,40 @@ final class FactoryPanelRenderer {
 
         drawPort(g, pt, c);
     }
-    private void drawPortAtCellCenter(Graphics2D g, int baseX, int baseZ, int cellDx, int cellDz, Color c) {
-        int p = 8;
-        int cellX = baseX + cellDx * CELL_SIZE;
-        int cellZ = baseZ + cellDz * CELL_SIZE;
-        Point pt = new Point(cellX + CELL_SIZE / 2 - p / 2, cellZ + CELL_SIZE / 2 - p / 2);
-        drawPort(g, pt, c);
-    }
-
 
     private int[] extensionOffset2x1(Direction o) {
         return switch (o) {
-            case NORTH -> new int[]{ 1, 0 };
-            case SOUTH -> new int[]{-1, 0 };
-            case EAST  -> new int[]{ 0, 1 };
-            case WEST  -> new int[]{ 0,-1 };
-            default -> new int[]{ 1, 0 };
+            case NORTH -> new int[]{1, 0};
+            case SOUTH -> new int[]{-1, 0};
+            case EAST  -> new int[]{0, 1};
+            case WEST  -> new int[]{0, -1};
+            default -> new int[]{1, 0};
         };
     }
 
-    // --- NEXUS: porte input reali (dx/dz coerenti con isValidInputPort) ---
+    // NEXUS: real input ports (coherent with NexusMachine isValidInputPort)
     private void drawNexusPortsGrid(Graphics2D g, PlacedMachine m, int baseX, int baseZ) {
         int relY = state.currentLayer - m.getPos().y();
-        // Nexus accetta input solo sui livelli dy 0 e 1 (vedi NexusMachine)
         if (relY < 0 || relY > 1) return;
 
-        // Porte centrali: N,S,W,E
-        drawPortOnCellEdge(g, baseX, baseZ, 1, 0, Direction.NORTH, Color.BLUE); // from (x+1, z-1)
-        drawPortOnCellEdge(g, baseX, baseZ, 1, 2, Direction.SOUTH, Color.BLUE); // from (x+1, z+3)
-        drawPortOnCellEdge(g, baseX, baseZ, 0, 1, Direction.WEST,  Color.BLUE); // from (x-1, z+1)
-        drawPortOnCellEdge(g, baseX, baseZ, 2, 1, Direction.EAST,  Color.BLUE); // from (x+3, z+1)
-
-        // Nota: il Nexus non ha output verso belt, quindi niente verde qui (prima era fuorviante).
+        drawPortOnCellEdge(g, baseX, baseZ, 1, 0, Direction.NORTH, Color.BLUE);
+        drawPortOnCellEdge(g, baseX, baseZ, 1, 2, Direction.SOUTH, Color.BLUE);
+        drawPortOnCellEdge(g, baseX, baseZ, 0, 1, Direction.WEST, Color.BLUE);
+        drawPortOnCellEdge(g, baseX, baseZ, 2, 1, Direction.EAST, Color.BLUE);
     }
 
-    // --- SPLITTER: 1 input (back anchor), 2 output (front anchor + front extension) ---
+    // SPLITTER: 1 input (back anchor), 2 outputs (front anchor + front extension)
     private void drawSplitterPortsGrid(Graphics2D g, PlacedMachine m, int baseX, int baseZ) {
         Direction front = m.getOrientation();
         Direction back = front.opposite();
         int[] ext = extensionOffset2x1(front);
 
-        // input: retro ANCHOR
         drawPortOnCellEdge(g, baseX, baseZ, 0, 0, back, Color.BLUE);
-
-        // outputs: fronte ANCHOR + fronte EXTENSION
         drawPortOnCellEdge(g, baseX, baseZ, 0, 0, front, Color.GREEN);
         drawPortOnCellEdge(g, baseX, baseZ, ext[0], ext[1], front, Color.GREEN);
     }
 
-    // --- MERGER: 2 input (back anchor + back extension), 1 output (front anchor) ---
+    // MERGER: 2 inputs (back anchor + back extension), 1 output (front anchor)
     private void drawMergerPortsGrid(Graphics2D g, PlacedMachine m, int baseX, int baseZ) {
         Direction front = m.getOrientation();
         Direction back = front.opposite();
@@ -277,95 +344,81 @@ final class FactoryPanelRenderer {
 
         drawPortOnCellEdge(g, baseX, baseZ, 0, 0, back, Color.BLUE);
         drawPortOnCellEdge(g, baseX, baseZ, ext[0], ext[1], back, Color.BLUE);
-
         drawPortOnCellEdge(g, baseX, baseZ, 0, 0, front, Color.GREEN);
     }
 
-    // --- CHROMATOR / MIXER: 2 input (back su entrambe le celle), 1 output (front sulla cella "anchor-side") ---
+    // CHROMATOR / MIXER: 2 inputs (back on both cells), 1 output (as per legacy getOutputPosition)
     private void drawTwoInputsOneOutput_2x1(Graphics2D g, PlacedMachine m, int baseX, int baseZ) {
         Direction o = m.getOrientation();
 
-        // Celle footprint in base all’orientamento:
-        // N/S: (0,0) e (1,0)   | E/W: (0,0) e (0,1)
+        // N/S: (0,0) and (1,0) | E/W: (0,0) and (0,1)
         if (o == Direction.NORTH) {
-            // input back = SOUTH su entrambe
             drawPortOnCellEdge(g, baseX, baseZ, 0, 0, Direction.SOUTH, Color.BLUE);
             drawPortOnCellEdge(g, baseX, baseZ, 1, 0, Direction.SOUTH, Color.BLUE);
-            // output front = NORTH sulla cella sinistra (coerente con getOutputPosition di Chromator/Mixer)
             drawPortOnCellEdge(g, baseX, baseZ, 0, 0, Direction.NORTH, Color.GREEN);
         } else if (o == Direction.SOUTH) {
             drawPortOnCellEdge(g, baseX, baseZ, 0, 0, Direction.NORTH, Color.BLUE);
             drawPortOnCellEdge(g, baseX, baseZ, 1, 0, Direction.NORTH, Color.BLUE);
-            // output front = SOUTH sulla cella destra
             drawPortOnCellEdge(g, baseX, baseZ, 1, 0, Direction.SOUTH, Color.GREEN);
         } else if (o == Direction.EAST) {
             drawPortOnCellEdge(g, baseX, baseZ, 0, 0, Direction.WEST, Color.BLUE);
             drawPortOnCellEdge(g, baseX, baseZ, 0, 1, Direction.WEST, Color.BLUE);
-            // output front = EAST sulla cella anchor (0,0)
             drawPortOnCellEdge(g, baseX, baseZ, 0, 0, Direction.EAST, Color.GREEN);
         } else if (o == Direction.WEST) {
             drawPortOnCellEdge(g, baseX, baseZ, 0, 0, Direction.EAST, Color.BLUE);
             drawPortOnCellEdge(g, baseX, baseZ, 0, 1, Direction.EAST, Color.BLUE);
-            // output front = WEST sulla cella extension (0,1)
             drawPortOnCellEdge(g, baseX, baseZ, 0, 1, Direction.WEST, Color.GREEN);
         }
     }
 
-    // --- SHAPER / CUTTING: front/back “porta unica” ma 2 punti aggancio sulla 2x1 ---
-    private void drawFrontBackPorts_2x1(Graphics2D g, PlacedMachine m, int baseX, int baseZ) {
+    /**
+     * SHAPER/CUTTING (smoothing/cutting):
+     * draw ports exactly where logic expects them.
+     */
+    private void drawShaperCuttingPortsSingle(Graphics2D g, PlacedMachine m, int baseX, int baseZ) {
         Direction front = m.getOrientation();
         Direction back = front.opposite();
 
-        // footprint 2x1: anchor + extension (speculare)
-        int[] ext = extensionOffset2x1(front); // N:{+1,0} S:{-1,0} E:{0,+1} W:{0,-1}
-        int[][] cells = new int[][] { {0, 0}, {ext[0], ext[1]} };
+        GridPosition pos = m.getPos();
 
-        // ✅ SHIFT “come hai detto”: SOLO per SOUTH e WEST -> +1 a destra (+X) e +1 in basso (+Z)
-        int shiftX = (front == Direction.SOUTH || front == Direction.WEST) ? 1 : 0;
-        int shiftZ = (front == Direction.SOUTH || front == Direction.WEST) ? 1 : 0;
+        Vector3Int fv = front.toVector();
+        Vector3Int bv = back.toVector();
 
-        if (front == Direction.NORTH || front == Direction.SOUTH) {
-            // INPUT (blu): 1 blocco dietro (cella back), sul bordo estremo (N/S)
-            int backDz = (front == Direction.NORTH) ? 1 : -1;
-            for (int[] c : cells) {
-                int cx = c[0] + shiftX;
-                int cz = c[1] + backDz + shiftZ;
-                drawPortOnCellEdge(g, baseX, baseZ, cx, cz, back, Color.BLUE);
-            }
+        // start a 1 passo (come logica)
+        GridPosition outStart = new GridPosition(pos.x() + fv.x(), pos.y() + fv.y(), pos.z() + fv.z());
+        GridPosition inStart  = new GridPosition(pos.x() + bv.x(), pos.y() + bv.y(), pos.z() + bv.z());
 
-            // OUTPUT (verde): sul bordo front della footprint (come prima)
-            for (int[] c : cells) {
-                int cx = c[0] + shiftX;
-                int cz = c[1] + shiftZ;
-                drawPortOnCellEdge(g, baseX, baseZ, cx, cz, front, Color.GREEN);
-            }
+        // ✅ esci dalla footprint come fa la logica
+        GridPosition outCell = resolvePortCellOutsideFootprint(m, outStart, front);
+        GridPosition inCell  = resolvePortCellOutsideFootprint(m, inStart,  back);
 
-        } else {
-            // INPUT (blu): sul bordo back della footprint
-            for (int[] c : cells) {
-                int cx = c[0] + shiftX;
-                int cz = c[1] + shiftZ;
-                drawPortOnCellEdge(g, baseX, baseZ, cx, cz, back, Color.BLUE);
-            }
+        // converti world -> offset relativo alla cella base (che è pos)
+        int dxOut = outCell.x() - pos.x();
+        int dzOut = outCell.z() - pos.z();
+        int dxIn  = inCell.x()  - pos.x();
+        int dzIn  = inCell.z()  - pos.z();
+// vogliamo disegnare SUL BORDO DELLA MACCHINA (cella interna), non sul belt
 
-            // OUTPUT (verde): 1 blocco avanti (cella front), sul bordo estremo E/W
-            int frontDx = (front == Direction.EAST) ? 1 : -1;
-            for (int[] c : cells) {
-                int cx = c[0] + frontDx + shiftX;
-                int cz = c[1] + shiftZ;
-                drawPortOnCellEdge(g, baseX, baseZ, cx, cz, front, Color.GREEN);
-            }
-        }
+// cella interna adiacente all'INPUT (spostati di 1 verso la macchina)
+        int dxInInside  = dxIn  + fv.x();
+        int dzInInside  = dzIn  + fv.z();
+
+// cella interna adiacente all'OUTPUT (spostati di 1 verso la macchina)
+        int dxOutInside = dxOut + bv.x();
+        int dzOutInside = dzOut + bv.z();
+
+// INPUT: bordo back della cella interna
+        drawPortOnCellEdge(g, baseX, baseZ, dxInInside, dzInInside, back, Color.BLUE);
+
+// OUTPUT: bordo front della cella interna
+        drawPortOnCellEdge(g, baseX, baseZ, dxOutInside, dzOutInside, front, Color.GREEN);
+
     }
 
 
 
 
-
-
-
-
-
+    // ======= Footprint / Ghost =======
 
     private Vector3Int getEffectiveFootprint(String typeId, Direction ori) {
         Vector3Int base = registry.getDimensions(typeId);
@@ -430,7 +483,7 @@ final class FactoryPanelRenderer {
         return cachedGhostDim;
     }
 
-    // ===== ports + items + utils =====
+    // ======= Vertical machines =======
 
     private void drawVerticalPorts(Graphics2D g, PlacedMachine m, int x, int z) {
         int p = 8;
@@ -442,8 +495,8 @@ final class FactoryPanelRenderer {
         switch (m.getOrientation()) {
             case NORTH -> { front = new Point(x + c / 2 - p / 2, z); back = new Point(x + c / 2 - p / 2, z + c - p); }
             case SOUTH -> { front = new Point(x + c / 2 - p / 2, z + c - p); back = new Point(x + c / 2 - p / 2, z); }
-            case EAST -> { front = new Point(x + c - p, z + c / 2 - p / 2); back = new Point(x, z + c / 2 - p / 2); }
-            case WEST -> { front = new Point(x, z + c / 2 - p / 2); back = new Point(x + c - p, z + c / 2 - p / 2); }
+            case EAST  -> { front = new Point(x + c - p, z + c / 2 - p / 2); back = new Point(x, z + c / 2 - p / 2); }
+            case WEST  -> { front = new Point(x, z + c / 2 - p / 2); back = new Point(x + c - p, z + c / 2 - p / 2); }
         }
 
         if (isLift) {
@@ -471,42 +524,7 @@ final class FactoryPanelRenderer {
         g.drawString(sym, x + 8, y + 26);
     }
 
-    private void drawNexusPorts(Graphics2D g, int x, int z, int w, int h) {
-        int p = 10;
-        int cx = x + w / 2 - p / 2;
-        int cz = z + h / 2 - p / 2;
-
-        drawPort(g, new Point(cx, z), Color.BLUE);
-        drawPort(g, new Point(cx, z + h - p), Color.GREEN);
-        drawPort(g, new Point(x, cz), Color.BLUE);
-        drawPort(g, new Point(x + w - p, cz), Color.GREEN);
-    }
-
-    private void drawSplitterPorts(Graphics2D g, PlacedMachine m, int x, int z, int w, int h) {
-        int p = 8;
-        int cx = x + w / 2 - p / 2;
-        int cz = z + h / 2 - p / 2;
-
-        switch (m.getOrientation()) {
-            case NORTH -> { drawPort(g, new Point(cx, z + h - p), Color.BLUE); drawPort(g, new Point(x, cz), Color.GREEN); drawPort(g, new Point(x + w - p, cz), Color.GREEN); }
-            case SOUTH -> { drawPort(g, new Point(cx, z), Color.BLUE); drawPort(g, new Point(x, cz), Color.GREEN); drawPort(g, new Point(x + w - p, cz), Color.GREEN); }
-            case EAST -> { drawPort(g, new Point(x, cz), Color.BLUE); drawPort(g, new Point(cx, z), Color.GREEN); drawPort(g, new Point(cx, z + h - p), Color.GREEN); }
-            case WEST -> { drawPort(g, new Point(x + w - p, cz), Color.BLUE); drawPort(g, new Point(cx, z), Color.GREEN); drawPort(g, new Point(cx, z + h - p), Color.GREEN); }
-        }
-    }
-
-    private void drawMergerPorts(Graphics2D g, PlacedMachine m, int x, int z, int w, int h) {
-        int p = 8;
-        int cx = x + w / 2 - p / 2;
-        int cz = z + h / 2 - p / 2;
-
-        switch (m.getOrientation()) {
-            case NORTH -> { drawPort(g, new Point(x, cz), Color.BLUE); drawPort(g, new Point(x + w - p, cz), Color.BLUE); drawPort(g, new Point(cx, z), Color.GREEN); }
-            case SOUTH -> { drawPort(g, new Point(x, cz), Color.BLUE); drawPort(g, new Point(x + w - p, cz), Color.BLUE); drawPort(g, new Point(cx, z + h - p), Color.GREEN); }
-            case EAST -> { drawPort(g, new Point(cx, z), Color.BLUE); drawPort(g, new Point(cx, z + h - p), Color.BLUE); drawPort(g, new Point(x + w - p, cz), Color.GREEN); }
-            case WEST -> { drawPort(g, new Point(cx, z), Color.BLUE); drawPort(g, new Point(cx, z + h - p), Color.BLUE); drawPort(g, new Point(x, cz), Color.GREEN); }
-        }
-    }
+    // ======= Standard ports/items =======
 
     private void drawStandardPorts(Graphics2D g, PlacedMachine m, int x, int z, int w, int h) {
         int p = 8;
@@ -515,8 +533,8 @@ final class FactoryPanelRenderer {
         switch (m.getOrientation()) {
             case NORTH -> { front = new Point(x + w / 2 - p / 2, z); back = new Point(x + w / 2 - p / 2, z + h - p); }
             case SOUTH -> { front = new Point(x + w / 2 - p / 2, z + h - p); back = new Point(x + w / 2 - p / 2, z); }
-            case EAST -> { front = new Point(x + w - p, z + h / 2 - p / 2); back = new Point(x, z + h / 2 - p / 2); }
-            case WEST -> { front = new Point(x, z + h / 2 - p / 2); back = new Point(x + w - p, z + h / 2 - p / 2); }
+            case EAST  -> { front = new Point(x + w - p, z + h / 2 - p / 2); back = new Point(x, z + h / 2 - p / 2); }
+            case WEST  -> { front = new Point(x, z + h / 2 - p / 2); back = new Point(x + w - p, z + h / 2 - p / 2); }
         }
 
         if (back != null) drawPort(g, back, Color.BLUE);
@@ -581,7 +599,6 @@ final class FactoryPanelRenderer {
             g.fillOval(x + pad, z + pad, size, size);
         }
 
-
         g.setColor(Color.WHITE);
         g.drawRect(x + pad, z + pad, size, size);
     }
@@ -593,8 +610,8 @@ final class FactoryPanelRenderer {
         switch (dir) {
             case NORTH -> g.fillOval(cx - 3, y + 2, 6, 6);
             case SOUTH -> g.fillOval(cx - 3, y + h - 8, 6, 6);
-            case EAST -> g.fillOval(x + w - 8, cy - 3, 6, 6);
-            case WEST -> g.fillOval(x + 2, cy - 3, 6, 6);
+            case EAST  -> g.fillOval(x + w - 8, cy - 3, 6, 6);
+            case WEST  -> g.fillOval(x + 2, cy - 3, 6, 6);
         }
     }
 

@@ -1,14 +1,12 @@
 package com.matterworks.core.domain.machines;
 
 import com.google.gson.JsonObject;
-import com.matterworks.core.common.Direction;
 import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.domain.matter.MatterPayload;
 import com.matterworks.core.domain.matter.MatterShape;
 import com.matterworks.core.domain.matter.Recipe;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
@@ -21,56 +19,29 @@ public class ShaperMachine extends ProcessorMachine {
         this.dimensions = new Vector3Int(2, 1, 1);
     }
 
-    private Vector3Int getEffectiveDims() {
-        Vector3Int base = (dimensions != null) ? dimensions : Vector3Int.one();
-        if (orientation == Direction.EAST || orientation == Direction.WEST) {
-            return new Vector3Int(base.z(), base.y(), base.x()); // swap x/z
+    private GridPosition stepOutOfSelf(GridPosition start, Vector3Int step) {
+        GridPosition p = start;
+        // basta poco: 2x1 -> al massimo 2 step, metto guard 3 per sicurezza
+        for (int i = 0; i < 3; i++) {
+            PlacedMachine n = getNeighborAt(p);
+            if (n == null || n != this) return p;
+            p = new GridPosition(p.x() + step.x(), p.y() + step.y(), p.z() + step.z());
         }
-        return base;
+        return p;
     }
 
-    /**
-     * pos potrebbe essere QUALSIASI cella della footprint.
-     * Proviamo tutte le origini possibili (origin = pos - offsetWithinFootprint).
-     */
-    private List<GridPosition> candidateOrigins() {
-        Vector3Int eff = getEffectiveDims();
-        List<GridPosition> origins = new ArrayList<>(eff.x() * eff.z());
-
-        for (int ox = 0; ox < eff.x(); ox++) {
-            for (int oz = 0; oz < eff.z(); oz++) {
-                origins.add(new GridPosition(pos.x() - ox, pos.y(), pos.z() - oz));
-            }
-        }
-        return origins;
+    private GridPosition getInputPortPosition() {
+        Vector3Int f = orientation.toVector();
+        Vector3Int back = new Vector3Int(-f.x(), -f.y(), -f.z());
+        GridPosition start = new GridPosition(pos.x() + back.x(), pos.y() + back.y(), pos.z() + back.z());
+        return stepOutOfSelf(start, back);
     }
 
-    private List<GridPosition> frontCells(GridPosition origin) {
-        Vector3Int eff = getEffectiveDims();
-        int x = origin.x(), y = origin.y(), z = origin.z();
-        List<GridPosition> out = new ArrayList<>(Math.max(eff.x(), eff.z()));
-
-        switch (orientation) {
-            case NORTH -> { int frontZ = z - 1; for (int dx = 0; dx < eff.x(); dx++) out.add(new GridPosition(x + dx, y, frontZ)); }
-            case SOUTH -> { int frontZ = z + eff.z(); for (int dx = 0; dx < eff.x(); dx++) out.add(new GridPosition(x + dx, y, frontZ)); }
-            case EAST  -> { int frontX = x + eff.x(); for (int dz = 0; dz < eff.z(); dz++) out.add(new GridPosition(frontX, y, z + dz)); }
-            case WEST  -> { int frontX = x - 1; for (int dz = 0; dz < eff.z(); dz++) out.add(new GridPosition(frontX, y, z + dz)); }
-        }
-        return out;
-    }
-
-    private List<GridPosition> backCells(GridPosition origin) {
-        Vector3Int eff = getEffectiveDims();
-        int x = origin.x(), y = origin.y(), z = origin.z();
-        List<GridPosition> in = new ArrayList<>(Math.max(eff.x(), eff.z()));
-
-        switch (orientation) {
-            case NORTH -> { int backZ = z + eff.z(); for (int dx = 0; dx < eff.x(); dx++) in.add(new GridPosition(x + dx, y, backZ)); }
-            case SOUTH -> { int backZ = z - 1; for (int dx = 0; dx < eff.x(); dx++) in.add(new GridPosition(x + dx, y, backZ)); }
-            case EAST  -> { int backX = x - 1; for (int dz = 0; dz < eff.z(); dz++) in.add(new GridPosition(backX, y, z + dz)); }
-            case WEST  -> { int backX = x + eff.x(); for (int dz = 0; dz < eff.z(); dz++) in.add(new GridPosition(backX, y, z + dz)); }
-        }
-        return in;
+    @Override
+    protected GridPosition getOutputPosition() {
+        Vector3Int f = orientation.toVector();
+        GridPosition start = new GridPosition(pos.x() + f.x(), pos.y() + f.y(), pos.z() + f.z());
+        return stepOutOfSelf(start, f);
     }
 
     @Override
@@ -78,58 +49,13 @@ public class ShaperMachine extends ProcessorMachine {
         if (item == null || fromPos == null) return false;
         if (item.shape() != MatterShape.CUBE) return false;
 
-        // ✅ input SOLO dal BACK (ma robusto all'anchor)
-        for (GridPosition origin : candidateOrigins()) {
-            for (GridPosition p : backCells(origin)) {
-                if (fromPos.equals(p)) return insertIntoBuffer(0, item);
-            }
-        }
-        return false;
-    }
-
-    @Override
-    protected GridPosition getOutputPosition() {
-        // compat: "prima front cell" per un origin generico
-        return frontCells(candidateOrigins().get(0)).get(0);
-    }
-
-    private void tryEjectFrontOnlyAnchorRobust(long currentTick) {
-        if (outputBuffer.isEmpty() || gridManager == null) return;
-
-        MatterPayload item = outputBuffer.extractFirst();
-        if (item == null) return;
-
-        // ✅ output SOLO sul FRONT (ma robusto all'anchor)
-        for (GridPosition origin : candidateOrigins()) {
-            for (GridPosition target : frontCells(origin)) {
-                PlacedMachine neighbor = getNeighborAt(target);
-                if (neighbor == null) continue;
-
-                if (neighbor instanceof ConveyorBelt belt) {
-                    if (belt.insertItem(item, currentTick)) {
-                        metadata.addProperty("lastEject", "OK");
-                        saveState();
-                        return;
-                    }
-                } else if (neighbor instanceof NexusMachine nexus) {
-                    if (nexus.insertItem(item, this.pos)) {
-                        metadata.addProperty("lastEject", "OK");
-                        saveState();
-                        return;
-                    }
-                }
-            }
-        }
-
-        // rollback
-        outputBuffer.insert(item);
-        metadata.addProperty("lastEject", "NO_FRONT_TARGET");
-        saveState();
+        // ✅ 1 SOLO input port (fuori footprint)
+        return fromPos.equals(getInputPortPosition()) && insertIntoBuffer(0, item);
     }
 
     @Override
     public void tick(long currentTick) {
-        tryEjectFrontOnlyAnchorRobust(currentTick);
+        super.tryEjectItem(currentTick);
 
         if (currentRecipe != null) {
             if (currentTick >= finishTick) completeProcessing();
