@@ -1,0 +1,210 @@
+﻿=== BUNDLE: java__com.matterworks.core.domain.matter_part01 ===
+Created: 2025-12-23T17:16:23.3022300+01:00
+
+
+
+--------------------------------
+FILE: src\main\java\com\matterworks\core\domain\matter\MatterColor.java
+--------------------------------
+package com.matterworks.core.domain.matter;
+
+import java.util.Set;
+
+public enum MatterColor {
+    RAW,
+    RED,
+    BLUE,
+    YELLOW,
+    GREEN,
+    ORANGE,
+    PURPLE,
+    WHITE;
+
+    /**
+     * Logica di miscelazione colori additiva (RYB standard da gioco).
+     */
+    public static MatterColor mix(MatterColor c1, MatterColor c2) {
+        if (c1 == c2) return c1; // Rosso + Rosso = Rosso
+
+        // Ordiniamo i colori per semplificare i check (usando Set o confronto stringhe)
+        if (isMix(c1, c2, RED, YELLOW)) return ORANGE;
+        if (isMix(c1, c2, YELLOW, BLUE)) return GREEN;
+        if (isMix(c1, c2, RED, BLUE)) return PURPLE;
+
+        // Fallback: se mischio cose strane (es. Viola + Verde) diventa RAW o GRIGIO SCURO
+        return RAW;
+    }
+
+    private static boolean isMix(MatterColor in1, MatterColor in2, MatterColor target1, MatterColor target2) {
+        return (in1 == target1 && in2 == target2) || (in1 == target2 && in2 == target1);
+    }
+}
+
+
+--------------------------------
+FILE: src\main\java\com\matterworks\core\domain\matter\MatterEffect.java
+--------------------------------
+package com.matterworks.core.domain.matter;
+
+public enum MatterEffect {
+    SHINY,
+    BLAZING,
+    GLITCH,
+    RADIOACTIVE
+}
+
+
+--------------------------------
+FILE: src\main\java\com\matterworks\core\domain\matter\MatterPayload.java
+--------------------------------
+package com.matterworks.core.domain.matter;
+
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
+public record MatterPayload(
+        MatterShape shape,
+        MatterColor color,
+        List<MatterEffect> effects
+) {
+
+    public MatterPayload(MatterShape shape, MatterColor color) {
+        this(shape, color, Collections.emptyList());
+    }
+
+    public JsonObject serialize() {
+        JsonObject json = new JsonObject();
+
+        // --- FIX NPE: Controllo null su shape ---
+        if (shape != null) {
+            json.addProperty("shape", shape.name());
+        } else {
+            // Se shape Ã¨ null (liquido), non scriviamo nulla o scriviamo null esplicito
+            // Gson gestisce l'assenza come null al deserializing solitamente.
+        }
+
+        // Colore Ã¨ sempre presente (anche se RAW)
+        if (color != null) {
+            json.addProperty("color", color.name());
+        }
+
+        if (!effects.isEmpty()) {
+            JsonArray effectsJson = new JsonArray();
+            effects.forEach(e -> effectsJson.add(e.name()));
+            json.add("effects", effectsJson);
+        }
+        return json;
+    }
+
+    public boolean isComplex() { return !effects.isEmpty(); }
+
+    // --- FIX DESERIALIZZAZIONE: Supporto shape null ---
+    public static MatterPayload fromJson(JsonObject json) {
+        try {
+            // 1. Gestione Shape Opzionale
+            MatterShape s = null;
+            if (json.has("shape") && !json.get("shape").isJsonNull()) {
+                s = MatterShape.valueOf(json.get("shape").getAsString());
+            }
+
+            // 2. Gestione Colore
+            MatterColor c = MatterColor.RAW; // Default fallback
+            if (json.has("color")) {
+                c = MatterColor.valueOf(json.get("color").getAsString());
+            }
+
+            // 3. Gestione Effetti
+            List<MatterEffect> effs = new ArrayList<>();
+            if (json.has("effects")) {
+                JsonArray arr = json.getAsJsonArray("effects");
+                arr.forEach(el -> effs.add(MatterEffect.valueOf(el.getAsString())));
+            }
+
+            return new MatterPayload(s, c, effs);
+
+        } catch (Exception e) {
+            System.err.println("Errore parsing payload: " + e.getMessage());
+            // In caso di errore grave, ritorniamo un cubo raw per non crashare il server
+            return new MatterPayload(MatterShape.CUBE, MatterColor.RAW);
+        }
+    }
+}
+
+
+--------------------------------
+FILE: src\main\java\com\matterworks\core\domain\matter\MatterShape.java
+--------------------------------
+package com.matterworks.core.domain.matter;
+
+public enum MatterShape {
+    CUBE,
+    SPHERE,
+    PYRAMID,
+    CYLINDER
+}
+
+
+--------------------------------
+FILE: src\main\java\com\matterworks\core\domain\matter\Recipe.java
+--------------------------------
+package com.matterworks.core.domain.matter;
+
+import java.util.List;
+
+public record Recipe(
+        String id,
+        List<MatterPayload> inputs, // Cosa serve (es. 1 Cubo RAW)
+        MatterPayload output,       // Cosa esce (es. 1 Cubo ROSSO)
+        float processTimeSeconds,   // Quanto ci mette (es. 2.0s)
+        int requiredTechId          // Per sblocchi futuri (0 = base)
+) {}
+
+
+--------------------------------
+FILE: src\main\java\com\matterworks\core\domain\matter\RecipeRegistry.java
+--------------------------------
+package com.matterworks.core.domain.matter;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Optional;
+
+public class RecipeRegistry {
+
+    private static final List<Recipe> recipes = new ArrayList<>();
+
+    static {
+        // --- DEFINIZIONE RICETTE INIZIALI ---
+
+        // Ricetta: Dipingi di Rosso
+        // Input: CUBE RAW -> Output: CUBE RED
+        recipes.add(new Recipe(
+                "paint_red",
+                List.of(new MatterPayload(MatterShape.CUBE, MatterColor.RAW)),
+                new MatterPayload(MatterShape.CUBE, MatterColor.RED),
+                2.0f, // 2 secondi
+                0
+        ));
+    }
+
+    public static Optional<Recipe> findMatchingRecipe(List<MatterPayload> inputs) {
+        // Logica semplificata: Cerca la prima ricetta che corrisponde al primo item dell'input
+        // In futuro servirÃ  un matching piÃ¹ complesso per input multipli (Mixer)
+        if (inputs.isEmpty()) return Optional.empty();
+
+        MatterPayload firstInput = inputs.get(0);
+
+        return recipes.stream()
+                .filter(r -> !r.inputs().isEmpty())
+                .filter(r -> isMatch(r.inputs().get(0), firstInput))
+                .findFirst();
+    }
+
+    private static boolean isMatch(MatterPayload required, MatterPayload actual) {
+        return required.shape() == actual.shape() && required.color() == actual.color();
+    }
+}

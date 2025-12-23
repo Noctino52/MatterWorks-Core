@@ -1,0 +1,146 @@
+﻿=== BUNDLE: java__com.matterworks.core.synchronization_part01 ===
+Created: 2025-12-23T17:16:23.5892717+01:00
+
+
+
+--------------------------------
+FILE: src\main\java\com\matterworks\core\synchronization\FactoryLoop.java
+--------------------------------
+package com.matterworks.core.synchronization;
+
+import com.matterworks.core.managers.GridManager;
+
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+
+public class FactoryLoop {
+
+    private final GridManager gridManager;
+    private final ScheduledExecutorService scheduler;
+    private final AtomicLong currentTick = new AtomicLong(0);
+
+    private volatile boolean running = false;
+
+    public FactoryLoop(GridManager gridManager) {
+        this.gridManager = gridManager;
+        this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "mw-factory-loop");
+            t.setDaemon(true);
+            return t;
+        });
+    }
+
+    public void start() {
+        if (running) return;
+        running = true;
+
+        // 20 TPS -> 50ms per tick
+        scheduler.scheduleAtFixedRate(() -> {
+            if (!running) return;
+
+            try {
+                long tick = currentTick.incrementAndGet();
+                gridManager.tick(tick);
+            } catch (Throwable t) {
+                System.err.println("CRITICAL: Exception in Factory Loop!");
+                t.printStackTrace();
+            }
+        }, 0, 50, TimeUnit.MILLISECONDS);
+
+        System.out.println("ðŸ­ Factory Loop Started.");
+    }
+
+    public void stop() {
+        running = false;
+        scheduler.shutdown();
+        try {
+            if (!scheduler.awaitTermination(2, TimeUnit.SECONDS)) {
+                scheduler.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            scheduler.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    public boolean isRunning() {
+        return running;
+    }
+
+    public long getCurrentTick() {
+        return currentTick.get();
+    }
+}
+
+
+--------------------------------
+FILE: src\main\java\com\matterworks\core\synchronization\GridSaverService.java
+--------------------------------
+package com.matterworks.core.synchronization;
+
+import com.matterworks.core.common.GridPosition;
+import com.matterworks.core.domain.machines.PlacedMachine;
+import com.matterworks.core.domain.player.PlayerProfile;
+import com.matterworks.core.managers.GridManager;
+import com.matterworks.core.ports.IRepository;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
+public class GridSaverService {
+
+    private final GridManager gridManager;
+    private final IRepository repository;
+
+    public GridSaverService(GridManager gridManager, IRepository repository) {
+        this.gridManager = gridManager;
+        this.repository = repository;
+    }
+
+    public void autoSaveTask() {
+        List<PlayerProfile> players;
+        try {
+            players = repository.getAllPlayers();
+        } catch (Exception e) {
+            e.printStackTrace();
+            return;
+        }
+
+        int plotsTouched = 0;
+        int plotsFailed = 0;
+
+        for (PlayerProfile p : players) {
+            UUID ownerId = p.getPlayerId();
+
+            Map<GridPosition, PlacedMachine> snapshot = gridManager.getSnapshot(ownerId);
+            if (snapshot.isEmpty()) continue;
+
+            List<PlacedMachine> dirty = new ArrayList<>();
+            for (PlacedMachine m : snapshot.values()) {
+                if (m != null && m.isDirty() && m.getDbId() != null) {
+                    dirty.add(m);
+                }
+            }
+
+            if (dirty.isEmpty()) continue;
+
+            try {
+                repository.updateMachinesMetadata(dirty);
+                dirty.forEach(PlacedMachine::cleanDirty);
+                plotsTouched++;
+            } catch (Exception ex) {
+                plotsFailed++;
+                System.err.println("ðŸš¨ AutoSave failed for plot owner " + ownerId + " (dirty kept, will retry).");
+                ex.printStackTrace();
+            }
+        }
+
+        if (plotsTouched > 0 || plotsFailed > 0) {
+            System.out.println("ðŸ’¾ AutoSave: saved plots=" + plotsTouched + ", failed=" + plotsFailed);
+        }
+    }
+}

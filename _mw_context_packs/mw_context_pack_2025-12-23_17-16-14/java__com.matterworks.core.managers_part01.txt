@@ -1,0 +1,924 @@
+﻿=== BUNDLE: java__com.matterworks.core.managers_part01 ===
+Created: 2025-12-23T17:16:23.5036250+01:00
+
+
+
+--------------------------------
+FILE: src\main\java\com\matterworks\core\managers\GridManager.java
+--------------------------------
+package com.matterworks.core.managers;
+
+import com.matterworks.core.common.Direction;
+import com.matterworks.core.common.GridPosition;
+import com.matterworks.core.common.Vector3Int;
+import com.matterworks.core.domain.factory.MachineFactory;
+import com.matterworks.core.domain.machines.*;
+import com.matterworks.core.domain.matter.MatterColor;
+import com.matterworks.core.domain.player.PlayerProfile;
+import com.matterworks.core.domain.shop.MarketManager;
+import com.matterworks.core.infrastructure.MariaDBAdapter;
+import com.matterworks.core.infrastructure.ServerConfig;
+import com.matterworks.core.model.PlotObject;
+import com.matterworks.core.ports.IRepository;
+import com.matterworks.core.ports.IWorldAccess;
+
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.stream.Collectors;
+
+public class GridManager {
+
+    private final IRepository repository;
+    private final IWorldAccess worldAdapter;
+    private final BlockRegistry blockRegistry;
+
+    private final MarketManager marketManager;
+    private final TechManager techManager;
+
+    private final ExecutorService ioExecutor = Executors.newVirtualThreadPerTaskExecutor();
+
+    private volatile ServerConfig serverConfig;
+
+    // --- RUNTIME WORLD STATE ---
+    private final Map<UUID, PlayerProfile> activeProfileCache = new ConcurrentHashMap<>();
+    private final Map<UUID, Map<GridPosition, PlacedMachine>> playerGrids = new ConcurrentHashMap<>();
+    private final Map<UUID, Map<GridPosition, MatterColor>> playerResources = new ConcurrentHashMap<>();
+
+    private final List<PlacedMachine> tickingMachines = Collections.synchronizedList(new ArrayList<>());
+
+    // --- ACTIVITY / SLEEPING ---
+    private final Map<UUID, Long> lastActivityMs = new ConcurrentHashMap<>();
+    private final Set<UUID> sleepingPlayers = ConcurrentHashMap.newKeySet();
+    private volatile int minutesToInactive = 5;
+
+    // --- MAINTENANCE ---
+    private long lastSweepTick = 0;
+
+    public GridManager(IRepository repository, IWorldAccess worldAdapter, BlockRegistry registry) {
+        this.repository = repository;
+        this.worldAdapter = worldAdapter;
+        this.blockRegistry = registry;
+
+        this.marketManager = new MarketManager(this, repository);
+        this.techManager = new TechManager(repository, (repository instanceof MariaDBAdapter a) ? a.getTechDefinitionDAO() : null);
+
+        this.serverConfig = repository.loadServerConfig();
+        reloadMinutesToInactive();
+    }
+
+    // ==========================================================
+    // GETTERS
+    // ==========================================================
+    public TechManager getTechManager() { return techManager; }
+    public MarketManager getMarketManager() { return marketManager; }
+    public BlockRegistry getBlockRegistry() { return blockRegistry; }
+
+    // ==========================================================
+    // SNAPSHOTS (GUI)
+    // ==========================================================
+    public Map<GridPosition, PlacedMachine> getSnapshot(UUID ownerId) {
+        Map<GridPosition, PlacedMachine> g = playerGrids.get(ownerId);
+        return g != null ? new HashMap<>(g) : Collections.emptyMap();
+    }
+
+    public Map<GridPosition, PlacedMachine> getAllMachinesSnapshot() {
+        Map<GridPosition, PlacedMachine> all = new HashMap<>();
+        for (var map : playerGrids.values()) all.putAll(map);
+        return all;
+    }
+
+    public Map<GridPosition, MatterColor> getTerrainResources(UUID playerId) {
+        return playerResources.getOrDefault(playerId, Collections.emptyMap());
+    }
+
+    // ==========================================================
+    // CONFIG: MinutesToInactive
+    // ==========================================================
+    public void reloadMinutesToInactive() {
+        if (repository instanceof MariaDBAdapter a) {
+            this.minutesToInactive = Math.max(1, a.loadMinutesToInactive());
+        } else {
+            this.minutesToInactive = 5;
+        }
+    }
+
+    // ==========================================================
+    // ACTIVITY / SLEEPING
+    // ==========================================================
+    public void touchPlayer(UUID ownerId) {
+        if (ownerId == null) return;
+
+        lastActivityMs.put(ownerId, System.currentTimeMillis());
+
+        if (sleepingPlayers.remove(ownerId)) {
+            Map<GridPosition, PlacedMachine> grid = playerGrids.get(ownerId);
+            if (grid != null && !grid.isEmpty()) {
+                synchronized (tickingMachines) {
+                    for (PlacedMachine pm : new HashSet<>(grid.values())) {
+                        if (pm == null) continue;
+                        if (!tickingMachines.contains(pm)) tickingMachines.add(pm);
+                    }
+                }
+            }
+        }
+    }
+
+    public boolean isSleeping(UUID ownerId) {
+        return ownerId != null && sleepingPlayers.contains(ownerId);
+    }
+
+    private void sweepInactivePlayers(long currentTick) {
+        if (currentTick - lastSweepTick < 100) return;
+        lastSweepTick = currentTick;
+
+        long now = System.currentTimeMillis();
+        long threshold = minutesToInactive * 60_000L;
+
+        for (UUID ownerId : playerGrids.keySet()) {
+            long last = lastActivityMs.getOrDefault(ownerId, 0L);
+            if (last == 0L) continue;
+
+            if (!sleepingPlayers.contains(ownerId) && (now - last) >= threshold) {
+                sleepingPlayers.add(ownerId);
+                synchronized (tickingMachines) {
+                    tickingMachines.removeIf(m -> m != null && ownerId.equals(m.getOwnerId()));
+                }
+                if (repository instanceof MariaDBAdapter a) {
+                    a.closePlayerSession(ownerId);
+                }
+            }
+        }
+    }
+
+    // ==========================================================
+    // PROFILES / MONEY
+    // ==========================================================
+    public PlayerProfile getCachedProfile(UUID uuid) {
+        if (uuid == null) return null;
+        return activeProfileCache.computeIfAbsent(uuid, repository::loadPlayerProfile);
+    }
+
+    public void addMoney(UUID playerId, double amount, String actionType, String itemId) {
+        PlayerProfile p = getCachedProfile(playerId);
+        if (p == null) return;
+        p.modifyMoney(amount);
+        repository.savePlayerProfile(p);
+        repository.logTransaction(p, actionType, "MONEY", amount, itemId);
+        activeProfileCache.put(playerId, p);
+    }
+
+    // ==========================================================
+    // SHOP / GUI API
+    // ==========================================================
+    public boolean buyItem(UUID playerId, String itemId, int amount) {
+        touchPlayer(playerId);
+
+        PlayerProfile p = getCachedProfile(playerId);
+        if (p == null) return false;
+        if (!techManager.canBuyItem(p, itemId)) return false;
+        if (!p.isAdmin() && !checkItemCap(playerId, itemId, amount)) return false;
+
+        double cost = blockRegistry.getStats(itemId).basePrice() * amount;
+        if (!p.isAdmin() && p.getMoney() < cost) return false;
+
+        if (!p.isAdmin()) addMoney(playerId, -cost, "ITEM_BUY", itemId);
+        repository.modifyInventoryItem(playerId, itemId, amount);
+        return true;
+    }
+
+    public boolean attemptBailout(UUID ownerId) {
+        touchPlayer(ownerId);
+
+        PlayerProfile p = getCachedProfile(ownerId);
+        if (p == null) return false;
+
+        this.serverConfig = repository.loadServerConfig();
+        if (p.getMoney() < serverConfig.sosThreshold()) {
+            double diff = serverConfig.sosThreshold() - p.getMoney();
+            addMoney(ownerId, diff, "SOS_USE", "bailout");
+            return true;
+        }
+        return false;
+    }
+
+    public void resetUserPlot(UUID ownerId) {
+        if (ownerId == null) return;
+        touchPlayer(ownerId);
+
+        ioExecutor.submit(() -> {
+            saveAndUnloadSpecific(ownerId);
+            repository.clearPlotData(ownerId);
+            loadPlotSynchronously(ownerId);
+        });
+    }
+
+    public PlayerProfile createNewPlayer(String username) {
+        this.serverConfig = repository.loadServerConfig();
+
+        UUID newUuid = UUID.randomUUID();
+        PlayerProfile p = new PlayerProfile(newUuid);
+        p.setUsername(username);
+        p.setMoney(serverConfig.startMoney());
+        p.setRank(PlayerProfile.PlayerRank.PLAYER);
+
+        repository.savePlayerProfile(p);
+        activeProfileCache.put(newUuid, p);
+
+        repository.modifyInventoryItem(newUuid, "drill_mk1", 1);
+        repository.modifyInventoryItem(newUuid, "nexus_core", 1);
+        repository.modifyInventoryItem(newUuid, "conveyor_belt", 10);
+
+        if (repository instanceof MariaDBAdapter db) {
+            db.createPlot(newUuid, 1, 0, 0);
+        }
+
+        preloadPlotFromDB(newUuid);
+        return p;
+    }
+
+    public void deletePlayer(UUID uuid) {
+        if (uuid == null) return;
+
+        if (repository instanceof MariaDBAdapter a) a.closePlayerSession(uuid);
+
+        synchronized (tickingMachines) {
+            saveAndUnloadSpecific(uuid);
+            activeProfileCache.remove(uuid);
+        }
+        repository.deletePlayerFull(uuid);
+    }
+
+    // ==========================================================
+    // LOADING PLOTS
+    // ==========================================================
+    public void preloadPlotFromDB(UUID ownerId) {
+        if (ownerId == null) return;
+
+        if (playerGrids.containsKey(ownerId)) {
+            touchPlayer(ownerId);
+            return;
+        }
+
+        touchPlayer(ownerId);
+
+        ioExecutor.submit(() -> {
+            loadPlotSynchronously(ownerId);
+            PlayerProfile p = repository.loadPlayerProfile(ownerId);
+            if (p != null) activeProfileCache.put(ownerId, p);
+        });
+    }
+
+    public void loadPlotFromDB(UUID ownerId) {
+        if (ownerId == null) return;
+
+        if (playerGrids.containsKey(ownerId)) {
+            touchPlayer(ownerId);
+            return;
+        }
+
+        touchPlayer(ownerId);
+
+        ioExecutor.submit(() -> {
+            loadPlotSynchronously(ownerId);
+            PlayerProfile p = repository.loadPlayerProfile(ownerId);
+            if (p != null) activeProfileCache.put(ownerId, p);
+        });
+    }
+
+    private void loadPlotSynchronously(UUID ownerId) {
+        playerGrids.remove(ownerId);
+        playerResources.remove(ownerId);
+        sleepingPlayers.remove(ownerId);
+
+        synchronized (tickingMachines) {
+            tickingMachines.removeIf(m -> m != null && ownerId.equals(m.getOwnerId()));
+        }
+
+        try {
+            if (repository instanceof MariaDBAdapter db) {
+                Long pid = db.getPlotId(ownerId);
+                if (pid != null) {
+                    Map<GridPosition, MatterColor> res = db.loadResources(pid);
+                    if (res.isEmpty()) generateDefaultResources(db, pid, res);
+                    playerResources.put(ownerId, res);
+                }
+            }
+
+            List<PlotObject> dtos = repository.loadPlotMachines(ownerId);
+            for (PlotObject d : dtos) {
+                PlacedMachine m = MachineFactory.createFromModel(d, ownerId);
+                if (m == null) continue;
+
+                // FIX: senza questo, dopo reload/switch tutto resta fermo
+                m.setGridContext(this);
+
+                internalAddMachine(ownerId, m);
+            }
+
+            touchPlayer(ownerId);
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    // ==========================================================
+    // SIMULATION LOOP
+    // ==========================================================
+    public void tick(long t) {
+        sweepInactivePlayers(t);
+
+        synchronized (tickingMachines) {
+            for (PlacedMachine m : tickingMachines) {
+                if (m == null) continue;
+                m.tick(t);
+            }
+        }
+    }
+
+    // ==========================================================
+    // PLACEMENT / REMOVAL
+    // ==========================================================
+    public boolean placeStructure(UUID ownerId, GridPosition pos, String nativeBlockId) {
+        touchPlayer(ownerId);
+
+        if (!isAreaClear(ownerId, pos, Vector3Int.one())) return false;
+
+        StructuralBlock block = new StructuralBlock(ownerId, pos, nativeBlockId);
+        block.setGridContext(this);
+
+        internalAddMachine(ownerId, block);
+        block.onPlace(worldAdapter);
+
+        Long id = repository.createMachine(ownerId, block);
+        if (id != null) block.setDbId(id);
+
+        return true;
+    }
+
+    public boolean placeMachine(UUID ownerId, GridPosition pos, String typeId, Direction orientation) {
+        touchPlayer(ownerId);
+
+        PlayerProfile p = getCachedProfile(ownerId);
+        if (p == null || !techManager.canBuyItem(p, typeId)) return false;
+
+        Vector3Int dim = blockRegistry.getDimensions(typeId);
+        Vector3Int effDim = (orientation == Direction.EAST || orientation == Direction.WEST)
+                ? new Vector3Int(dim.z(), dim.y(), dim.x())
+                : dim;
+
+        if (!isAreaClear(ownerId, pos, effDim)) return false;
+
+        if (!p.isAdmin()) {
+            if (repository.getInventoryItemCount(ownerId, typeId) <= 0) return false;
+            repository.modifyInventoryItem(ownerId, typeId, -1);
+        }
+
+        PlotObject dto = new PlotObject(null, null, pos.x(), pos.y(), pos.z(), typeId, null);
+        PlacedMachine m = MachineFactory.createFromModel(dto, ownerId);
+        if (m == null) return false;
+
+        m.setOrientation(orientation);
+        m.setGridContext(this);
+
+        if (m instanceof DrillMachine drill) {
+            Map<GridPosition, MatterColor> resMap = playerResources.get(ownerId);
+            if (resMap != null) {
+                MatterColor resAt = resMap.get(pos);
+                if (resAt != null) drill.setResourceToMine(resAt);
+            }
+        }
+
+        internalAddMachine(ownerId, m);
+        m.onPlace(worldAdapter);
+
+        Long id = repository.createMachine(ownerId, m);
+        if (id != null) m.setDbId(id);
+
+        repository.logTransaction(p, "PLACE_MACHINE", "NONE", 0, typeId);
+        return true;
+    }
+
+    public void removeComponent(UUID ownerId, GridPosition pos) {
+        touchPlayer(ownerId);
+
+        PlacedMachine target = getMachineAt(ownerId, pos);
+        if (target == null) return;
+
+        PlayerProfile p = getCachedProfile(ownerId);
+
+        if (!(target instanceof StructuralBlock)) {
+            if (p != null && !p.isAdmin()) {
+                repository.modifyInventoryItem(ownerId, target.getTypeId(), +1);
+            }
+        }
+
+        internalRemoveMachine(ownerId, target);
+        target.onRemove(worldAdapter);
+
+        if (target.getDbId() != null) {
+            repository.deleteMachine(target.getDbId());
+        }
+
+        if (p != null) repository.logTransaction(p, "REMOVE_MACHINE", "NONE", 0, target.getTypeId());
+    }
+
+    // ==========================================================
+    // SAVE / UNLOAD
+    // ==========================================================
+    public void saveAndUnloadSpecific(UUID ownerId) {
+        if (ownerId == null) return;
+
+        Map<GridPosition, PlacedMachine> snap = getSnapshot(ownerId);
+        if (!snap.isEmpty()) {
+            List<PlacedMachine> dirty = snap.values().stream()
+                    .filter(Objects::nonNull)
+                    .distinct()
+                    .filter(PlacedMachine::isDirty)
+                    .collect(Collectors.toList());
+
+            if (!dirty.isEmpty()) {
+                repository.updateMachinesMetadata(dirty);
+                dirty.forEach(PlacedMachine::cleanDirty);
+            }
+        }
+
+        playerGrids.remove(ownerId);
+        playerResources.remove(ownerId);
+        activeProfileCache.remove(ownerId);
+        lastActivityMs.remove(ownerId);
+        sleepingPlayers.remove(ownerId);
+
+        synchronized (tickingMachines) {
+            tickingMachines.removeIf(m -> m != null && ownerId.equals(m.getOwnerId()));
+        }
+    }
+
+    // ==========================================================
+    // GRID INTERNALS
+    // ==========================================================
+    public PlacedMachine getMachineAt(UUID ownerId, GridPosition pos) {
+        if (ownerId == null || pos == null) return null;
+        Map<GridPosition, PlacedMachine> g = playerGrids.get(ownerId);
+        if (g == null) return null;
+        return g.get(pos);
+    }
+
+    private void internalAddMachine(UUID ownerId, PlacedMachine m) {
+        if (ownerId == null || m == null) return;
+
+        m.setGridContext(this);
+
+        Map<GridPosition, PlacedMachine> grid = playerGrids.computeIfAbsent(ownerId, _k -> new ConcurrentHashMap<>());
+
+        Vector3Int dim;
+        try {
+            dim = blockRegistry.getDimensions(m.getTypeId());
+        } catch (Exception ex) {
+            dim = Vector3Int.one();
+        }
+
+        Vector3Int effDim = dim;
+        if (m.getOrientation() == Direction.EAST || m.getOrientation() == Direction.WEST) {
+            effDim = new Vector3Int(dim.z(), dim.y(), dim.x());
+        }
+
+        for (int x = 0; x < effDim.x(); x++) {
+            for (int y = 0; y < effDim.y(); y++) {
+                for (int z = 0; z < effDim.z(); z++) {
+                    grid.put(new GridPosition(m.getPos().x() + x, m.getPos().y() + y, m.getPos().z() + z), m);
+                }
+            }
+        }
+
+        if (!sleepingPlayers.contains(ownerId)) {
+            synchronized (tickingMachines) {
+                if (!tickingMachines.contains(m)) tickingMachines.add(m);
+            }
+        }
+    }
+
+    private void internalRemoveMachine(UUID ownerId, PlacedMachine m) {
+        if (ownerId == null || m == null) return;
+
+        Map<GridPosition, PlacedMachine> grid = playerGrids.get(ownerId);
+        if (grid != null) {
+            grid.entrySet().removeIf(e -> e.getValue() == m);
+        }
+
+        synchronized (tickingMachines) {
+            tickingMachines.removeIf(x -> x == m);
+        }
+    }
+
+    private boolean isAreaClear(UUID ownerId, GridPosition pos, Vector3Int size) {
+        Map<GridPosition, PlacedMachine> grid = playerGrids.getOrDefault(ownerId, Collections.emptyMap());
+        for (int x = 0; x < size.x(); x++) {
+            for (int y = 0; y < size.y(); y++) {
+                for (int z = 0; z < size.z(); z++) {
+                    if (grid.containsKey(new GridPosition(pos.x() + x, pos.y() + y, pos.z() + z))) return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    // ==========================================================
+    // RESOURCES GENERATION
+    // ==========================================================
+    private void generateDefaultResources(MariaDBAdapter db, Long pid, Map<GridPosition, MatterColor> c) {
+        this.serverConfig = repository.loadServerConfig();
+        int y = 0;
+
+        for (int i = 0; i < serverConfig.veinRaw(); i++) spawnVein(db, pid, c, MatterColor.RAW, y);
+        for (int i = 0; i < serverConfig.veinRed(); i++) spawnVein(db, pid, c, MatterColor.RED, y);
+        for (int i = 0; i < serverConfig.veinBlue(); i++) spawnVein(db, pid, c, MatterColor.BLUE, y);
+        for (int i = 0; i < serverConfig.veinYellow(); i++) spawnVein(db, pid, c, MatterColor.YELLOW, y);
+    }
+
+    private void spawnVein(MariaDBAdapter db, Long pid, Map<GridPosition, MatterColor> c, MatterColor t, int y) {
+        Random r = new Random();
+        int x = r.nextInt(18) + 1;
+        int z = r.nextInt(18) + 1;
+        while (c.containsKey(new GridPosition(x, y, z))) {
+            x = r.nextInt(18) + 1;
+            z = r.nextInt(18) + 1;
+        }
+        db.saveResource(pid, x, z, t);
+        c.put(new GridPosition(x, y, z), t);
+    }
+
+    // ==========================================================
+    // CAPS
+    // ==========================================================
+    private boolean checkItemCap(UUID playerId, String itemId, int incomingAmount) {
+        int inInventory = repository.getInventoryItemCount(playerId, itemId);
+
+        Map<GridPosition, PlacedMachine> placed = playerGrids.get(playerId);
+        long placedCount = (placed != null)
+                ? placed.values().stream().filter(Objects::nonNull).distinct().filter(m -> m.getTypeId().equals(itemId)).count()
+                : 0;
+
+        long total = inInventory + placedCount + incomingAmount;
+
+        if (itemId.equals("nexus_core") && total > 1) return false;
+
+        if (itemId.equals("drill_mk1")) {
+            Map<GridPosition, MatterColor> veins = playerResources.get(playerId);
+            if (total > (veins != null ? veins.size() : 0)) return false;
+        }
+
+        return true;
+    }
+}
+
+
+--------------------------------
+FILE: src\main\java\com\matterworks\core\managers\TechManager.java
+--------------------------------
+package com.matterworks.core.managers;
+
+import com.matterworks.core.database.dao.TechDefinitionDAO;
+import com.matterworks.core.domain.player.PlayerProfile;
+import com.matterworks.core.ports.IRepository;
+import java.util.*;
+
+public class TechManager {
+
+    private final IRepository repository;
+    private final TechDefinitionDAO dao;
+
+    public record TechNode(
+            String id,
+            String name,
+            double cost,
+            List<String> parentIds,
+            List<String> unlockItemIds
+    ) {}
+
+    private final Map<String, TechNode> nodes = new LinkedHashMap<>();
+    private final Set<String> baseItems = Set.of("drill_mk1", "conveyor_belt", "nexus_core");
+
+    public TechManager(IRepository repository, TechDefinitionDAO dao) {
+        this.repository = repository;
+        this.dao = dao;
+        loadFromDatabase();
+    }
+
+    public void loadFromDatabase() {
+        nodes.clear();
+        if (dao == null) return;
+        List<TechNode> dbNodes = dao.loadAllNodes();
+        for (TechNode node : dbNodes) {
+            nodes.put(node.id(), node);
+        }
+        if (nodes.isEmpty()) {
+            System.err.println("!!! TECH TREE EMPTY - Check Database Table 'tech_definitions' !!!");
+        }
+    }
+
+    public boolean canBuyItem(PlayerProfile p, String itemId) {
+        if (p == null) return false;
+        if (p.isAdmin()) return true;
+        if (baseItems.contains(itemId)) return true;
+        for (TechNode node : nodes.values()) {
+            if (node.unlockItemIds().contains(itemId)) {
+                return p.hasTech(node.id());
+            }
+        }
+        return false;
+    }
+
+    public boolean unlockNode(PlayerProfile p, String nodeId) {
+        TechNode node = nodes.get(nodeId);
+        if (node == null || p == null) return false;
+        if (p.hasTech(nodeId)) return false;
+        if (p.getMoney() < node.cost()) return false;
+
+        for (String parentId : node.parentIds()) {
+            if (!p.hasTech(parentId)) return false;
+        }
+
+        p.modifyMoney(-node.cost());
+        p.addTech(nodeId);
+        repository.savePlayerProfile(p);
+
+        // Log con snapshot completo
+        repository.logTransaction(p, "TECH_UNLOCK", "MONEY", -node.cost(), nodeId);
+
+        System.out.println("ðŸ”“ [" + p.getUsername() + "] Research Complete: " + node.name());
+        return true;
+    }
+
+    public Collection<TechNode> getAllNodes() { return nodes.values(); }
+    public TechNode getNode(String id) { return nodes.get(id); }
+}
+
+
+--------------------------------
+FILE: src\main\java\com\matterworks\core\managers\WorldIntegrityValidator.java
+--------------------------------
+package com.matterworks.core.managers;
+
+import com.matterworks.core.common.GridPosition;
+import com.matterworks.core.common.Vector3Int;
+import com.matterworks.core.database.DatabaseManager;
+import com.matterworks.core.domain.machines.BlockRegistry;
+import com.matterworks.core.domain.matter.MatterColor;
+import com.matterworks.core.model.PlotObject;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.util.*;
+
+public class WorldIntegrityValidator {
+
+    private final DatabaseManager db;
+    private final BlockRegistry registry;
+
+    public WorldIntegrityValidator(DatabaseManager db, BlockRegistry registry) {
+        this.db = db;
+        this.registry = registry;
+    }
+
+    public boolean validateWorldIntegrity() {
+        System.out.println("ðŸ” [System] Avvio Validazione IntegritÃ ...");
+
+        Map<Long, List<PlotObject>> machinesByPlot = loadAllMachines();
+        Map<Long, Map<GridPosition, MatterColor>> resourcesByPlot = loadAllResources();
+
+        Map<Long, Set<Long>> toDeleteByPlot = new HashMap<>();
+        List<String> errorLog = new ArrayList<>();
+
+        for (var entry : machinesByPlot.entrySet()) {
+            Long plotId = entry.getKey();
+            List<PlotObject> machines = entry.getValue();
+            Map<GridPosition, MatterColor> resources = resourcesByPlot.getOrDefault(plotId, Collections.emptyMap());
+
+            detectOverlaps(plotId, machines, errorLog, toDeleteByPlot);
+
+            for (PlotObject m : machines) {
+                if ("drill_mk1".equals(m.getTypeId())) {
+                    GridPosition pos = new GridPosition(m.getX(), m.getY(), m.getZ());
+                    if (!resources.containsKey(new GridPosition(pos.x(), 0, pos.z()))) {
+                        errorLog.add("âŒ Plot " + plotId + ": Trivella (ID " + m.getId() + ") piazzata nel vuoto a " + pos);
+                    }
+                }
+            }
+        }
+
+        boolean hadOverlaps = toDeleteByPlot.values().stream().anyMatch(s -> s != null && !s.isEmpty());
+        if (hadOverlaps) {
+            printErrors(errorLog);
+
+            int deleted = 0;
+            int plotsFixed = 0;
+            for (var e : toDeleteByPlot.entrySet()) {
+                Long plotId = e.getKey();
+                Set<Long> ids = e.getValue();
+                if (ids == null || ids.isEmpty()) continue;
+
+                int d = healOverlapsInDb(plotId, ids);
+                if (d > 0) {
+                    deleted += d;
+                    plotsFixed++;
+                }
+            }
+
+            System.out.println("ðŸ§¹ [System] Self-Heal completato: rimossi " + deleted + " record corrotti su " + plotsFixed + " plot.");
+            System.out.println("ðŸ” [System] Ri-validazione post-heal...");
+
+            return validateWorldIntegrityNoHeal();
+        }
+
+        if (errorLog.isEmpty()) {
+            System.out.println("âœ… [System] IntegritÃ  verificata: 0 conflitti.");
+            return true;
+        }
+
+        printErrors(errorLog);
+        return false;
+    }
+
+    private boolean validateWorldIntegrityNoHeal() {
+        Map<Long, List<PlotObject>> machinesByPlot = loadAllMachines();
+        Map<Long, Map<GridPosition, MatterColor>> resourcesByPlot = loadAllResources();
+
+        List<String> errorLog = new ArrayList<>();
+
+        for (var entry : machinesByPlot.entrySet()) {
+            Long plotId = entry.getKey();
+            List<PlotObject> machines = entry.getValue();
+            Map<GridPosition, MatterColor> resources = resourcesByPlot.getOrDefault(plotId, Collections.emptyMap());
+
+            detectOverlaps(plotId, machines, errorLog, null);
+
+            for (PlotObject m : machines) {
+                if ("drill_mk1".equals(m.getTypeId())) {
+                    GridPosition pos = new GridPosition(m.getX(), m.getY(), m.getZ());
+                    if (!resources.containsKey(new GridPosition(pos.x(), 0, pos.z()))) {
+                        errorLog.add("âŒ Plot " + plotId + ": Trivella (ID " + m.getId() + ") piazzata nel vuoto a " + pos);
+                    }
+                }
+            }
+        }
+
+        if (errorLog.isEmpty()) {
+            System.out.println("âœ… [System] IntegritÃ  verificata: 0 conflitti.");
+            return true;
+        }
+
+        printErrors(errorLog);
+        return false;
+    }
+
+    private void detectOverlaps(
+            Long plotId,
+            List<PlotObject> machines,
+            List<String> errorLog,
+            Map<Long, Set<Long>> toDeleteByPlot
+    ) {
+        if (machines == null || machines.isEmpty()) return;
+
+        ArrayList<PlotObject> sorted = new ArrayList<>(machines);
+        sorted.sort(Comparator.comparingLong(PlotObject::getId).reversed());
+
+        Map<GridPosition, Long> occupiedBy = new HashMap<>();
+
+        for (PlotObject m : sorted) {
+            if (m == null || m.getTypeId() == null || m.getId() == null) continue;
+
+            Vector3Int dim;
+            try {
+                dim = registry.getDimensions(m.getTypeId());
+            } catch (Throwable t) {
+                dim = Vector3Int.one();
+            }
+
+            boolean conflict = false;
+
+            for (int x = 0; x < dim.x(); x++) {
+                for (int y = 0; y < dim.y(); y++) {
+                    for (int z = 0; z < dim.z(); z++) {
+                        GridPosition p = new GridPosition(m.getX() + x, m.getY() + y, m.getZ() + z);
+                        Long winnerId = occupiedBy.get(p);
+                        if (winnerId != null) {
+                            conflict = true;
+                            errorLog.add("âš ï¸ Plot " + plotId + ": Conflitto a " + p + " tra ID " + m.getId() + " e ID " + winnerId);
+                        }
+                    }
+                }
+            }
+
+            if (conflict) {
+                if (toDeleteByPlot != null) {
+                    toDeleteByPlot.computeIfAbsent(plotId, k -> new LinkedHashSet<>()).add(m.getId());
+                }
+                continue;
+            }
+
+            for (int x = 0; x < dim.x(); x++) {
+                for (int y = 0; y < dim.y(); y++) {
+                    for (int z = 0; z < dim.z(); z++) {
+                        GridPosition p = new GridPosition(m.getX() + x, m.getY() + y, m.getZ() + z);
+                        occupiedBy.put(p, m.getId());
+                    }
+                }
+            }
+        }
+    }
+
+    private int healOverlapsInDb(Long plotId, Set<Long> machineIdsToDelete) {
+        if (plotId == null || machineIdsToDelete == null || machineIdsToDelete.isEmpty()) return 0;
+
+        try (Connection conn = db.getConnection()) {
+            conn.setAutoCommit(false);
+            try {
+                try (PreparedStatement lock = conn.prepareStatement("SELECT id FROM plots WHERE id = ? FOR UPDATE")) {
+                    lock.setLong(1, plotId);
+                    lock.executeQuery();
+                }
+
+                int deleted = 0;
+                try (PreparedStatement del = conn.prepareStatement("DELETE FROM plot_machines WHERE id = ?")) {
+                    for (Long id : machineIdsToDelete) {
+                        if (id == null) continue;
+                        del.setLong(1, id);
+                        del.addBatch();
+                    }
+                    int[] res = del.executeBatch();
+                    for (int r : res) {
+                        if (r > 0) deleted += r;
+                    }
+                }
+
+                conn.commit();
+                return deleted;
+            } catch (Exception ex) {
+                conn.rollback();
+                System.err.println("ðŸš¨ [System] Self-Heal fallito per plotId=" + plotId + " -> rollback");
+                ex.printStackTrace();
+                return 0;
+            } finally {
+                conn.setAutoCommit(true);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+            return 0;
+        }
+    }
+
+    private void printErrors(List<String> errorLog) {
+        if (errorLog == null || errorLog.isEmpty()) return;
+
+        if (errorLog.size() > 100) {
+            System.err.println("ðŸš¨ [System] ATTENZIONE: Rilevate " + errorLog.size() + " collisioni nel mondo! (Troppe per la lista)");
+        } else {
+            System.err.println("ðŸš¨ [System] RILEVATE COLLISIONI:");
+            for (String s : errorLog) System.err.println(s);
+        }
+    }
+
+    private Map<Long, List<PlotObject>> loadAllMachines() {
+        Map<Long, List<PlotObject>> result = new HashMap<>();
+        String sql = "SELECT id, plot_id, x, y, z, type_id FROM plot_machines";
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                PlotObject obj = new PlotObject(
+                        rs.getLong("id"),
+                        rs.getLong("plot_id"),
+                        rs.getInt("x"),
+                        rs.getInt("y"),
+                        rs.getInt("z"),
+                        rs.getString("type_id"),
+                        null
+                );
+                result.computeIfAbsent(obj.getPlotId(), k -> new ArrayList<>()).add(obj);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return result;
+    }
+
+    private Map<Long, Map<GridPosition, MatterColor>> loadAllResources() {
+        Map<Long, Map<GridPosition, MatterColor>> result = new HashMap<>();
+        String sql = "SELECT plot_id, x, z, resource_type FROM plot_resources";
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                long pid = rs.getLong("plot_id");
+                GridPosition pos = new GridPosition(rs.getInt("x"), 0, rs.getInt("z"));
+                MatterColor color = MatterColor.valueOf(rs.getString("resource_type"));
+                result.computeIfAbsent(pid, k -> new HashMap<>()).put(pos, color);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return result;
+    }
+}

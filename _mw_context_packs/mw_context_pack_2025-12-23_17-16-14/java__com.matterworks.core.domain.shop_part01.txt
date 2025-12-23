@@ -1,0 +1,65 @@
+﻿=== BUNDLE: java__com.matterworks.core.domain.shop_part01 ===
+Created: 2025-12-23T17:16:23.3863757+01:00
+
+
+
+--------------------------------
+FILE: src\main\java\com\matterworks\core\domain\shop\MarketManager.java
+--------------------------------
+package com.matterworks.core.domain.shop;
+
+import com.matterworks.core.domain.matter.MatterColor;
+import com.matterworks.core.domain.matter.MatterPayload;
+import com.matterworks.core.domain.matter.MatterShape;
+import com.matterworks.core.managers.GridManager;
+import com.matterworks.core.ports.IRepository;
+
+import java.util.HashMap;
+import java.util.Map;
+import java.util.UUID;
+
+public class MarketManager {
+
+    private final GridManager gridManager;
+    private final IRepository repository;
+    private final Map<MatterColor, Double> basePrices;
+
+    public MarketManager(GridManager gridManager, IRepository repository) {
+        this.gridManager = gridManager;
+        this.repository = repository;
+        this.basePrices = new HashMap<>();
+        initializePrices();
+    }
+
+    private void initializePrices() {
+        basePrices.put(MatterColor.RAW, 1.0);
+        basePrices.put(MatterColor.RED, 5.0);
+        basePrices.put(MatterColor.BLUE, 5.0);
+        basePrices.put(MatterColor.YELLOW, 5.0);
+        basePrices.put(MatterColor.PURPLE, 25.0);
+        basePrices.put(MatterColor.ORANGE, 25.0);
+        basePrices.put(MatterColor.GREEN, 25.0);
+        basePrices.put(MatterColor.WHITE, 100.0);
+    }
+
+    public void sellItem(MatterPayload item, UUID sellerId) {
+        if (item == null) return;
+        double value = calculateValue(item);
+
+        // Deleghiamo l'aggiornamento dei soldi al GridManager.
+        // Questo assicura che activeProfileCache sia aggiornata e la GUI veda i soldi immediatamente.
+        gridManager.addMoney(sellerId, value, "MATTER_SELL",
+                item.shape() != null ? item.shape().name() : "LIQUID");
+
+        System.out.println("ðŸ’° MARKET: Venduto " + item.shape() + " (" + item.color() + ") per $" + String.format("%.2f", value));
+    }
+
+    private double calculateValue(MatterPayload item) {
+        double base = basePrices.getOrDefault(item.color(), 0.5);
+        double multiplier = 1.0;
+        if (item.shape() == MatterShape.SPHERE) multiplier = 1.5;
+        if (item.shape() == MatterShape.PYRAMID) multiplier = 2.0;
+        if (item.isComplex()) multiplier *= 1.2;
+        return base * multiplier;
+    }
+}

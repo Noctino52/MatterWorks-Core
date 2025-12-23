@@ -16,9 +16,7 @@ import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 
 public class FactoryPanel extends JPanel {
 
@@ -47,6 +45,7 @@ public class FactoryPanel extends JPanel {
 
     private volatile GridPosition mouseHoverPos = null;
     private final Runnable onStateChange;
+    private final Runnable onEconomyMaybeChanged;
 
     private volatile BufferedImage gridImage;
     private volatile int gridImageW = -1;
@@ -65,6 +64,7 @@ public class FactoryPanel extends JPanel {
     private volatile long lastFingerprint = 0L;
     private volatile boolean repaintQueued = false;
 
+    // Cache ghost size
     private volatile String cachedGhostTool = null;
     private volatile Direction cachedGhostOri = null;
     private volatile Vector3Int cachedGhostDim = null;
@@ -72,11 +72,20 @@ public class FactoryPanel extends JPanel {
     private volatile int lastHoverGX = Integer.MIN_VALUE;
     private volatile int lastHoverGZ = Integer.MIN_VALUE;
 
-    public FactoryPanel(GridManager gridManager, BlockRegistry registry, UUID playerUuid, Runnable onStateChange) {
+    // ✅ Command executor: place/remove OFF-EDT (anti-lag)
+    private final ExecutorService commandExec;
+
+    public FactoryPanel(GridManager gridManager,
+                        BlockRegistry registry,
+                        UUID playerUuid,
+                        Runnable onStateChange,
+                        Runnable onEconomyMaybeChanged) {
+
         this.gridManager = gridManager;
         this.registry = registry;
         this.playerUuid = playerUuid;
         this.onStateChange = onStateChange;
+        this.onEconomyMaybeChanged = onEconomyMaybeChanged;
 
         setBackground(BG);
         setFocusable(true);
@@ -90,12 +99,12 @@ public class FactoryPanel extends JPanel {
             }
         });
 
+        // ✅ IMPORTANTISSIMO: mousePressed (non mouseClicked)
         addMouseListener(new MouseAdapter() {
             @Override
-            public void mouseClicked(MouseEvent e) {
+            public void mousePressed(MouseEvent e) {
                 requestFocusInWindow();
-                handleMouseClick(e);
-                forceRefreshNow();
+                handleMousePress(e);
             }
         });
 
@@ -112,13 +121,21 @@ public class FactoryPanel extends JPanel {
             return t;
         });
 
+        commandExec = Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "mw-factorypanel-commands");
+            t.setDaemon(true);
+            return t;
+        });
+
         // refresh frequente ma OFF-EDT: paint disegna SOLO cache
         refreshExec.scheduleWithFixedDelay(this::refreshCacheLoop, 0, 180, TimeUnit.MILLISECONDS);
     }
 
     public void dispose() {
         disposed = true;
+
         try { refreshExec.shutdownNow(); } catch (Throwable ignored) {}
+        try { commandExec.shutdownNow(); } catch (Throwable ignored) {}
 
         cachedMachines = Map.of();
         cachedResources = Map.of();
@@ -203,17 +220,24 @@ public class FactoryPanel extends JPanel {
         cachedGhostDim = null;
     }
 
-    private boolean updateMousePos(int x, int y) {
+    private GridPosition gridPosFromMouse(int x, int y) {
         int gx = (x - OFFSET_X) / CELL_SIZE;
         int gz = (y - OFFSET_Y) / CELL_SIZE;
-
         if (gx >= 0 && gx < GRID_SIZE && gz >= 0 && gz < GRID_SIZE) {
-            if (gx == lastHoverGX && gz == lastHoverGZ && mouseHoverPos != null && mouseHoverPos.y() == currentLayer) {
+            return new GridPosition(gx, currentLayer, gz);
+        }
+        return null;
+    }
+
+    private boolean updateMousePos(int x, int y) {
+        GridPosition p = gridPosFromMouse(x, y);
+        if (p != null) {
+            if (p.x() == lastHoverGX && p.z() == lastHoverGZ && mouseHoverPos != null && mouseHoverPos.y() == currentLayer) {
                 return false;
             }
-            lastHoverGX = gx;
-            lastHoverGZ = gz;
-            mouseHoverPos = new GridPosition(gx, currentLayer, gz);
+            lastHoverGX = p.x();
+            lastHoverGZ = p.z();
+            mouseHoverPos = p;
             return true;
         }
 
@@ -227,22 +251,45 @@ public class FactoryPanel extends JPanel {
         return false;
     }
 
-    private void handleMouseClick(MouseEvent e) {
+    // ✅ Place/remove OFF-EDT, ma coordinate prese subito al press (no click persi)
+    private void handleMousePress(MouseEvent e) {
         if (disposed) return;
         UUID u = playerUuid;
         if (u == null) return;
-        if (mouseHoverPos == null) return;
 
-        if (SwingUtilities.isLeftMouseButton(e)) {
-            if (currentTool != null && currentTool.startsWith("STRUCTURE:")) {
-                String nativeId = currentTool.substring(10);
-                gridManager.placeStructure(u, mouseHoverPos, nativeId);
-            } else {
-                gridManager.placeMachine(u, mouseHoverPos, currentTool, currentOrientation);
-            }
-        } else if (SwingUtilities.isRightMouseButton(e)) {
-            gridManager.removeComponent(u, mouseHoverPos);
-        }
+        GridPosition target = gridPosFromMouse(e.getX(), e.getY());
+        if (target == null) return;
+
+        // aggiornamento hover immediato per feedback
+        mouseHoverPos = target;
+        lastHoverGX = target.x();
+        lastHoverGZ = target.z();
+        repaintCoalesced();
+
+        final String tool = currentTool;
+        final Direction ori = currentOrientation;
+
+        try {
+            commandExec.submit(() -> {
+                try {
+                    if (SwingUtilities.isLeftMouseButton(e)) {
+                        if (tool != null && tool.startsWith("STRUCTURE:")) {
+                            String nativeId = tool.substring(10);
+                            gridManager.placeStructure(u, target, nativeId);
+                        } else {
+                            gridManager.placeMachine(u, target, tool, ori);
+                        }
+                    } else if (SwingUtilities.isRightMouseButton(e)) {
+                        gridManager.removeComponent(u, target);
+                    }
+                } catch (Throwable ex) {
+                    ex.printStackTrace();
+                } finally {
+                    forceRefreshNow();
+                    if (onEconomyMaybeChanged != null) SwingUtilities.invokeLater(onEconomyMaybeChanged);
+                }
+            });
+        } catch (RejectedExecutionException ignored) {}
     }
 
     private void refreshCacheLoop() {
@@ -347,6 +394,10 @@ public class FactoryPanel extends JPanel {
         });
     }
 
+    // =========================
+    // RENDERING (ripristinato)
+    // =========================
+
     @Override
     protected void paintComponent(Graphics g) {
         super.paintComponent(g);
@@ -357,12 +408,16 @@ public class FactoryPanel extends JPanel {
         g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF);
         g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_OFF);
 
+        // ✅ Vene/risorse
         if (currentLayer == 0) drawTerrainResourcesCached(g2);
 
         BufferedImage img = gridImage;
         if (img != null) g2.drawImage(img, 0, 0, null);
 
+        // ✅ Macchine + belt item + ports + direction dots
         drawMachinesCached(g2);
+
+        // ✅ Ghost + dot direzione
         drawGhost(g2);
     }
 
@@ -428,15 +483,20 @@ public class FactoryPanel extends JPanel {
         Map<GridPosition, PlacedMachine> machines = cachedMachines;
         if (machines == null || machines.isEmpty()) return;
 
+        // ✅ FIX: disegna ogni macchina una volta (non dipende dalla key dello snapshot)
         IdentityHashMap<PlacedMachine, Boolean> seen = new IdentityHashMap<>();
         for (PlacedMachine m : machines.values()) {
             if (m == null) continue;
             if (seen.put(m, Boolean.TRUE) != null) continue;
 
-            int baseY = m.getPos().y();
-            int ySize = m.getDimensions().y();
-            if (currentLayer < baseY || currentLayer >= baseY + ySize) continue;
+            GridPosition pos = m.getPos();
+            if (pos == null) continue;
 
+            int baseY = pos.y();
+            Vector3Int dims = m.getDimensions();
+            int ySize = (dims != null ? dims.y() : 1);
+
+            if (currentLayer < baseY || currentLayer >= baseY + ySize) continue;
             drawSingleMachine(g, m);
         }
     }
@@ -447,6 +507,8 @@ public class FactoryPanel extends JPanel {
         int z = OFFSET_Y + (p.z() * CELL_SIZE);
 
         Vector3Int dims = m.getDimensions();
+        if (dims == null) dims = Vector3Int.one();
+
         int w = dims.x() * CELL_SIZE;
         int h = dims.z() * CELL_SIZE;
 
@@ -479,6 +541,8 @@ public class FactoryPanel extends JPanel {
         g.fillRect(x + 2, z + 2, Math.max(0, w - 4), Math.max(0, h - 4));
 
         String type = m.getTypeId();
+
+        // ✅ Ripristino ports (input/output squares)
         if ("nexus_core".equals(type)) {
             drawNexusPorts(g, x, z, w, h);
         } else if ("splitter".equals(type)) {
@@ -491,10 +555,12 @@ public class FactoryPanel extends JPanel {
             drawStandardPorts(g, m, x, z, w, h);
         }
 
+        // ✅ Ripristino items sui belt/splitter/merger
         if (m instanceof ConveyorBelt belt) drawBeltItem(g, belt, x, z);
         if (m instanceof Splitter splitter) drawSplitterItem(g, splitter, x, z);
         if (m instanceof Merger merger) drawMergerItem(g, merger, x, z);
 
+        // ✅ Ripristino puntino giallo direzione
         drawDirectionArrow(g, x, z, w, h, m.getOrientation());
     }
 
@@ -716,6 +782,7 @@ public class FactoryPanel extends JPanel {
         return cachedGhostDim;
     }
 
+    // ✅ Puntini gialli direzione
     private void drawDirectionArrow(Graphics2D g, int x, int y, int w, int h, Direction dir) {
         g.setColor(ARROW_COLOR);
         int cx = x + w / 2;

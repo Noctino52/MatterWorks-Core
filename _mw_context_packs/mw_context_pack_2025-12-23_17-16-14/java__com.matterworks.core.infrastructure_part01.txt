@@ -1,0 +1,362 @@
+﻿=== BUNDLE: java__com.matterworks.core.infrastructure_part01 ===
+Created: 2025-12-23T17:16:23.3948859+01:00
+
+
+
+--------------------------------
+FILE: src\main\java\com\matterworks\core\infrastructure\CoreConfig.java
+--------------------------------
+package com.matterworks.core.infrastructure;
+
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.util.Properties;
+
+/**
+ * Gestore della configurazione esterna.
+ * Legge il file 'matterworks.properties' dalla root del server.
+ * Permette di cambiare i valori di gioco senza ricompilare.
+ */
+public class CoreConfig {
+
+    private static final Properties props = new Properties();
+
+    // Carica il file all'avvio
+    public static void load() {
+        try (FileInputStream in = new FileInputStream("matterworks.properties")) {
+            props.load(in);
+            System.out.println("âš™ï¸ Configurazione caricata da matterworks.properties");
+        } catch (IOException e) {
+            System.out.println("âš ï¸ matterworks.properties non trovato. Uso valori di DEFAULT.");
+        }
+    }
+
+    /**
+     * Recupera un intero dalla config, o usa il default se manca.
+     */
+    public static int getInt(String key, int defaultValue) {
+        String val = props.getProperty(key);
+        if (val == null) return defaultValue;
+        try {
+            return Integer.parseInt(val);
+        } catch (NumberFormatException e) {
+            System.err.println("âŒ Errore config per " + key + ": " + val + " non Ã¨ un numero.");
+            return defaultValue;
+        }
+    }
+}
+
+
+--------------------------------
+FILE: src\main\java\com\matterworks\core\infrastructure\MariaDBAdapter.java
+--------------------------------
+package com.matterworks.core.infrastructure;
+
+import com.matterworks.core.common.GridPosition;
+import com.matterworks.core.database.DatabaseManager;
+import com.matterworks.core.database.UuidUtils;
+import com.matterworks.core.database.dao.*;
+import com.matterworks.core.domain.machines.PlacedMachine;
+import com.matterworks.core.domain.matter.MatterColor;
+import com.matterworks.core.domain.player.PlayerProfile;
+import com.matterworks.core.model.PlotObject;
+import com.matterworks.core.ports.IRepository;
+
+import java.math.BigDecimal;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.*;
+import java.util.stream.Collectors;
+
+public class MariaDBAdapter implements IRepository {
+
+    private final DatabaseManager dbManager;
+    private final PlayerDAO playerDAO;
+    private final PlotDAO plotDAO;
+    private final PlotResourceDAO resourceDAO;
+    private final InventoryDAO inventoryDAO;
+    private final TechDefinitionDAO techDefinitionDAO;
+    private final TransactionDAO transactionDAO;
+
+    public MariaDBAdapter(DatabaseManager dbManager) {
+        this.dbManager = dbManager;
+        this.playerDAO = new PlayerDAO(dbManager);
+        this.plotDAO = new PlotDAO(dbManager);
+        this.resourceDAO = new PlotResourceDAO(dbManager);
+        this.inventoryDAO = new InventoryDAO(dbManager);
+        this.techDefinitionDAO = new TechDefinitionDAO(dbManager);
+        this.transactionDAO = new TransactionDAO(dbManager);
+    }
+
+    // --- FIX: Metodo aggiunto per GridManager ---
+    public Long createPlot(UUID ownerId, int x, int z, int worldId) {
+        return plotDAO.createPlot(ownerId, x, z, worldId);
+    }
+
+    @Override
+    public void logTransaction(PlayerProfile player, String actionType, String currency, double amount, String itemId) {
+        transactionDAO.logTransaction(player, actionType, currency, BigDecimal.valueOf(amount), itemId);
+    }
+
+    @Override
+    public ServerConfig loadServerConfig() {
+        String sql = "SELECT player_start_money, vein_raw, vein_red, vein_blue, vein_yellow, sos_threshold FROM server_gamestate WHERE id = 1";
+        try (Connection conn = dbManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            if (rs.next()) {
+                return new ServerConfig(
+                        rs.getDouble("player_start_money"),
+                        rs.getInt("vein_raw"),
+                        rs.getInt("vein_red"),
+                        rs.getInt("vein_blue"),
+                        rs.getInt("vein_yellow"),
+                        rs.getDouble("sos_threshold")
+                );
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+        return new ServerConfig(1000.0, 3, 1, 1, 0, 500.0);
+    }
+
+    // ==========================================================
+    // MinutesToInactive (server_gamestate)
+    // ==========================================================
+    public int loadMinutesToInactive() {
+        String sql = "SELECT MinutesToInactive FROM server_gamestate WHERE id = 1";
+        try (Connection conn = dbManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            if (rs.next()) {
+                int v = rs.getInt("MinutesToInactive");
+                return Math.max(1, v);
+            }
+        } catch (SQLException ignored) {
+        }
+        return 5;
+    }
+
+    // ==========================================================
+    // Player Sessions (player_session)
+    // ==========================================================
+    public void openPlayerSession(UUID playerUuid) {
+        if (playerUuid == null) return;
+
+        byte[] uuidBytes = UuidUtils.asBytes(playerUuid);
+
+        try (Connection conn = dbManager.getConnection()) {
+            conn.setAutoCommit(false);
+            try {
+                // Chiudi eventuale sessione rimasta aperta
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "UPDATE player_session SET logout_at = NOW() WHERE player_uuid = ? AND logout_at IS NULL")) {
+                    ps.setBytes(1, uuidBytes);
+                    ps.executeUpdate();
+                }
+
+                // Inserisci nuova sessione
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "INSERT INTO player_session (player_uuid, login_at, logout_at) VALUES (?, NOW(), NULL)")) {
+                    ps.setBytes(1, uuidBytes);
+                    ps.executeUpdate();
+                }
+
+                // Best-effort: players.last_login (se esiste)
+                safeExecuteIgnoreUnknownColumn(conn,
+                        "UPDATE players SET last_login = NOW() WHERE uuid = ?",
+                        uuidBytes
+                );
+
+                conn.commit();
+            } catch (SQLException ex) {
+                conn.rollback();
+                ex.printStackTrace();
+            } finally {
+                conn.setAutoCommit(true);
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public void closePlayerSession(UUID playerUuid) {
+        if (playerUuid == null) return;
+
+        byte[] uuidBytes = UuidUtils.asBytes(playerUuid);
+
+        try (Connection conn = dbManager.getConnection()) {
+            conn.setAutoCommit(false);
+            try {
+                // Prova a scrivere anche session_seconds se la colonna esiste
+                boolean updated = safeUpdateSessionWithSeconds(conn, uuidBytes);
+                if (!updated) {
+                    // Fallback senza session_seconds
+                    try (PreparedStatement ps = conn.prepareStatement(
+                            "UPDATE player_session " +
+                                    "SET logout_at = NOW() " +
+                                    "WHERE player_uuid = ? AND logout_at IS NULL " +
+                                    "ORDER BY login_at DESC LIMIT 1")) {
+                        ps.setBytes(1, uuidBytes);
+                        ps.executeUpdate();
+                    }
+                }
+
+                // NON tocchiamo piÃ¹ players.last_logout (non esiste nel tuo DB)
+
+                conn.commit();
+            } catch (SQLException ex) {
+                conn.rollback();
+                ex.printStackTrace();
+            } finally {
+                conn.setAutoCommit(true);
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private boolean safeUpdateSessionWithSeconds(Connection conn, byte[] uuidBytes) {
+        String sql =
+                "UPDATE player_session " +
+                        "SET logout_at = NOW(), session_seconds = TIMESTAMPDIFF(SECOND, login_at, NOW()) " +
+                        "WHERE player_uuid = ? AND logout_at IS NULL " +
+                        "ORDER BY login_at DESC LIMIT 1";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setBytes(1, uuidBytes);
+            ps.executeUpdate();
+            return true;
+        } catch (SQLException e) {
+            // colonna session_seconds non esiste -> ignora
+            if (isUnknownColumn(e)) return false;
+            // altri errori li propaghiamo
+            throw new RuntimeException(e);
+        }
+    }
+
+    private void safeExecuteIgnoreUnknownColumn(Connection conn, String sql, byte[] uuidBytes) {
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setBytes(1, uuidBytes);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            if (!isUnknownColumn(e)) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    private boolean isUnknownColumn(SQLException e) {
+        // MariaDB: SQLState 42S22 = column not found
+        String state = e.getSQLState();
+        return "42S22".equals(state) || (e.getMessage() != null && e.getMessage().contains("Unknown column"));
+    }
+
+    // ==========================================================
+    // IRepository standard
+    // ==========================================================
+    @Override public PlayerProfile loadPlayerProfile(UUID uuid) { return playerDAO.load(uuid); }
+    @Override public void savePlayerProfile(PlayerProfile profile) { playerDAO.save(profile); }
+    @Override public List<PlayerProfile> getAllPlayers() { return playerDAO.loadAll(); }
+
+    @Override
+    public void deletePlayerFull(UUID uuid) {
+        if (uuid == null) return;
+        Long plotId = plotDAO.findPlotIdByOwner(uuid);
+        try (Connection conn = dbManager.getConnection()) {
+            conn.setAutoCommit(false);
+            try {
+                if (plotId != null) {
+                    try (PreparedStatement ps = conn.prepareStatement("DELETE FROM plot_machines WHERE plot_id = ?")) { ps.setLong(1, plotId); ps.executeUpdate(); }
+                    try (PreparedStatement ps = conn.prepareStatement("DELETE FROM plot_resources WHERE plot_id = ?")) { ps.setLong(1, plotId); ps.executeUpdate(); }
+                    try (PreparedStatement ps = conn.prepareStatement("DELETE FROM plots WHERE id = ?")) { ps.setLong(1, plotId); ps.executeUpdate(); }
+                }
+                byte[] uuidBytes = UuidUtils.asBytes(uuid);
+                try (PreparedStatement ps = conn.prepareStatement("DELETE FROM player_inventory WHERE player_uuid = ?")) { ps.setBytes(1, uuidBytes); ps.executeUpdate(); }
+                try (PreparedStatement ps = conn.prepareStatement("DELETE FROM verification_codes WHERE player_uuid = ?")) { ps.setBytes(1, uuidBytes); ps.executeUpdate(); }
+                try (PreparedStatement ps = conn.prepareStatement("DELETE FROM transactions WHERE player_uuid = ?")) { ps.setBytes(1, uuidBytes); ps.executeUpdate(); }
+                try (PreparedStatement ps = conn.prepareStatement("DELETE FROM player_session WHERE player_uuid = ?")) { ps.setBytes(1, uuidBytes); ps.executeUpdate(); }
+                try (PreparedStatement ps = conn.prepareStatement("DELETE FROM players WHERE uuid = ?")) { ps.setBytes(1, uuidBytes); ps.executeUpdate(); }
+                conn.commit();
+            } catch (SQLException ex) {
+                conn.rollback();
+                ex.printStackTrace();
+            } finally { conn.setAutoCommit(true); }
+        } catch (SQLException e) { e.printStackTrace(); }
+    }
+
+    @Override public int getInventoryItemCount(UUID ownerId, String itemId) { return inventoryDAO.getItemCount(ownerId, itemId); }
+    @Override public void modifyInventoryItem(UUID ownerId, String itemId, int delta) { inventoryDAO.modifyItemCount(ownerId, itemId, delta); }
+    @Override public List<PlotObject> loadPlotMachines(UUID ownerId) { return plotDAO.loadMachines(ownerId); }
+
+    @Override
+    public Long createMachine(UUID ownerId, PlacedMachine machine) {
+        String jsonMeta = machine.serialize().toString();
+        return plotDAO.insertMachine(ownerId, machine.getTypeId(), machine.getPos().x(), machine.getPos().y(), machine.getPos().z(), jsonMeta);
+    }
+
+    @Override public void deleteMachine(Long dbId) { plotDAO.removeMachine(dbId); }
+
+    @Override
+    public void updateMachinesMetadata(List<PlacedMachine> machines) {
+        if (machines == null || machines.isEmpty()) return;
+
+        Map<UUID, List<PlacedMachine>> byOwner = machines.stream()
+                .filter(Objects::nonNull)
+                .filter(m -> m.getDbId() != null)
+                .collect(Collectors.groupingBy(PlacedMachine::getOwnerId));
+
+        for (Map.Entry<UUID, List<PlacedMachine>> entry : byOwner.entrySet()) {
+            UUID ownerId = entry.getKey();
+            List<PlacedMachine> list = entry.getValue();
+            if (ownerId == null || list.isEmpty()) continue;
+
+            String sql = "UPDATE plot_machines SET metadata = ? WHERE id = ?";
+
+            try (Connection conn = dbManager.getConnection();
+                 PreparedStatement stmt = conn.prepareStatement(sql)) {
+                for (PlacedMachine pm : list) {
+                    stmt.setString(1, pm.serialize().toString());
+                    stmt.setLong(2, pm.getDbId());
+                    stmt.addBatch();
+                }
+                stmt.executeBatch();
+            } catch (SQLException e) {
+                throw new RuntimeException("Failed to update machines metadata for ownerId=" + ownerId, e);
+            }
+        }
+    }
+
+    @Override
+    public void clearPlotData(UUID ownerId) {
+        Long plotId = plotDAO.findPlotIdByOwner(ownerId);
+        if (plotId == null) return;
+        try (Connection conn = dbManager.getConnection()) {
+            try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM plot_machines WHERE plot_id = ?")) { stmt.setLong(1, plotId); stmt.executeUpdate(); }
+            try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM plot_resources WHERE plot_id = ?")) { stmt.setLong(1, plotId); stmt.executeUpdate(); }
+        } catch (SQLException e) { e.printStackTrace(); }
+    }
+
+    @Override public Long getPlotId(UUID ownerId) { return plotDAO.findPlotIdByOwner(ownerId); }
+    @Override public void saveResource(Long plotId, int x, int z, MatterColor type) { resourceDAO.addResource(plotId, x, z, type); }
+    @Override public Map<GridPosition, MatterColor> loadResources(Long plotId) { return resourceDAO.loadResources(plotId); }
+
+    public TechDefinitionDAO getTechDefinitionDAO() { return techDefinitionDAO; }
+    public DatabaseManager getDbManager() { return dbManager; }
+}
+
+
+--------------------------------
+FILE: src\main\java\com\matterworks\core\infrastructure\ServerConfig.java
+--------------------------------
+package com.matterworks.core.infrastructure;
+
+public record ServerConfig(
+        double startMoney,
+        int veinRaw,
+        int veinRed,
+        int veinBlue,
+        int veinYellow,
+        double sosThreshold
+) {}

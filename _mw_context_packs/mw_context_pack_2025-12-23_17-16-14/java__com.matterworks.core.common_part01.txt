@@ -1,0 +1,90 @@
+﻿=== BUNDLE: java__com.matterworks.core.common_part01 ===
+Created: 2025-12-23T17:16:22.7873851+01:00
+
+
+
+--------------------------------
+FILE: src\main\java\com\matterworks\core\common\Direction.java
+--------------------------------
+package com.matterworks.core.common;
+
+public enum Direction {
+    NORTH(0, 0, -1),
+    EAST(1, 0, 0),
+    SOUTH(0, 0, 1),
+    WEST(-1, 0, 0),
+    UP(0, 1, 0),
+    DOWN(0, -1, 0);
+
+    private final int x, y, z;
+
+    Direction(int x, int y, int z) {
+        this.x = x;
+        this.y = y;
+        this.z = z;
+    }
+
+    public Vector3Int toVector() {
+        return new Vector3Int(x, y, z);
+    }
+
+    public Direction opposite() {
+        return switch(this) {
+            case NORTH -> SOUTH;
+            case SOUTH -> NORTH;
+            case EAST -> WEST;
+            case WEST -> EAST;
+            case UP -> DOWN;
+            case DOWN -> UP;
+        };
+    }
+}
+
+
+--------------------------------
+FILE: src\main\java\com\matterworks\core\common\GridPosition.java
+--------------------------------
+package com.matterworks.core.common;
+
+/**
+ * Value Object immutabile che rappresenta una coordinata 3D nel mondo.
+ * Usato come chiave primaria nelle HashMap del GridManager per accesso O(1).
+ */
+public record GridPosition(int x, int y, int z) {
+
+    /**
+     * Factory method statico per leggibilitÃ  (opzionale ma comodo).
+     * Uso: GridPosition.of(10, 64, 10)
+     */
+    public static GridPosition of(int x, int y, int z) {
+        return new GridPosition(x, y, z);
+    }
+
+    /**
+     * Metodo di utilitÃ  per calcolare posizioni relative (es. "il blocco sopra").
+     * Utile per logica di nastri trasportatori o controlli di adiacenza.
+     */
+    public GridPosition add(int dx, int dy, int dz) {
+        return new GridPosition(x + dx, y + dy, z + dz);
+    }
+
+    public GridPosition add(Vector3Int vec) {
+        return new GridPosition(x + vec.x(), y + vec.y(), z + vec.z());
+    }
+
+    // Nota: equals(), hashCode() e toString() sono generati automaticamente dal Record.
+}
+
+
+--------------------------------
+FILE: src\main\java\com\matterworks\core\common\Vector3Int.java
+--------------------------------
+package com.matterworks.core.common;
+
+/**
+ * Value Object semplice per le dimensioni (Width, Height, Depth).
+ * Usato da IGridComponent.
+ */
+public record Vector3Int(int x, int y, int z) {
+    public static Vector3Int one() { return new Vector3Int(1, 1, 1); }
+}

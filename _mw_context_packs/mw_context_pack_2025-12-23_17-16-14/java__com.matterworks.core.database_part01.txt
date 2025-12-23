@@ -1,0 +1,72 @@
+﻿=== BUNDLE: java__com.matterworks.core.database_part01 ===
+Created: 2025-12-23T17:16:22.8285892+01:00
+
+
+
+--------------------------------
+FILE: src\main\java\com\matterworks\core\database\DatabaseManager.java
+--------------------------------
+package com.matterworks.core.database;
+
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
+import java.sql.Connection;
+import java.sql.SQLException;
+
+public class DatabaseManager {
+
+    private final HikariDataSource dataSource;
+
+    public DatabaseManager(String jdbcUrl, String username, String password) {
+        HikariConfig config = new HikariConfig();
+        config.setJdbcUrl(jdbcUrl);
+        config.setUsername(username);
+        config.setPassword(password);
+
+        // Ottimizzazioni per Gaming (Bassa latenza)
+        config.setMaximumPoolSize(10);
+        config.setMinimumIdle(2);
+        config.setIdleTimeout(30000);
+        config.setConnectionTimeout(2000); // Fail fast se il DB Ã¨ giÃ¹
+
+        this.dataSource = new HikariDataSource(config);
+    }
+
+    public Connection getConnection() throws SQLException {
+        return dataSource.getConnection();
+    }
+
+    public void close() {
+        if (dataSource != null) {
+            dataSource.close();
+        }
+    }
+}
+
+
+--------------------------------
+FILE: src\main\java\com\matterworks\core\database\UuidUtils.java
+--------------------------------
+package com.matterworks.core.database;
+
+import java.nio.ByteBuffer;
+import java.util.UUID;
+
+public class UuidUtils {
+
+    public static byte[] asBytes(UUID uuid) {
+        if (uuid == null) return null;
+        ByteBuffer bb = ByteBuffer.wrap(new byte[16]);
+        bb.putLong(uuid.getMostSignificantBits());
+        bb.putLong(uuid.getLeastSignificantBits());
+        return bb.array();
+    }
+
+    public static UUID asUuid(byte[] bytes) {
+        if (bytes == null || bytes.length != 16) return null;
+        ByteBuffer bb = ByteBuffer.wrap(bytes);
+        long firstLong = bb.getLong();
+        long secondLong = bb.getLong();
+        return new UUID(firstLong, secondLong);
+    }
+}

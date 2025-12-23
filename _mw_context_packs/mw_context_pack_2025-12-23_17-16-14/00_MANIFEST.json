@@ -1,0 +1,167 @@
+﻿{
+    "createdLocal":  "2025-12-23T17:16:22.7437023+01:00",
+    "projectRoot":  "C:\\Users\\ivan.capasso\\IdeaProjects\\MatterWorks-Core",
+    "bundleMaxKB":  700,
+    "bundles":  {
+                    "java__com.matterworks.core.infrastructure_part01.txt":  {
+                                                                                 "part":  1,
+                                                                                 "bytes":  16080,
+                                                                                 "files":  [
+                                                                                               "src\\main\\java\\com\\matterworks\\core\\infrastructure\\CoreConfig.java",
+                                                                                               "src\\main\\java\\com\\matterworks\\core\\infrastructure\\MariaDBAdapter.java",
+                                                                                               "src\\main\\java\\com\\matterworks\\core\\infrastructure\\ServerConfig.java"
+                                                                                           ]
+                                                                             },
+                    "java__com.matterworks.core.infrastructure.swing_part01.txt":  {
+                                                                                       "part":  1,
+                                                                                       "bytes":  61286,
+                                                                                       "files":  [
+                                                                                                     "src\\main\\java\\com\\matterworks\\core\\infrastructure\\swing\\FactoryPanel.java",
+                                                                                                     "src\\main\\java\\com\\matterworks\\core\\infrastructure\\swing\\InventoryDebugPanel.java",
+                                                                                                     "src\\main\\java\\com\\matterworks\\core\\infrastructure\\swing\\MatterWorksGUI.java",
+                                                                                                     "src\\main\\java\\com\\matterworks\\core\\infrastructure\\swing\\TechTreePanel.java"
+                                                                                                 ]
+                                                                                   },
+                    "java__com.matterworks.core.domain.player_part01.txt":  {
+                                                                                "part":  1,
+                                                                                "bytes":  2574,
+                                                                                "files":  [
+                                                                                              "src\\main\\java\\com\\matterworks\\core\\domain\\player\\LinkCode.java",
+                                                                                              "src\\main\\java\\com\\matterworks\\core\\domain\\player\\PlayerProfile.java"
+                                                                                          ]
+                                                                            },
+                    "java__com.matterworks.core.domain.shop_part01.txt":  {
+                                                                              "part":  1,
+                                                                              "bytes":  2492,
+                                                                              "files":  [
+                                                                                            "src\\main\\java\\com\\matterworks\\core\\domain\\shop\\MarketManager.java"
+                                                                                        ]
+                                                                          },
+                    "java__com.matterworks.core.ports_part01.txt":  {
+                                                                        "part":  1,
+                                                                        "bytes":  2958,
+                                                                        "files":  [
+                                                                                      "src\\main\\java\\com\\matterworks\\core\\ports\\IMachineVisuals.java",
+                                                                                      "src\\main\\java\\com\\matterworks\\core\\ports\\IRepository.java",
+                                                                                      "src\\main\\java\\com\\matterworks\\core\\ports\\IWorldAccess.java"
+                                                                                  ]
+                                                                    },
+                    "java__com.matterworks.core.synchronization_part01.txt":  {
+                                                                                  "part":  1,
+                                                                                  "bytes":  4538,
+                                                                                  "files":  [
+                                                                                                "src\\main\\java\\com\\matterworks\\core\\synchronization\\FactoryLoop.java",
+                                                                                                "src\\main\\java\\com\\matterworks\\core\\synchronization\\GridSaverService.java"
+                                                                                            ]
+                                                                              },
+                    "java__com.matterworks.core.managers_part01.txt":  {
+                                                                           "part":  1,
+                                                                           "bytes":  35035,
+                                                                           "files":  [
+                                                                                         "src\\main\\java\\com\\matterworks\\core\\managers\\GridManager.java",
+                                                                                         "src\\main\\java\\com\\matterworks\\core\\managers\\TechManager.java",
+                                                                                         "src\\main\\java\\com\\matterworks\\core\\managers\\WorldIntegrityValidator.java"
+                                                                                     ]
+                                                                       },
+                    "java__com.matterworks.core.model_part01.txt":  {
+                                                                        "part":  1,
+                                                                        "bytes":  2756,
+                                                                        "files":  [
+                                                                                      "src\\main\\java\\com\\matterworks\\core\\model\\PlotObject.java"
+                                                                                  ]
+                                                                    },
+                    "java__com.matterworks.core.domain.matter_part01.txt":  {
+                                                                                "part":  1,
+                                                                                "bytes":  6712,
+                                                                                "files":  [
+                                                                                              "src\\main\\java\\com\\matterworks\\core\\domain\\matter\\MatterColor.java",
+                                                                                              "src\\main\\java\\com\\matterworks\\core\\domain\\matter\\MatterEffect.java",
+                                                                                              "src\\main\\java\\com\\matterworks\\core\\domain\\matter\\MatterPayload.java",
+                                                                                              "src\\main\\java\\com\\matterworks\\core\\domain\\matter\\MatterShape.java",
+                                                                                              "src\\main\\java\\com\\matterworks\\core\\domain\\matter\\Recipe.java",
+                                                                                              "src\\main\\java\\com\\matterworks\\core\\domain\\matter\\RecipeRegistry.java"
+                                                                                          ]
+                                                                            },
+                    "java__com.matterworks.core.common_part01.txt":  {
+                                                                         "part":  1,
+                                                                         "bytes":  2503,
+                                                                         "files":  [
+                                                                                       "src\\main\\java\\com\\matterworks\\core\\common\\Direction.java",
+                                                                                       "src\\main\\java\\com\\matterworks\\core\\common\\GridPosition.java",
+                                                                                       "src\\main\\java\\com\\matterworks\\core\\common\\Vector3Int.java"
+                                                                                   ]
+                                                                     },
+                    "java__com.matterworks.core.database_part01.txt":  {
+                                                                           "part":  1,
+                                                                           "bytes":  2158,
+                                                                           "files":  [
+                                                                                         "src\\main\\java\\com\\matterworks\\core\\database\\DatabaseManager.java",
+                                                                                         "src\\main\\java\\com\\matterworks\\core\\database\\UuidUtils.java"
+                                                                                     ]
+                                                                       },
+                    "java__com.matterworks_part01.txt":  {
+                                                             "part":  1,
+                                                             "bytes":  1032,
+                                                             "files":  [
+                                                                           "src\\main\\java\\com\\matterworks\\Main.java"
+                                                                       ]
+                                                         },
+                    "java__com.matterworks.core_part01.txt":  {
+                                                                  "part":  1,
+                                                                  "bytes":  5799,
+                                                                  "files":  [
+                                                                                "src\\main\\java\\com\\matterworks\\core\\Main.java"
+                                                                            ]
+                                                              },
+                    "java__com.matterworks.core.domain.inventory_part01.txt":  {
+                                                                                   "part":  1,
+                                                                                   "bytes":  5986,
+                                                                                   "files":  [
+                                                                                                 "src\\main\\java\\com\\matterworks\\core\\domain\\inventory\\MachineInventory.java"
+                                                                                             ]
+                                                                               },
+                    "java__com.matterworks.core.domain.machines_part01.txt":  {
+                                                                                  "part":  1,
+                                                                                  "bytes":  54164,
+                                                                                  "files":  [
+                                                                                                "src\\main\\java\\com\\matterworks\\core\\domain\\machines\\BlockRegistry.java",
+                                                                                                "src\\main\\java\\com\\matterworks\\core\\domain\\machines\\Chromator.java",
+                                                                                                "src\\main\\java\\com\\matterworks\\core\\domain\\machines\\ColorMixer.java",
+                                                                                                "src\\main\\java\\com\\matterworks\\core\\domain\\machines\\ConveyorBelt.java",
+                                                                                                "src\\main\\java\\com\\matterworks\\core\\domain\\machines\\DrillMachine.java",
+                                                                                                "src\\main\\java\\com\\matterworks\\core\\domain\\machines\\DropperMachine.java",
+                                                                                                "src\\main\\java\\com\\matterworks\\core\\domain\\machines\\IGridComponent.java",
+                                                                                                "src\\main\\java\\com\\matterworks\\core\\domain\\machines\\LiftMachine.java",
+                                                                                                "src\\main\\java\\com\\matterworks\\core\\domain\\machines\\MachineStats.java",
+                                                                                                "src\\main\\java\\com\\matterworks\\core\\domain\\machines\\Merger.java",
+                                                                                                "src\\main\\java\\com\\matterworks\\core\\domain\\machines\\NexusMachine.java",
+                                                                                                "src\\main\\java\\com\\matterworks\\core\\domain\\machines\\PlacedMachine.java",
+                                                                                                "src\\main\\java\\com\\matterworks\\core\\domain\\machines\\ProcessorMachine.java",
+                                                                                                "src\\main\\java\\com\\matterworks\\core\\domain\\machines\\Splitter.java",
+                                                                                                "src\\main\\java\\com\\matterworks\\core\\domain\\machines\\StructuralBlock.java"
+                                                                                            ]
+                                                                              },
+                    "java__com.matterworks.core.database.dao_part01.txt":  {
+                                                                               "part":  1,
+                                                                               "bytes":  32072,
+                                                                               "files":  [
+                                                                                             "src\\main\\java\\com\\matterworks\\core\\database\\dao\\InventoryDAO.java",
+                                                                                             "src\\main\\java\\com\\matterworks\\core\\database\\dao\\MachineDefinitionDAO.java",
+                                                                                             "src\\main\\java\\com\\matterworks\\core\\database\\dao\\PlayerDAO.java",
+                                                                                             "src\\main\\java\\com\\matterworks\\core\\database\\dao\\PlotDAO.java",
+                                                                                             "src\\main\\java\\com\\matterworks\\core\\database\\dao\\PlotObjectDAO.java",
+                                                                                             "src\\main\\java\\com\\matterworks\\core\\database\\dao\\PlotResourceDAO.java",
+                                                                                             "src\\main\\java\\com\\matterworks\\core\\database\\dao\\TechDefinitionDAO.java",
+                                                                                             "src\\main\\java\\com\\matterworks\\core\\database\\dao\\TransactionDAO.java",
+                                                                                             "src\\main\\java\\com\\matterworks\\core\\database\\dao\\VerificationCodeDAO.java"
+                                                                                         ]
+                                                                           },
+                    "java__com.matterworks.core.domain.factory_part01.txt":  {
+                                                                                 "part":  1,
+                                                                                 "bytes":  1758,
+                                                                                 "files":  [
+                                                                                               "src\\main\\java\\com\\matterworks\\core\\domain\\factory\\MachineFactory.java"
+                                                                                           ]
+                                                                             }
+                }
+}
