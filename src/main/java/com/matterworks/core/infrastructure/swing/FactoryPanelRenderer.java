@@ -1,5 +1,7 @@
 package com.matterworks.core.infrastructure.swing;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.matterworks.core.common.Direction;
 import com.matterworks.core.common.GridPosition;
@@ -27,6 +29,11 @@ final class FactoryPanelRenderer {
     private static final Color GRID_COLOR = new Color(50, 50, 50);
     private static final Color GHOST_BORDER = Color.WHITE;
     private static final Color ARROW_COLOR = Color.YELLOW;
+
+    private static final Color EFFECT_SHINY = new Color(235, 235, 235);
+    private static final Color EFFECT_BLAZE = new Color(255, 110, 0);
+    private static final Color EFFECT_GLITCH = new Color(255, 0, 220);
+    private static final Color EFFECT_NONE = new Color(210, 210, 210);
 
     private final BlockRegistry registry;
     private final FactoryPanelController controller;
@@ -66,23 +73,18 @@ final class FactoryPanelRenderer {
 
         var snap = controller.getSnapshot();
 
-// ✅ cache griglia occupazione per risolvere i port come fa la logica
+        // cache griglia occupazione per risolvere i port come fa la logica
         this.machineGrid = buildExpandedOccupancy((snap.machines() != null) ? snap.machines() : Map.of());
 
         if (state.currentLayer == 0) drawTerrainResources(g2, snap.resources());
         drawMachines(g2, snap.machines());
         drawGhost(g2);
-
     }
-
 
     private Map<GridPosition, PlacedMachine> buildExpandedOccupancy(Map<GridPosition, PlacedMachine> machines) {
         if (machines == null || machines.isEmpty()) return Map.of();
 
-        // NB: HashMap normale va bene, non serve Concurrent qui (è per il frame corrente)
         java.util.HashMap<GridPosition, PlacedMachine> out = new java.util.HashMap<>();
-
-        // dedup per istanza (perché machines.values() può contenere duplicati o comunque vogliamo espandere 1 volta)
         java.util.IdentityHashMap<PlacedMachine, Boolean> seen = new java.util.IdentityHashMap<>();
 
         for (PlacedMachine m : machines.values()) {
@@ -92,21 +94,16 @@ final class FactoryPanelRenderer {
             GridPosition p = m.getPos();
             if (p == null) continue;
 
-            // sempre la cella base
             out.put(p, m);
 
-            // per le 2x1 (incluso smoothing/cutting) espando in modo speculare usando ext offset
             Vector3Int dim = registry.getDimensions(m.getTypeId());
             if (dim != null && dim.x() == 2 && dim.z() == 1) {
-                // 2x1 ruotata: la seconda cella dipende dall’orientamento
                 int[] ext = extensionOffset2x1(m.getOrientation());
                 GridPosition p2 = new GridPosition(p.x() + ext[0], p.y(), p.z() + ext[1]);
                 out.put(p2, m);
                 continue;
             }
 
-            // fallback generico: rettangolo “positivo” (per macchine non-problematiche)
-            // (Se un giorno aggiungi footprint con anchor diverso, si può raffinare, ma per shaper/cutting basta sopra)
             if (dim != null) {
                 Vector3Int eff = getEffectiveFootprint(m.getTypeId(), m.getOrientation());
                 for (int dx = 0; dx < eff.x(); dx++) {
@@ -119,7 +116,6 @@ final class FactoryPanelRenderer {
 
         return out;
     }
-
 
     private void ensureGridImage(int w, int h) {
         if (w <= 0 || h <= 0) return;
@@ -185,7 +181,6 @@ final class FactoryPanelRenderer {
             GridPosition pos = m.getPos();
             if (pos == null) continue;
 
-            // layer visibility basata su registry (non su m.getDimensions)
             Vector3Int base = registry.getDimensions(m.getTypeId());
             if (base == null) base = Vector3Int.one();
             int ySize = base.y();
@@ -201,7 +196,6 @@ final class FactoryPanelRenderer {
         int x = OFFSET_X + (p.x() * CELL_SIZE);
         int z = OFFSET_Y + (p.z() * CELL_SIZE);
 
-        // footprint “authoritative”: registry dims + orientation
         Vector3Int eff = getEffectiveFootprint(m.getTypeId(), m.getOrientation());
         int w = eff.x() * CELL_SIZE;
         int h = eff.z() * CELL_SIZE;
@@ -240,8 +234,9 @@ final class FactoryPanelRenderer {
             drawMergerPortsGrid(g, m, x, z);
         } else if ("chromator".equals(type) || "color_mixer".equals(type)) {
             drawTwoInputsOneOutput_2x1(g, m, x, z);
-        } else if ("smoothing".equals(type) || "cutting".equals(type)) {
-            // ✅ MUST match logic: "pos ± dir, if still self -> step again until outside footprint"
+        } else if ("smoothing".equals(type) || "cutting".equals(type)
+                || "shiny_polisher".equals(type) || "blazing_forge".equals(type) || "glitch_distorter".equals(type)) {
+            // ✅ come cutting/shaper: porta risolta fuori footprint + disegnata sul bordo interno
             drawShaperCuttingPortsSingle(g, m, x, z);
         } else if ("lift".equals(type) || "dropper".equals(type)) {
             drawVerticalPorts(g, m, x, z);
@@ -284,10 +279,8 @@ final class FactoryPanelRenderer {
         return p;
     }
 
-
     // ======= Ports drawing helpers =======
 
-    // draw a port on the EDGE of a specific cell (relative to base cell)
     private void drawPortOnCellEdge(Graphics2D g, int baseX, int baseZ, int cellDx, int cellDz, Direction edge, Color c) {
         int p = 8;
         int cellX = (baseX + cellDx * CELL_SIZE);
@@ -347,11 +340,10 @@ final class FactoryPanelRenderer {
         drawPortOnCellEdge(g, baseX, baseZ, 0, 0, front, Color.GREEN);
     }
 
-    // CHROMATOR / MIXER: 2 inputs (back on both cells), 1 output (as per legacy getOutputPosition)
+    // CHROMATOR / MIXER: 2 inputs (back on both cells), 1 output
     private void drawTwoInputsOneOutput_2x1(Graphics2D g, PlacedMachine m, int baseX, int baseZ) {
         Direction o = m.getOrientation();
 
-        // N/S: (0,0) and (1,0) | E/W: (0,0) and (0,1)
         if (o == Direction.NORTH) {
             drawPortOnCellEdge(g, baseX, baseZ, 0, 0, Direction.SOUTH, Color.BLUE);
             drawPortOnCellEdge(g, baseX, baseZ, 1, 0, Direction.SOUTH, Color.BLUE);
@@ -372,8 +364,8 @@ final class FactoryPanelRenderer {
     }
 
     /**
-     * SHAPER/CUTTING (smoothing/cutting):
-     * draw ports exactly where logic expects them.
+     * smoothing/cutting + effect-machines:
+     * draw ports exactly where logic expects them (stepOutOfSelf) and put the square on the machine edge.
      */
     private void drawShaperCuttingPortsSingle(Graphics2D g, PlacedMachine m, int baseX, int baseZ) {
         Direction front = m.getOrientation();
@@ -384,39 +376,27 @@ final class FactoryPanelRenderer {
         Vector3Int fv = front.toVector();
         Vector3Int bv = back.toVector();
 
-        // start a 1 passo (come logica)
         GridPosition outStart = new GridPosition(pos.x() + fv.x(), pos.y() + fv.y(), pos.z() + fv.z());
         GridPosition inStart  = new GridPosition(pos.x() + bv.x(), pos.y() + bv.y(), pos.z() + bv.z());
 
-        // ✅ esci dalla footprint come fa la logica
         GridPosition outCell = resolvePortCellOutsideFootprint(m, outStart, front);
         GridPosition inCell  = resolvePortCellOutsideFootprint(m, inStart,  back);
 
-        // converti world -> offset relativo alla cella base (che è pos)
         int dxOut = outCell.x() - pos.x();
         int dzOut = outCell.z() - pos.z();
         int dxIn  = inCell.x()  - pos.x();
         int dzIn  = inCell.z()  - pos.z();
-// vogliamo disegnare SUL BORDO DELLA MACCHINA (cella interna), non sul belt
 
-// cella interna adiacente all'INPUT (spostati di 1 verso la macchina)
+        // disegno sul bordo della cella interna, non sul belt
         int dxInInside  = dxIn  + fv.x();
         int dzInInside  = dzIn  + fv.z();
 
-// cella interna adiacente all'OUTPUT (spostati di 1 verso la macchina)
         int dxOutInside = dxOut + bv.x();
         int dzOutInside = dzOut + bv.z();
 
-// INPUT: bordo back della cella interna
-        drawPortOnCellEdge(g, baseX, baseZ, dxInInside, dzInInside, back, Color.BLUE);
-
-// OUTPUT: bordo front della cella interna
+        drawPortOnCellEdge(g, baseX, baseZ, dxInInside,  dzInInside,  back,  Color.BLUE);
         drawPortOnCellEdge(g, baseX, baseZ, dxOutInside, dzOutInside, front, Color.GREEN);
-
     }
-
-
-
 
     // ======= Footprint / Ghost =======
 
@@ -574,16 +554,21 @@ final class FactoryPanelRenderer {
         }
     }
 
+    // ======= ITEM RENDER (color + shape + effect overlay) =======
+
     private void drawItemShape(Graphics2D g, JsonObject item, int x, int z) {
         String colorStr = item.has("color") ? item.get("color").getAsString() : "RAW";
         String shapeStr = (item.has("shape") && !item.get("shape").isJsonNull())
                 ? item.get("shape").getAsString()
                 : "LIQUID";
 
-        g.setColor(getColorFromStr(colorStr, 255));
+        String effect = readSingleEffect(item); // null se none
+
         int size = 18;
         int pad = (CELL_SIZE - size) / 2;
 
+        // fill
+        g.setColor(getColorFromStr(colorStr, 255));
         if ("CUBE".equals(shapeStr)) {
             g.fillRect(x + pad, z + pad, size, size);
         } else if ("PYRAMID".equals(shapeStr)) {
@@ -599,8 +584,76 @@ final class FactoryPanelRenderer {
             g.fillOval(x + pad, z + pad, size, size);
         }
 
-        g.setColor(Color.WHITE);
+        // outline per distinguere NONE vs EFFECT
+        Color outline = effectColor(effect);
+        g.setColor(outline);
         g.drawRect(x + pad, z + pad, size, size);
+
+        // overlay effetto (badge + segno grafico)
+        if (effect != null) {
+            drawEffectOverlay(g, effect, x + pad, z + pad, size);
+        }
+    }
+
+    private String readSingleEffect(JsonObject item) {
+        if (item == null) return null;
+        if (!item.has("effects")) return null;
+        JsonElement el = item.get("effects");
+        if (!el.isJsonArray()) return null;
+        JsonArray arr = el.getAsJsonArray();
+        if (arr.isEmpty()) return null;
+        JsonElement first = arr.get(0);
+        if (first == null || first.isJsonNull()) return null;
+        String s = first.getAsString();
+        return (s == null || s.isBlank()) ? null : s;
+    }
+
+    private Color effectColor(String effect) {
+        if (effect == null) return EFFECT_NONE;
+        return switch (effect) {
+            case "SHINY" -> EFFECT_SHINY;
+            case "BLAZING" -> EFFECT_BLAZE;
+            case "GLITCH" -> EFFECT_GLITCH;
+            default -> Color.WHITE;
+        };
+    }
+
+    private void drawEffectOverlay(Graphics2D g, String effect, int x, int y, int size) {
+        // badge in alto a destra
+        int b = 8;
+        g.setColor(effectColor(effect));
+        g.fillRect(x + size - b, y, b, b);
+        g.setColor(Color.BLACK);
+        g.drawRect(x + size - b, y, b, b);
+
+        // segno grafico principale
+        if ("SHINY".equals(effect)) {
+            // sparkle: croce + diagonali leggere
+            g.setColor(EFFECT_SHINY);
+            int cx = x + size / 2;
+            int cy = y + size / 2;
+            g.drawLine(cx - 6, cy, cx + 6, cy);
+            g.drawLine(cx, cy - 6, cx, cy + 6);
+            g.drawLine(cx - 4, cy - 4, cx + 4, cy + 4);
+            g.drawLine(cx - 4, cy + 4, cx + 4, cy - 4);
+        } else if ("BLAZING".equals(effect)) {
+            // flame: triangolino/fiammella in basso
+            g.setColor(EFFECT_BLAZE);
+            int fx = x + size / 2;
+            int fy = y + size - 2;
+            Polygon flame = new Polygon(
+                    new int[]{fx, fx - 5, fx + 5},
+                    new int[]{fy - 10, fy, fy},
+                    3
+            );
+            g.fillPolygon(flame);
+        } else if ("GLITCH".equals(effect)) {
+            // glitch: 3 righe “disturbate”
+            g.setColor(EFFECT_GLITCH);
+            g.drawLine(x + 2, y + 5, x + size - 2, y + 5);
+            g.drawLine(x + 1, y + 9, x + size - 4, y + 9);
+            g.drawLine(x + 3, y + 13, x + size - 1, y + 13);
+        }
     }
 
     private void drawDirectionDot(Graphics2D g, int x, int y, int w, int h, Direction dir) {
@@ -618,14 +671,19 @@ final class FactoryPanelRenderer {
     private Color getColorFromStr(String c, int alpha) {
         if (c == null) return new Color(120, 120, 120, alpha);
         return switch (c) {
+            case "RAW" -> new Color(120, 120, 120, alpha);
             case "RED" -> new Color(200, 0, 0, alpha);
             case "BLUE" -> new Color(0, 0, 200, alpha);
             case "YELLOW" -> new Color(200, 200, 0, alpha);
             case "PURPLE" -> new Color(160, 32, 240, alpha);
             case "GREEN" -> new Color(0, 200, 0, alpha);
+            case "ORANGE" -> new Color(255, 140, 0, alpha);
+            case "WHITE" -> new Color(240, 240, 240, alpha);
             default -> new Color(120, 120, 120, alpha);
         };
     }
+
+    // ======= Machine colors =======
 
     private Color getColorForType(String type) {
         if (type == null) return Color.RED;
@@ -641,6 +699,12 @@ final class FactoryPanelRenderer {
             case "dropper" -> new Color(139, 0, 139);
             case "smoothing" -> new Color(46, 204, 113);
             case "cutting" -> new Color(241, 196, 15);
+
+            // ✅ nuovi: colori distinti
+            case "shiny_polisher" -> new Color(190, 190, 190);      // metallizzato
+            case "blazing_forge" -> new Color(210, 70, 0);          // arancio/rossastro
+            case "glitch_distorter" -> new Color(170, 0, 210);      // viola/magenta
+
             default -> Color.RED;
         };
     }

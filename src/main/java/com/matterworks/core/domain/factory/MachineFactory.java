@@ -28,9 +28,14 @@ public class MachineFactory {
             case "lift" -> new LiftMachine(dbId, ownerId, pos, typeId, metadata);
             case "dropper" -> new DropperMachine(dbId, ownerId, pos, typeId, metadata);
 
-            // ✅ NUOVE MACCHINE
+            // nuove macchine GDD
             case "smoothing" -> new ShaperMachine(dbId, ownerId, pos, typeId, metadata);
             case "cutting" -> new CuttingMachine(dbId, ownerId, pos, typeId, metadata);
+
+            // ✅ nuove macchine effetti (1 solo effetto applicabile)
+            case "shiny_polisher" -> new ShinyPolisherMachine(dbId, ownerId, pos, typeId, metadata);
+            case "blazing_forge" -> new BlazingForgeMachine(dbId, ownerId, pos, typeId, metadata);
+            case "glitch_distorter" -> new GlitchDistorterMachine(dbId, ownerId, pos, typeId, metadata);
 
             // strutture
             case "STRUCTURE_GENERIC" -> new StructuralBlock(dbId, ownerId, pos, typeId, metadata);

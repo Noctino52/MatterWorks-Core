@@ -9,6 +9,7 @@ import com.matterworks.core.ports.IRepository;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 public class MarketManager {
 
@@ -36,14 +37,31 @@ public class MarketManager {
 
     public void sellItem(MatterPayload item, UUID sellerId) {
         if (item == null) return;
+
         double value = calculateValue(item);
 
-        // Deleghiamo l'aggiornamento dei soldi al GridManager.
-        // Questo assicura che activeProfileCache sia aggiornata e la GUI veda i soldi immediatamente.
-        gridManager.addMoney(sellerId, value, "MATTER_SELL",
-                item.shape() != null ? item.shape().name() : "LIQUID");
+        gridManager.addMoney(
+                sellerId,
+                value,
+                "MATTER_SELL",
+                item.shape() != null ? item.shape().name() : "LIQUID"
+        );
 
-        System.out.println("💰 MARKET: Venduto " + item.shape() + " (" + item.color() + ") per $" + String.format("%.2f", value));
+        String shapeTxt = (item.shape() != null ? item.shape().name() : "LIQUID");
+        String colorTxt = (item.color() != null ? item.color().name() : "RAW");
+        String effTxt = formatEffects(item);
+
+        System.out.println("💰 MARKET: Venduto " + shapeTxt + " (" + colorTxt + ") " + effTxt
+                + " per $" + String.format("%.2f", value));
+    }
+
+    private String formatEffects(MatterPayload item) {
+        if (item.effects() == null || item.effects().isEmpty()) {
+            return "[NO_EFFECT]";
+        }
+        // per design nuovo è 1 solo effetto, ma gestisco anche eventuali legacy
+        String joined = item.effects().stream().map(Enum::name).collect(Collectors.joining("+"));
+        return "[" + joined + "]";
     }
 
     private double calculateValue(MatterPayload item) {

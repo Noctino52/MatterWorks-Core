@@ -1,3 +1,4 @@
+// FILE: src/main/java/com/matterworks/core/infrastructure/swing/TopBarPanel.java
 package com.matterworks.core.infrastructure.swing;
 
 import javax.swing.*;
@@ -7,40 +8,38 @@ import java.awt.event.MouseEvent;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
-final class TopBarPanel extends JPanel {
+public class TopBarPanel extends JPanel {
 
     private final JComboBox<Object> playerSelector = new JComboBox<>();
     private final JLabel moneyLabel = UiKit.label("MONEY: $---", Color.GREEN, 16);
 
-    TopBarPanel(
-            Consumer<String> onSelectTool,
-            BiConsumer<String, Integer> onBuyToolRightClick,
-            Consumer<Integer> onLayerDelta,
-            Consumer<String> onSelectStructureNativeId,
-            Runnable onSOS,
-            Runnable onSave,
-            Runnable onReset,
-            Runnable onDelete
-    ) {
-        super(new BorderLayout());
+    public TopBarPanel(Consumer<String> onSelectTool,
+                       BiConsumer<String, Integer> onBuyToolRightClick,
+                       Consumer<Integer> onLayerDelta,
+                       Consumer<String> onSelectStructureNativeId,
+                       Runnable onSOS,
+                       Runnable onSave,
+                       Runnable onReset,
+                       Runnable onDelete) {
+
+        setLayout(new BorderLayout());
+        setBackground(new Color(45, 45, 48));
 
         JPanel header = new JPanel(new FlowLayout(FlowLayout.LEFT, 20, 10));
-        header.setBackground(new Color(45, 45, 48));
+        header.setOpaque(false);
 
-        JLabel activeLabel = new JLabel("ACTIVE USER:");
-        activeLabel.setForeground(Color.WHITE);
-
+        JLabel activeLabel = UiKit.label("ACTIVE USER:", Color.WHITE, 14);
         header.add(activeLabel);
         header.add(playerSelector);
         header.add(moneyLabel);
 
         JPanel toolbar = new JPanel(new BorderLayout());
-        toolbar.setBackground(new Color(60, 60, 65));
+        toolbar.setOpaque(false);
 
         JPanel leftTools = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 5));
         leftTools.setOpaque(false);
 
-        // tools
+        // tools (esistenti)
         leftTools.add(toolButton("Drill", "drill_mk1", onSelectTool, onBuyToolRightClick));
         leftTools.add(toolButton("Belt", "conveyor_belt", onSelectTool, onBuyToolRightClick));
         leftTools.add(toolButton("Splitter", "splitter", onSelectTool, onBuyToolRightClick));
@@ -51,6 +50,12 @@ final class TopBarPanel extends JPanel {
         leftTools.add(toolButton("Mixer", "color_mixer", onSelectTool, onBuyToolRightClick));
         leftTools.add(toolButton("Shaper", "smoothing", onSelectTool, onBuyToolRightClick));
         leftTools.add(toolButton("Cutting", "cutting", onSelectTool, onBuyToolRightClick));
+
+        // nuovi effetti (GDD)
+        leftTools.add(toolButton("Shiny", "shiny_polisher", onSelectTool, onBuyToolRightClick));
+        leftTools.add(toolButton("Blaze", "blazing_forge", onSelectTool, onBuyToolRightClick));
+        leftTools.add(toolButton("Glitch", "glitch_distorter", onSelectTool, onBuyToolRightClick));
+
         leftTools.add(toolButton("Nexus", "nexus_core", onSelectTool, onBuyToolRightClick));
 
         leftTools.add(new JSeparator(SwingConstants.VERTICAL) {{

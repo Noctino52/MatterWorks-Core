@@ -1,3 +1,4 @@
+// FILE: src/main/java/com/matterworks/core/infrastructure/swing/InventoryDebugPanel.java
 package com.matterworks.core.infrastructure.swing;
 
 import com.matterworks.core.domain.player.PlayerProfile;
@@ -5,13 +6,11 @@ import com.matterworks.core.managers.GridManager;
 import com.matterworks.core.ports.IRepository;
 
 import javax.swing.*;
+import javax.swing.Timer;
 import java.awt.*;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.UUID;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.RejectedExecutionException;
+import java.util.List;
+import java.util.*;
+import java.util.concurrent.*;
 
 public class InventoryDebugPanel extends JPanel {
 
@@ -20,19 +19,7 @@ public class InventoryDebugPanel extends JPanel {
     private final GridManager gridManager;
     private final Runnable onEconomyMaybeChanged;
 
-    private final String[] itemIds = {
-            "drill_mk1",
-            "conveyor_belt",
-            "splitter",
-            "merger",
-            "lift",
-            "dropper",
-            "nexus_core",
-            "chromator",
-            "color_mixer"
-    };
-
-    private final Map<String, JLabel> labelMap = new HashMap<>();
+    private final Map<String, RowUI> rows = new LinkedHashMap<>();
     private final Timer refreshTimer;
 
     private final ExecutorService exec = Executors.newSingleThreadExecutor(r -> {
@@ -43,14 +30,49 @@ public class InventoryDebugPanel extends JPanel {
 
     private volatile boolean disposed = false;
 
+    // fallback se DB non ha ancora definizioni (non rompo nulla)
+    private static final List<String> FALLBACK_ITEMS = List.of(
+            "drill_mk1",
+            "conveyor_belt",
+            "splitter",
+            "merger",
+            "lift",
+            "dropper",
+            "nexus_core",
+            "chromator",
+            "color_mixer",
+            "smoothing",
+            "cutting",
+            // nuovi effetti
+            "shiny_polisher",
+            "blazing_forge",
+            "glitch_distorter"
+    );
+
+    private static final class RowUI {
+        final String itemId;
+        final JLabel label;
+        final JButton btnRem;
+        final JButton btnAdd;
+        final double price;
+
+        RowUI(String itemId, JLabel label, JButton btnRem, JButton btnAdd, double price) {
+            this.itemId = itemId;
+            this.label = label;
+            this.btnRem = btnRem;
+            this.btnAdd = btnAdd;
+            this.price = price;
+        }
+    }
+
     public InventoryDebugPanel(IRepository repository, UUID playerUuid, GridManager gm, Runnable onEconomyMaybeChanged) {
         this.repository = repository;
         this.playerUuid = playerUuid;
         this.gridManager = gm;
         this.onEconomyMaybeChanged = onEconomyMaybeChanged;
 
-        this.setPreferredSize(new Dimension(320, 0));
-        this.setMinimumSize(new Dimension(320, 0));
+        this.setPreferredSize(new Dimension(360, 0));
+        this.setMinimumSize(new Dimension(360, 0));
 
         PlayerProfile profile = gridManager.getCachedProfile(playerUuid);
         boolean isPlayer = (profile != null && profile.getRank() == PlayerProfile.PlayerRank.PLAYER);
@@ -59,18 +81,19 @@ public class InventoryDebugPanel extends JPanel {
         setBorder(BorderFactory.createTitledBorder(isPlayer ? "Warehouse Shop" : "Warehouse Monitor"));
         setBackground(new Color(40, 40, 40));
 
+        List<String> itemIds = gridManager.getBlockRegistry().getShopMachineIdsFromDb();
+        if (itemIds == null || itemIds.isEmpty()) itemIds = FALLBACK_ITEMS;
+
+        // costruzione righe
         for (String id : itemIds) {
             add(createItemRow(id, isPlayer));
             add(Box.createVerticalStrut(8));
         }
 
-        // Refresh periodico come prima, ma fetch OFF-EDT.
-        refreshTimer = new Timer(500, e -> requestRefresh());
+        refreshTimer = new Timer(500, e -> requestRefresh(isPlayer));
         refreshTimer.start();
 
-        // Non chiudere mai qui: il pannello potrebbe non essere ancora displayable.
-        // Il primo refresh “buono” arriverà appena la tab viene resa visibile.
-        requestRefresh();
+        requestRefresh(isPlayer);
     }
 
     public void dispose() {
@@ -78,28 +101,28 @@ public class InventoryDebugPanel extends JPanel {
         try {
             if (refreshTimer != null && refreshTimer.isRunning()) refreshTimer.stop();
         } catch (Exception ignored) {}
-
         try { exec.shutdownNow(); } catch (Exception ignored) {}
     }
 
     private JPanel createItemRow(String itemId, boolean isPlayer) {
         JPanel row = new JPanel(new BorderLayout(10, 0));
         row.setOpaque(false);
-        row.setMaximumSize(new Dimension(310, 40));
+        row.setMaximumSize(new Dimension(350, 42));
 
         double price = gridManager.getBlockRegistry().getPrice(itemId);
 
         JLabel lblInfo = new JLabel(itemId + ": 0");
         lblInfo.setForeground(Color.WHITE);
         lblInfo.setFont(new Font("Monospaced", Font.BOLD, 12));
-        if (isPlayer) lblInfo.setToolTipText("Price: $" + price);
 
-        labelMap.put(itemId, lblInfo);
+        if (isPlayer) {
+            lblInfo.setToolTipText("Price: $" + price);
+        }
 
-        JPanel buttons = new JPanel(new GridLayout(1, 2, 5, 0));
+        JPanel buttons = new JPanel(new GridLayout(1, 2, 6, 0));
         buttons.setOpaque(false);
-        buttons.setPreferredSize(new Dimension(80, 28));
-        buttons.setMinimumSize(new Dimension(80, 28));
+        buttons.setPreferredSize(new Dimension(90, 28));
+        buttons.setMinimumSize(new Dimension(90, 28));
 
         JButton btnRem = new JButton("-");
         JButton btnAdd = new JButton("+");
@@ -136,11 +159,13 @@ public class InventoryDebugPanel extends JPanel {
 
         row.add(lblInfo, BorderLayout.CENTER);
         row.add(buttons, BorderLayout.EAST);
+
+        rows.put(itemId, new RowUI(itemId, lblInfo, btnRem, btnAdd, price));
         return row;
     }
 
     private void setupTinyButton(JButton b, Color bg) {
-        b.setPreferredSize(new Dimension(35, 25));
+        b.setPreferredSize(new Dimension(40, 25));
         b.setMargin(new Insets(0, 0, 0, 0));
         b.setFont(new Font("SansSerif", Font.BOLD, 14));
         b.setFocusable(false);
@@ -160,51 +185,80 @@ public class InventoryDebugPanel extends JPanel {
                 } catch (Throwable t) {
                     t.printStackTrace();
                 } finally {
-                    // Aggiorna contatori + soldi
-                    requestRefresh();
+                    requestRefresh(true);
                     if (economyChanged && onEconomyMaybeChanged != null) {
                         SwingUtilities.invokeLater(onEconomyMaybeChanged);
                     }
-
                     SwingUtilities.invokeLater(() -> {
                         if (btn.isDisplayable()) btn.setEnabled(true);
                     });
                 }
             });
         } catch (RejectedExecutionException ex) {
-            // Executor chiuso (tab cambiata). Riabilita il bottone.
             SwingUtilities.invokeLater(() -> {
                 if (btn.isDisplayable()) btn.setEnabled(true);
             });
         }
     }
 
-    private void requestRefresh() {
+    private void requestRefresh(boolean isPlayer) {
         if (disposed) return;
-
-        // Se non è ancora visibile/displayable, non “killare” nulla: semplicemente rimanda.
-        // Il timer riproverà.
         if (!isShowing()) return;
 
         try {
             exec.submit(() -> {
+                // snapshot counts
                 Map<String, Integer> counts = new HashMap<>();
-                try {
-                    for (String id : itemIds) {
-                        counts.put(id, repository.getInventoryItemCount(playerUuid, id));
+                for (String id : rows.keySet()) {
+                    counts.put(id, repository.getInventoryItemCount(playerUuid, id));
+                }
+
+                PlayerProfile p = gridManager.getCachedProfile(playerUuid);
+                double money = (p != null ? p.getMoney() : 0.0);
+                boolean isAdmin = (p != null && p.isAdmin());
+
+                // snapshot lock/afford
+                Map<String, Boolean> canBuy = new HashMap<>();
+                Map<String, Boolean> canAfford = new HashMap<>();
+
+                if (isPlayer && p != null) {
+                    for (String id : rows.keySet()) {
+                        boolean okTech = gridManager.getTechManager().canBuyItem(p, id);
+                        canBuy.put(id, okTech);
+                        canAfford.put(id, isAdmin || money >= rows.get(id).price);
                     }
-                } catch (Throwable t) {
-                    t.printStackTrace();
                 }
 
                 SwingUtilities.invokeLater(() -> {
                     if (disposed || !isDisplayable()) return;
-                    for (String id : itemIds) {
-                        JLabel lbl = labelMap.get(id);
-                        if (lbl != null) {
-                            int c = counts.getOrDefault(id, 0);
-                            lbl.setText(id + ": " + c);
+
+                    for (RowUI r : rows.values()) {
+                        int c = counts.getOrDefault(r.itemId, 0);
+
+                        if (!isPlayer) {
+                            r.label.setText(r.itemId + ": " + c);
+                            r.btnAdd.setEnabled(true);
+                            r.btnRem.setEnabled(true);
+                            continue;
                         }
+
+                        boolean unlocked = canBuy.getOrDefault(r.itemId, false);
+                        boolean afford = canAfford.getOrDefault(r.itemId, true);
+
+                        String suffix = unlocked ? "" : "  [LOCKED]";
+                        r.label.setText(r.itemId + ": " + c + suffix);
+
+                        // Buy enabled solo se tech ok e soldi ok
+                        r.btnAdd.setEnabled(unlocked && afford);
+
+                        if (!unlocked) {
+                            r.btnAdd.setToolTipText("Locked: unlock via Tech Tree");
+                        } else {
+                            r.btnAdd.setToolTipText("Buy for $" + r.price);
+                        }
+
+                        // Sell: abilito se hai almeno 1
+                        r.btnRem.setEnabled(c > 0);
                     }
                 });
             });
