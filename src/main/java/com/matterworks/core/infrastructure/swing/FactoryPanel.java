@@ -30,10 +30,10 @@ public class FactoryPanel extends JPanel {
         setFocusable(true);
         setDoubleBuffered(true);
 
-        // ✅ abilita tooltip e rendilo "immediato" (infobox hover)
+        // ✅ abilita tooltip e rendilo "dopo 0.5s di hover"
         ToolTipManager.sharedInstance().registerComponent(this);
-        ToolTipManager.sharedInstance().setInitialDelay(0);
-        ToolTipManager.sharedInstance().setReshowDelay(0);
+        ToolTipManager.sharedInstance().setInitialDelay(500);   // 0.5s prima che appaia
+        ToolTipManager.sharedInstance().setReshowDelay(500);    // evita riapparizione immediata spostandosi tra celle
         ToolTipManager.sharedInstance().setDismissDelay(60_000);
 
         // serve per "accendere" i tooltip su Swing (poi getToolTipText viene chiamato dinamicamente)
@@ -87,7 +87,6 @@ public class FactoryPanel extends JPanel {
 
     @Override
     public String getToolTipText(MouseEvent event) {
-        // ✅ tooltip dinamico basato su MachineInspector/MachineInspectionInfo
         if (event == null) return null;
         return controller.getInspectionTooltipHtml(event.getX(), event.getY());
     }
