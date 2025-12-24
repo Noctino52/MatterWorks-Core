@@ -6,11 +6,7 @@ import com.matterworks.core.database.DatabaseManager;
 import com.matterworks.core.database.UuidUtils;
 import com.matterworks.core.model.PlotObject;
 
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.sql.Statement;
+import java.sql.*;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -37,9 +33,10 @@ public class PlotDAO {
         return null;
     }
 
-    // --- FIX: Ora restituisce Long (ID Generato) ---
+    // (compat) non obbligo item_placed nella INSERT: userà DEFAULT 0
     public Long createPlot(UUID ownerId, int x, int z, int worldId) {
-        String sql = "INSERT INTO plots (owner_id, x, z, world_id, allocation_index, world_x, world_z, expansion_tier, is_active) VALUES (?, ?, ?, ?, 0, 0, 0, 0, 1)";
+        String sql = "INSERT INTO plots (owner_id, x, z, world_id, allocation_index, world_x, world_z, expansion_tier, is_active) " +
+                "VALUES (?, ?, ?, ?, 0, 0, 0, 0, 1)";
         try (Connection conn = dbManager.getConnection();
              PreparedStatement stmt = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
 
@@ -71,32 +68,56 @@ public class PlotDAO {
             return null;
         }
 
-        String sql = "INSERT INTO plot_machines (plot_id, type_id, x, y, z, metadata) VALUES (?, ?, ?, ?, ?, ?)";
-        try (Connection conn = dbManager.getConnection();
-             PreparedStatement stmt = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+        String insertSql = "INSERT INTO plot_machines (plot_id, type_id, x, y, z, metadata) VALUES (?, ?, ?, ?, ?, ?)";
+        String incSql = "UPDATE plots SET item_placed = item_placed + 1 WHERE id = ?";
 
-            stmt.setLong(1, plotId);
-            stmt.setString(2, typeId);
-            stmt.setInt(3, x);
-            stmt.setInt(4, y);
-            stmt.setInt(5, z);
-            stmt.setString(6, metadataJson);
+        try (Connection conn = dbManager.getConnection()) {
+            conn.setAutoCommit(false);
 
-            int affected = stmt.executeUpdate();
-            if (affected > 0) {
-                try (ResultSet rs = stmt.getGeneratedKeys()) {
-                    if (rs.next()) return rs.getLong(1);
+            try (PreparedStatement stmt = conn.prepareStatement(insertSql, Statement.RETURN_GENERATED_KEYS)) {
+                stmt.setLong(1, plotId);
+                stmt.setString(2, typeId);
+                stmt.setInt(3, x);
+                stmt.setInt(4, y);
+                stmt.setInt(5, z);
+                stmt.setString(6, metadataJson);
+
+                int affected = stmt.executeUpdate();
+                if (affected <= 0) {
+                    conn.rollback();
+                    return null;
                 }
+
+                Long machineId = null;
+                try (ResultSet rs = stmt.getGeneratedKeys()) {
+                    if (rs.next()) machineId = rs.getLong(1);
+                }
+
+                // increment item_placed
+                try (PreparedStatement inc = conn.prepareStatement(incSql)) {
+                    inc.setLong(1, plotId);
+                    inc.executeUpdate();
+                }
+
+                conn.commit();
+                return machineId;
+            } catch (SQLException ex) {
+                conn.rollback();
+                ex.printStackTrace();
+                return null;
+            } finally {
+                conn.setAutoCommit(true);
             }
         } catch (SQLException e) {
             e.printStackTrace();
+            return null;
         }
-        return null;
     }
 
     public List<PlotObject> loadMachines(UUID ownerId) {
         List<PlotObject> machines = new ArrayList<>();
-        String sql = "SELECT pm.id, pm.plot_id, pm.type_id, pm.x, pm.y, pm.z, pm.metadata FROM plot_machines pm JOIN plots p ON pm.plot_id = p.id WHERE p.owner_id = ?";
+        String sql = "SELECT pm.id, pm.plot_id, pm.type_id, pm.x, pm.y, pm.z, pm.metadata " +
+                "FROM plot_machines pm JOIN plots p ON pm.plot_id = p.id WHERE p.owner_id = ?";
         try (Connection conn = dbManager.getConnection();
              PreparedStatement stmt = conn.prepareStatement(sql)) {
 
@@ -124,13 +145,62 @@ public class PlotDAO {
 
     public void removeMachine(Long dbId) {
         if (dbId == null) return;
-        String sql = "DELETE FROM plot_machines WHERE id = ?";
-        try (Connection conn = dbManager.getConnection();
-             PreparedStatement stmt = conn.prepareStatement(sql)) {
-            stmt.setLong(1, dbId);
-            stmt.executeUpdate();
+
+        String selSql = "SELECT plot_id FROM plot_machines WHERE id = ?";
+        String delSql = "DELETE FROM plot_machines WHERE id = ?";
+        String decSql = "UPDATE plots SET item_placed = GREATEST(0, item_placed - 1) WHERE id = ?";
+
+        try (Connection conn = dbManager.getConnection()) {
+            conn.setAutoCommit(false);
+
+            try {
+                Long plotId = null;
+
+                try (PreparedStatement sel = conn.prepareStatement(selSql)) {
+                    sel.setLong(1, dbId);
+                    try (ResultSet rs = sel.executeQuery()) {
+                        if (rs.next()) plotId = rs.getLong("plot_id");
+                    }
+                }
+
+                try (PreparedStatement del = conn.prepareStatement(delSql)) {
+                    del.setLong(1, dbId);
+                    del.executeUpdate();
+                }
+
+                if (plotId != null) {
+                    try (PreparedStatement dec = conn.prepareStatement(decSql)) {
+                        dec.setLong(1, plotId);
+                        dec.executeUpdate();
+                    }
+                }
+
+                conn.commit();
+            } catch (SQLException ex) {
+                conn.rollback();
+                ex.printStackTrace();
+            } finally {
+                conn.setAutoCommit(true);
+            }
         } catch (SQLException e) {
             e.printStackTrace();
         }
+    }
+
+    public int getItemPlaced(UUID ownerId) {
+        Long plotId = findPlotIdByOwner(ownerId);
+        if (plotId == null) return 0;
+
+        String sql = "SELECT item_placed FROM plots WHERE id = ?";
+        try (Connection conn = dbManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, plotId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return rs.getInt("item_placed");
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+        return 0;
     }
 }

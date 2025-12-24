@@ -1,11 +1,11 @@
 package com.matterworks.core.ports;
 
+import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.domain.machines.base.PlacedMachine;
 import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.player.PlayerProfile;
-import com.matterworks.core.ui.ServerConfig;
 import com.matterworks.core.model.PlotObject;
-import com.matterworks.core.common.GridPosition;
+import com.matterworks.core.ui.ServerConfig;
 
 import java.util.List;
 import java.util.Map;
@@ -18,6 +18,9 @@ public interface IRepository {
 
     // --- CONFIG ---
     ServerConfig loadServerConfig();
+
+    // ✅ NEW: cap default (server_gamestate.default_item_placed_on_plot)
+    int getDefaultItemPlacedOnPlotCap();
 
     // --- PLAYER & PROFILE ---
     PlayerProfile loadPlayerProfile(UUID uuid);
@@ -32,6 +35,9 @@ public interface IRepository {
     void updateMachinesMetadata(List<PlacedMachine> machines);
     void clearPlotData(UUID ownerId);
     Long getPlotId(UUID ownerId);
+
+    // ✅ NEW: contatore item piazzati nel plot (plots.item_placed)
+    int getPlotItemsPlaced(UUID ownerId);
 
     // --- RISORSE ---
     void saveResource(Long plotId, int x, int z, MatterColor type);

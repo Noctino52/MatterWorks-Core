@@ -337,6 +337,9 @@ public class GridManager {
     public boolean placeStructure(UUID ownerId, GridPosition pos, String nativeBlockId) {
         touchPlayer(ownerId);
 
+        // ✅ BLOCCO se cap raggiunto
+        if (!canPlaceAnotherItem(ownerId)) return false;
+
         if (!isAreaClear(ownerId, pos, Vector3Int.one())) return false;
 
         StructuralBlock block = new StructuralBlock(ownerId, pos, nativeBlockId);
@@ -351,8 +354,12 @@ public class GridManager {
         return true;
     }
 
+
     public boolean placeMachine(UUID ownerId, GridPosition pos, String typeId, Direction orientation) {
         touchPlayer(ownerId);
+
+        // ✅ BLOCCO se cap raggiunto (prima di consumare inventario!)
+        if (!canPlaceAnotherItem(ownerId)) return false;
 
         PlayerProfile p = getCachedProfile(ownerId);
         if (p == null || !techManager.canBuyItem(p, typeId)) return false;
@@ -364,6 +371,7 @@ public class GridManager {
 
         if (!isAreaClear(ownerId, pos, effDim)) return false;
 
+        // consuma inventario solo DOPO il cap check
         if (!p.isAdmin()) {
             if (repository.getInventoryItemCount(ownerId, typeId) <= 0) return false;
             repository.modifyInventoryItem(ownerId, typeId, -1);
@@ -371,7 +379,11 @@ public class GridManager {
 
         PlotObject dto = new PlotObject(null, null, pos.x(), pos.y(), pos.z(), typeId, null);
         PlacedMachine m = MachineFactory.createFromModel(dto, ownerId);
-        if (m == null) return false;
+        if (m == null) {
+            // rollback inventario se createFromModel fallisce
+            if (p != null && !p.isAdmin()) repository.modifyInventoryItem(ownerId, typeId, +1);
+            return false;
+        }
 
         m.setOrientation(orientation);
         m.setGridContext(this);
@@ -393,6 +405,7 @@ public class GridManager {
         repository.logTransaction(p, "PLACE_MACHINE", "NONE", 0, typeId);
         return true;
     }
+
 
     public void removeComponent(UUID ownerId, GridPosition pos) {
         touchPlayer(ownerId);
@@ -565,4 +578,26 @@ public class GridManager {
 
         return true;
     }
+
+    private boolean canPlaceAnotherItem(UUID ownerId) {
+        PlayerProfile p = getCachedProfile(ownerId);
+        if (p != null && p.isAdmin()) {
+            return true; // ✅ ADMIN bypass
+        }
+
+        int cap = repository.getDefaultItemPlacedOnPlotCap();
+        int placed = repository.getPlotItemsPlaced(ownerId);
+
+        if (cap <= 0) cap = 1;
+
+        if (placed >= cap) {
+            System.out.println("⚠️ CAP RAGGIUNTO: plot owner=" + ownerId
+                    + " item_placed=" + placed + " cap=" + cap
+                    + " -> non puoi piazzare altri item, rimuovi qualcosa dalla fabbrica!");
+            return false;
+        }
+        return true;
+    }
+
+
 }

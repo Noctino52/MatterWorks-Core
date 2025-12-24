@@ -38,16 +38,92 @@ public class MariaDBAdapter implements IRepository {
         this.transactionDAO = new TransactionDAO(dbManager);
     }
 
-    // --- FIX: Metodo aggiunto per GridManager ---
+    // --- Extra (non in IRepository) ---
     public Long createPlot(UUID ownerId, int x, int z, int worldId) {
         return plotDAO.createPlot(ownerId, x, z, worldId);
     }
 
+    // ==========================================================
+    // CAP PLOT ITEMS (NEW)
+    // ==========================================================
+    /**
+     * Legge server_gamestate.default_item_placed_on_plot (id=1).
+     * Fallback: 1000 se colonna/tabella non aggiornata o errore.
+     */
+    public int getDefaultItemPlacedOnPlotCap() {
+        String sql = "SELECT default_item_placed_on_plot FROM server_gamestate WHERE id = 1";
+        try (Connection conn = dbManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+
+            if (rs.next()) {
+                int v = rs.getInt("default_item_placed_on_plot");
+                return Math.max(1, v);
+            }
+        } catch (SQLException e) {
+            // DB vecchio: colonna non esiste
+            if (!isUnknownColumn(e)) e.printStackTrace();
+        }
+        return 1000;
+    }
+
+    /**
+     * Legge plots.item_placed per il plot di ownerId.
+     * Se colonna non esiste: fallback a COUNT(*) su plot_machines.
+     */
+    public int getPlotItemsPlaced(UUID ownerId) {
+        if (ownerId == null) return 0;
+
+        Long plotId = plotDAO.findPlotIdByOwner(ownerId);
+        if (plotId == null) return 0;
+
+        // prefer: plots.item_placed
+        String sql = "SELECT item_placed FROM plots WHERE id = ?";
+        try (Connection conn = dbManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+
+            ps.setLong(1, plotId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return Math.max(0, rs.getInt("item_placed"));
+            }
+        } catch (SQLException e) {
+            if (!isUnknownColumn(e)) {
+                e.printStackTrace();
+            } else {
+                // fallback: DB vecchio -> ricostruisci live dal numero di righe in plot_machines
+                return countPlotMachines(plotId);
+            }
+        }
+
+        return 0;
+    }
+
+    private int countPlotMachines(Long plotId) {
+        if (plotId == null) return 0;
+        String sql = "SELECT COUNT(*) AS c FROM plot_machines WHERE plot_id = ?";
+        try (Connection conn = dbManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, plotId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return Math.max(0, rs.getInt("c"));
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+        return 0;
+    }
+
+    // ==========================================================
+    // TRANSACTIONS
+    // ==========================================================
     @Override
     public void logTransaction(PlayerProfile player, String actionType, String currency, double amount, String itemId) {
         transactionDAO.logTransaction(player, actionType, currency, BigDecimal.valueOf(amount), itemId);
     }
 
+    // ==========================================================
+    // CONFIG
+    // ==========================================================
     @Override
     public ServerConfig loadServerConfig() {
 
@@ -104,7 +180,6 @@ public class MariaDBAdapter implements IRepository {
         return new ServerConfig(1000.0, 3, 1, 1, 0, 500.0, 64);
     }
 
-
     // ==========================================================
     // MinutesToInactive (server_gamestate)
     // ==========================================================
@@ -125,6 +200,7 @@ public class MariaDBAdapter implements IRepository {
     // ==========================================================
     // Player Sessions (player_session)
     // ==========================================================
+    @Override
     public void openPlayerSession(UUID playerUuid) {
         if (playerUuid == null) return;
 
@@ -165,6 +241,7 @@ public class MariaDBAdapter implements IRepository {
         }
     }
 
+    @Override
     public void closePlayerSession(UUID playerUuid) {
         if (playerUuid == null) return;
 
@@ -186,8 +263,6 @@ public class MariaDBAdapter implements IRepository {
                         ps.executeUpdate();
                     }
                 }
-
-                // NON tocchiamo più players.last_logout (non esiste nel tuo DB)
 
                 conn.commit();
             } catch (SQLException ex) {
@@ -214,7 +289,7 @@ public class MariaDBAdapter implements IRepository {
         } catch (SQLException e) {
             // colonna session_seconds non esiste -> ignora
             if (isUnknownColumn(e)) return false;
-            // altri errori li propaghiamo
+            // altri errori
             throw new RuntimeException(e);
         }
     }
@@ -313,13 +388,73 @@ public class MariaDBAdapter implements IRepository {
 
     @Override
     public void clearPlotData(UUID ownerId) {
+        if (ownerId == null) return;
+
         Long plotId = plotDAO.findPlotIdByOwner(ownerId);
-        if (plotId == null) return;
+
         try (Connection conn = dbManager.getConnection()) {
-            try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM plot_machines WHERE plot_id = ?")) { stmt.setLong(1, plotId); stmt.executeUpdate(); }
-            try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM plot_resources WHERE plot_id = ?")) { stmt.setLong(1, plotId); stmt.executeUpdate(); }
-        } catch (SQLException e) { e.printStackTrace(); }
+            conn.setAutoCommit(false);
+            try {
+                if (plotId != null) {
+                    try (PreparedStatement stmt = conn.prepareStatement(
+                            "DELETE FROM plot_machines WHERE plot_id = ?")) {
+                        stmt.setLong(1, plotId);
+                        stmt.executeUpdate();
+                    }
+                    try (PreparedStatement stmt = conn.prepareStatement(
+                            "DELETE FROM plot_resources WHERE plot_id = ?")) {
+                        stmt.setLong(1, plotId);
+                        stmt.executeUpdate();
+                    }
+
+                    // ✅ RESET HARD del contatore
+                    try (PreparedStatement stmt = conn.prepareStatement(
+                            "UPDATE plots SET item_placed = 0 WHERE id = ?")) {
+                        stmt.setLong(1, plotId);
+                        stmt.executeUpdate();
+                    } catch (SQLException e) {
+                        if (!isUnknownColumn(e)) throw e;
+                    }
+                } else {
+                    // fallback: se per qualche motivo non trovi plotId, prova comunque per owner_id
+                    try (PreparedStatement stmt = conn.prepareStatement(
+                            "UPDATE plots SET item_placed = 0 WHERE owner_id = ?")) {
+                        stmt.setBytes(1, UuidUtils.asBytes(ownerId));
+                        stmt.executeUpdate();
+                    } catch (SQLException e) {
+                        if (!isUnknownColumn(e)) throw e;
+                    }
+
+                    // (best effort) prova a pulire anche le righe usando subquery
+                    try (PreparedStatement stmt = conn.prepareStatement(
+                            "DELETE pm FROM plot_machines pm " +
+                                    "JOIN plots p ON pm.plot_id = p.id " +
+                                    "WHERE p.owner_id = ?")) {
+                        stmt.setBytes(1, UuidUtils.asBytes(ownerId));
+                        stmt.executeUpdate();
+                    } catch (SQLException ignored) {}
+
+                    try (PreparedStatement stmt = conn.prepareStatement(
+                            "DELETE pr FROM plot_resources pr " +
+                                    "JOIN plots p ON pr.plot_id = p.id " +
+                                    "WHERE p.owner_id = ?")) {
+                        stmt.setBytes(1, UuidUtils.asBytes(ownerId));
+                        stmt.executeUpdate();
+                    } catch (SQLException ignored) {}
+                }
+
+                conn.commit();
+            } catch (SQLException ex) {
+                conn.rollback();
+                ex.printStackTrace();
+            } finally {
+                conn.setAutoCommit(true);
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
     }
+
 
     @Override public Long getPlotId(UUID ownerId) { return plotDAO.findPlotIdByOwner(ownerId); }
     @Override public void saveResource(Long plotId, int x, int z, MatterColor type) { resourceDAO.addResource(plotId, x, z, type); }
