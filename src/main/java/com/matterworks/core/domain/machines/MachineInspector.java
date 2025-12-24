@@ -22,7 +22,8 @@ public final class MachineInspector {
             "merger",
             "lift",
             "dropper",
-            "nexus_core"
+            "nexus_core",
+            "STRUCTURE_GENERIC" // ✅ structural blocks (ridondante, ma utile)
     );
 
     private MachineInspector() {}
@@ -34,7 +35,8 @@ public final class MachineInspector {
         String name = typeId; // fallback: displayName futuro
         GridPosition anchor = m.getPos();
 
-        boolean showInUi = shouldShowInUi(typeId);
+        // ✅ showInUi: escludi belt/splitter/merger/lift/dropper/nexus + TUTTE le structure
+        boolean showInUi = shouldShowInUi(m, typeId);
 
         List<String> input = new ArrayList<>();
         List<String> output = new ArrayList<>();
@@ -201,7 +203,7 @@ public final class MachineInspector {
             return new MatterPayload(MatterShape.PYRAMID, in.color(), in.effects());
         }
 
-        // Chromator: slot0 “base”, slot1 “dye” => output: shape base + color dye (effects NON preservati, come nel tick)
+        // Chromator: slot0 “base”, slot1 “dye” => output: shape base + color dye
         if (pm instanceof Chromator) {
             if (pm.inputBuffer.getCountInSlot(0) <= 0) return null;
             if (pm.inputBuffer.getCountInSlot(1) <= 0) return null;
@@ -211,7 +213,7 @@ public final class MachineInspector {
             return new MatterPayload(base.shape(), dye.color());
         }
 
-        // ColorMixer: combina due colori != RAW e != uguali => output: SPHERE mixed (come nel tick)
+        // ColorMixer: combina due colori != RAW e != uguali => output: SPHERE mixed
         if (pm instanceof ColorMixer) {
             if (pm.inputBuffer.getCountInSlot(0) <= 0) return null;
             if (pm.inputBuffer.getCountInSlot(1) <= 0) return null;
@@ -297,11 +299,10 @@ public final class MachineInspector {
     private static MachineInventory inventoryFromMetadata(JsonObject meta) {
         if (meta == null || !meta.has("items")) return new MachineInventory(0);
 
-        // Preferisci capacity se c'è, altrimenti size items
+        // ✅ CORRETTO: MachineInventory espone fromSerialized(JsonObject)
         try {
             return MachineInventory.fromSerialized(meta);
         } catch (Throwable ignored) {
-            // fallback ultra-safe
             return new MachineInventory(0);
         }
     }
@@ -323,11 +324,21 @@ public final class MachineInspector {
         }
     }
 
-    private static boolean shouldShowInUi(String typeId) {
+    private static boolean shouldShowInUi(PlacedMachine m, String typeId) {
+        // ✅ ESCLUDI TUTTE LE STRUCTURE
+        if (m instanceof StructuralBlock) return false;
+
         if (typeId == null) return true;
+
         if (HIDE_UI_TYPES.contains(typeId)) return false;
+
         // extra safety: qualsiasi cosa che contenga “nexus”
-        return !typeId.toLowerCase(Locale.ROOT).contains("nexus");
+        if (typeId.toLowerCase(Locale.ROOT).contains("nexus")) return false;
+
+        // extra safety: qualsiasi id struttura futuro
+        if (typeId.toUpperCase(Locale.ROOT).startsWith("STRUCTURE")) return false;
+
+        return true;
     }
 
     private static String safe(String s, String def) {
