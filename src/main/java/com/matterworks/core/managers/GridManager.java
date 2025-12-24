@@ -381,19 +381,26 @@ public class GridManager {
         PlacedMachine m = MachineFactory.createFromModel(dto, ownerId);
         if (m == null) {
             // rollback inventario se createFromModel fallisce
-            if (p != null && !p.isAdmin()) repository.modifyInventoryItem(ownerId, typeId, +1);
+            if (!p.isAdmin()) repository.modifyInventoryItem(ownerId, typeId, +1);
             return false;
         }
 
         m.setOrientation(orientation);
         m.setGridContext(this);
 
+        // ✅ REGOLA DOMINIO: la trivella si piazza SOLO su una vena
         if (m instanceof DrillMachine drill) {
             Map<GridPosition, MatterColor> resMap = playerResources.get(ownerId);
-            if (resMap != null) {
-                MatterColor resAt = resMap.get(pos);
-                if (resAt != null) drill.setResourceToMine(resAt);
+            MatterColor resAt = (resMap != null) ? resMap.get(pos) : null;
+
+            if (resAt == null) {
+                // niente vena sotto -> annulla piazzamento + rollback inventario
+                if (!p.isAdmin()) repository.modifyInventoryItem(ownerId, typeId, +1);
+                return false;
             }
+
+            // vena presente -> trivella minerà quella risorsa
+            drill.setResourceToMine(resAt);
         }
 
         internalAddMachine(ownerId, m);
@@ -405,6 +412,7 @@ public class GridManager {
         repository.logTransaction(p, "PLACE_MACHINE", "NONE", 0, typeId);
         return true;
     }
+
 
 
     public void removeComponent(UUID ownerId, GridPosition pos) {
