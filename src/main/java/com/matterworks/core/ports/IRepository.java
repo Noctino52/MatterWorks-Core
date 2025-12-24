@@ -1,9 +1,9 @@
 package com.matterworks.core.ports;
 
-import com.matterworks.core.domain.machines.PlacedMachine;
+import com.matterworks.core.domain.machines.base.PlacedMachine;
 import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.player.PlayerProfile;
-import com.matterworks.core.infrastructure.ServerConfig;
+import com.matterworks.core.ui.ServerConfig;
 import com.matterworks.core.model.PlotObject;
 import com.matterworks.core.common.GridPosition;
 

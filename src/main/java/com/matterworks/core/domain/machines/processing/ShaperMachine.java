@@ -1,0 +1,81 @@
+package com.matterworks.core.domain.machines.processing;
+
+import com.google.gson.JsonObject;
+import com.matterworks.core.common.GridPosition;
+import com.matterworks.core.common.Vector3Int;
+import com.matterworks.core.domain.machines.base.PlacedMachine;
+import com.matterworks.core.domain.machines.base.ProcessorMachine;
+import com.matterworks.core.domain.matter.MatterPayload;
+import com.matterworks.core.domain.matter.MatterShape;
+import com.matterworks.core.domain.matter.Recipe;
+
+import java.util.List;
+import java.util.UUID;
+
+public class ShaperMachine extends ProcessorMachine {
+
+    private static final long PROCESS_TICKS = 40;
+
+    public ShaperMachine(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata) {
+        super(dbId, ownerId, pos, typeId, metadata);
+        this.dimensions = new Vector3Int(2, 1, 1);
+    }
+
+    private GridPosition stepOutOfSelf(GridPosition start, Vector3Int step) {
+        GridPosition p = start;
+        // basta poco: 2x1 -> al massimo 2 step, metto guard 3 per sicurezza
+        for (int i = 0; i < 3; i++) {
+            PlacedMachine n = getNeighborAt(p);
+            if (n == null || n != this) return p;
+            p = new GridPosition(p.x() + step.x(), p.y() + step.y(), p.z() + step.z());
+        }
+        return p;
+    }
+
+    private GridPosition getInputPortPosition() {
+        Vector3Int f = orientation.toVector();
+        Vector3Int back = new Vector3Int(-f.x(), -f.y(), -f.z());
+        GridPosition start = new GridPosition(pos.x() + back.x(), pos.y() + back.y(), pos.z() + back.z());
+        return stepOutOfSelf(start, back);
+    }
+
+    @Override
+    protected GridPosition getOutputPosition() {
+        Vector3Int f = orientation.toVector();
+        GridPosition start = new GridPosition(pos.x() + f.x(), pos.y() + f.y(), pos.z() + f.z());
+        return stepOutOfSelf(start, f);
+    }
+
+    @Override
+    public boolean insertItem(MatterPayload item, GridPosition fromPos) {
+        if (item == null || fromPos == null) return false;
+        if (item.shape() != MatterShape.CUBE) return false;
+
+        // ✅ 1 SOLO input port (fuori footprint)
+        return fromPos.equals(getInputPortPosition()) && insertIntoBuffer(0, item);
+    }
+
+    @Override
+    public void tick(long currentTick) {
+        super.tryEjectItem(currentTick);
+
+        if (currentRecipe != null) {
+            if (currentTick >= finishTick) completeProcessing();
+            return;
+        }
+
+        if (outputBuffer.getCount() >= MAX_OUTPUT_STACK) return;
+        if (inputBuffer.getCountInSlot(0) <= 0) return;
+
+        MatterPayload in = inputBuffer.getItemInSlot(0);
+        if (in == null || in.shape() != MatterShape.CUBE) return;
+
+        inputBuffer.decreaseSlot(0, 1);
+
+        MatterPayload out = new MatterPayload(MatterShape.SPHERE, in.color(), in.effects());
+        this.currentRecipe = new Recipe("smoothing_cube_to_sphere", List.of(in), out, 2.0f, 0);
+        this.finishTick = currentTick + PROCESS_TICKS;
+
+        saveState();
+    }
+}

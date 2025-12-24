@@ -2,7 +2,12 @@ package com.matterworks.core.domain.factory;
 
 import com.google.gson.JsonObject;
 import com.matterworks.core.common.GridPosition;
-import com.matterworks.core.domain.machines.*;
+import com.matterworks.core.domain.machines.base.PlacedMachine;
+import com.matterworks.core.domain.machines.logistics.*;
+import com.matterworks.core.domain.machines.processing.*;
+import com.matterworks.core.domain.machines.production.DrillMachine;
+import com.matterworks.core.domain.machines.production.NexusMachine;
+import com.matterworks.core.domain.machines.structure.StructuralBlock;
 import com.matterworks.core.model.PlotObject;
 
 import java.util.UUID;

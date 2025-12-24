@@ -1,7 +1,7 @@
 package com.matterworks.core.synchronization;
 
 import com.matterworks.core.common.GridPosition;
-import com.matterworks.core.domain.machines.PlacedMachine;
+import com.matterworks.core.domain.machines.base.PlacedMachine;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.managers.GridManager;
 import com.matterworks.core.ports.IRepository;

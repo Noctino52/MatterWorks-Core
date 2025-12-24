@@ -2,7 +2,7 @@ package com.matterworks.core.database.dao;
 
 import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.database.DatabaseManager;
-import com.matterworks.core.domain.machines.MachineStats;
+import com.matterworks.core.domain.machines.registry.MachineStats;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;

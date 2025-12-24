@@ -3,7 +3,7 @@ package com.matterworks.core.managers;
 import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.database.DatabaseManager;
-import com.matterworks.core.domain.machines.BlockRegistry;
+import com.matterworks.core.domain.machines.registry.BlockRegistry;
 import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.model.PlotObject;
 
