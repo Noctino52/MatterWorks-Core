@@ -57,6 +57,10 @@ public class MatterWorksGUI extends JFrame {
     private volatile int lastVoidCoinsShown = Integer.MIN_VALUE;
     private volatile int lastPrestigeShown = Integer.MIN_VALUE;
 
+    // ✅ NEW cache per items/cap
+    private volatile int lastPlotItemsShown = Integer.MIN_VALUE;
+    private volatile int lastPlotCapShown = Integer.MIN_VALUE;
+
     public MatterWorksGUI(GridManager gm,
                           BlockRegistry reg,
                           UUID initialUuid,
@@ -377,12 +381,12 @@ public class MatterWorksGUI extends JFrame {
 
     private void safeOpenSession(UUID uuid) {
         if (uuid == null) return;
-        if (repository instanceof MariaDBAdapter a) a.openPlayerSession(uuid);
+        repository.openPlayerSession(uuid);
     }
 
     private void safeCloseSession(UUID uuid) {
         if (uuid == null) return;
-        if (repository instanceof MariaDBAdapter a) a.closePlayerSession(uuid);
+        repository.closePlayerSession(uuid);
     }
 
     private void shutdownAndExit() {
@@ -452,6 +456,9 @@ public class MatterWorksGUI extends JFrame {
         lastAdminShown = false;
         lastVoidCoinsShown = Integer.MIN_VALUE;
         lastPrestigeShown = Integer.MIN_VALUE;
+
+        lastPlotItemsShown = Integer.MIN_VALUE;
+        lastPlotCapShown = Integer.MIN_VALUE;
     }
 
     private void updateEconomyLabelsForce() {
@@ -467,6 +474,7 @@ public class MatterWorksGUI extends JFrame {
             topBar.getVoidCoinsLabel().setText("VOID: ---");
             topBar.getPrestigeLabel().setText("PRESTIGE: ---");
             statusBar.setPlotId("PLOT ID: ---");
+            statusBar.setPlotItemsUnknown();
             return;
         }
 
@@ -481,13 +489,19 @@ public class MatterWorksGUI extends JFrame {
 
         Long pid = repository.getPlotId(u);
 
+        // ✅ NEW: items/cap dal DB
+        int placed = repository.getPlotItemsPlaced(u);
+        int cap = repository.getDefaultItemPlacedOnPlotCap();
+
         boolean changed =
                 Double.compare(money, lastMoneyShown) != 0 ||
                         (rank != null && !rank.equals(lastRankShown)) ||
                         (pid != null ? !pid.equals(lastPlotIdShown) : lastPlotIdShown != null) ||
                         (isAdmin != lastAdminShown) ||
                         (voidCoins != lastVoidCoinsShown) ||
-                        (prestige != lastPrestigeShown);
+                        (prestige != lastPrestigeShown) ||
+                        (placed != lastPlotItemsShown) ||
+                        (cap != lastPlotCapShown);
 
         if (!changed) return;
 
@@ -497,6 +511,9 @@ public class MatterWorksGUI extends JFrame {
         lastAdminShown = isAdmin;
         lastVoidCoinsShown = voidCoins;
         lastPrestigeShown = prestige;
+
+        lastPlotItemsShown = placed;
+        lastPlotCapShown = cap;
 
         topBar.getMoneyLabel().setText(String.format("MONEY: $%,.2f", money));
         topBar.getRoleLabel().setText("[" + rank + "]");
@@ -509,6 +526,7 @@ public class MatterWorksGUI extends JFrame {
         topBar.getPrestigeLabel().setForeground(new Color(0, 200, 255));
 
         statusBar.setPlotId("PLOT ID: #" + (pid != null ? pid : "ERR"));
+        statusBar.setPlotItems(placed, cap);
     }
 
     private void updateLabels() {

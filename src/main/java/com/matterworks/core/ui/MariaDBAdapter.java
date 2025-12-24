@@ -11,11 +11,9 @@ import com.matterworks.core.model.PlotObject;
 import com.matterworks.core.ports.IRepository;
 
 import java.math.BigDecimal;
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
+import java.sql.*;
 import java.util.*;
+import java.util.concurrent.ExecutorService;
 import java.util.stream.Collectors;
 
 public class MariaDBAdapter implements IRepository {
@@ -46,10 +44,7 @@ public class MariaDBAdapter implements IRepository {
     // ==========================================================
     // CAP PLOT ITEMS (NEW)
     // ==========================================================
-    /**
-     * Legge server_gamestate.default_item_placed_on_plot (id=1).
-     * Fallback: 1000 se colonna/tabella non aggiornata o errore.
-     */
+    @Override
     public int getDefaultItemPlacedOnPlotCap() {
         String sql = "SELECT default_item_placed_on_plot FROM server_gamestate WHERE id = 1";
         try (Connection conn = dbManager.getConnection();
@@ -61,16 +56,12 @@ public class MariaDBAdapter implements IRepository {
                 return Math.max(1, v);
             }
         } catch (SQLException e) {
-            // DB vecchio: colonna non esiste
             if (!isUnknownColumn(e)) e.printStackTrace();
         }
         return 1000;
     }
 
-    /**
-     * Legge plots.item_placed per il plot di ownerId.
-     * Se colonna non esiste: fallback a COUNT(*) su plot_machines.
-     */
+    @Override
     public int getPlotItemsPlaced(UUID ownerId) {
         if (ownerId == null) return 0;
 
@@ -81,7 +72,6 @@ public class MariaDBAdapter implements IRepository {
         String sql = "SELECT item_placed FROM plots WHERE id = ?";
         try (Connection conn = dbManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-
             ps.setLong(1, plotId);
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) return Math.max(0, rs.getInt("item_placed"));
@@ -90,11 +80,10 @@ public class MariaDBAdapter implements IRepository {
             if (!isUnknownColumn(e)) {
                 e.printStackTrace();
             } else {
-                // fallback: DB vecchio -> ricostruisci live dal numero di righe in plot_machines
+                // fallback: COUNT(*) se colonna non c'è (DB vecchio)
                 return countPlotMachines(plotId);
             }
         }
-
         return 0;
     }
 
@@ -126,8 +115,6 @@ public class MariaDBAdapter implements IRepository {
     // ==========================================================
     @Override
     public ServerConfig loadServerConfig() {
-
-        // nuova query con max_inventory_machine
         String sqlNew =
                 "SELECT player_start_money, vein_raw, vein_red, vein_blue, vein_yellow, sos_threshold, max_inventory_machine " +
                         "FROM server_gamestate WHERE id = 1";
@@ -149,7 +136,6 @@ public class MariaDBAdapter implements IRepository {
             }
 
         } catch (SQLException e) {
-            // se DB vecchio: colonna non esiste -> fallback
             if (!isUnknownColumn(e)) e.printStackTrace();
 
             String sqlOld =
@@ -192,8 +178,7 @@ public class MariaDBAdapter implements IRepository {
                 int v = rs.getInt("MinutesToInactive");
                 return Math.max(1, v);
             }
-        } catch (SQLException ignored) {
-        }
+        } catch (SQLException ignored) {}
         return 5;
     }
 
@@ -209,21 +194,18 @@ public class MariaDBAdapter implements IRepository {
         try (Connection conn = dbManager.getConnection()) {
             conn.setAutoCommit(false);
             try {
-                // Chiudi eventuale sessione rimasta aperta
                 try (PreparedStatement ps = conn.prepareStatement(
                         "UPDATE player_session SET logout_at = NOW() WHERE player_uuid = ? AND logout_at IS NULL")) {
                     ps.setBytes(1, uuidBytes);
                     ps.executeUpdate();
                 }
 
-                // Inserisci nuova sessione
                 try (PreparedStatement ps = conn.prepareStatement(
                         "INSERT INTO player_session (player_uuid, login_at, logout_at) VALUES (?, NOW(), NULL)")) {
                     ps.setBytes(1, uuidBytes);
                     ps.executeUpdate();
                 }
 
-                // Best-effort: players.last_login (se esiste)
                 safeExecuteIgnoreUnknownColumn(conn,
                         "UPDATE players SET last_login = NOW() WHERE uuid = ?",
                         uuidBytes
@@ -250,10 +232,8 @@ public class MariaDBAdapter implements IRepository {
         try (Connection conn = dbManager.getConnection()) {
             conn.setAutoCommit(false);
             try {
-                // Prova a scrivere anche session_seconds se la colonna esiste
                 boolean updated = safeUpdateSessionWithSeconds(conn, uuidBytes);
                 if (!updated) {
-                    // Fallback senza session_seconds
                     try (PreparedStatement ps = conn.prepareStatement(
                             "UPDATE player_session " +
                                     "SET logout_at = NOW() " +
@@ -287,9 +267,7 @@ public class MariaDBAdapter implements IRepository {
             ps.executeUpdate();
             return true;
         } catch (SQLException e) {
-            // colonna session_seconds non esiste -> ignora
             if (isUnknownColumn(e)) return false;
-            // altri errori
             throw new RuntimeException(e);
         }
     }
@@ -299,14 +277,11 @@ public class MariaDBAdapter implements IRepository {
             ps.setBytes(1, uuidBytes);
             ps.executeUpdate();
         } catch (SQLException e) {
-            if (!isUnknownColumn(e)) {
-                e.printStackTrace();
-            }
+            if (!isUnknownColumn(e)) e.printStackTrace();
         }
     }
 
     private boolean isUnknownColumn(SQLException e) {
-        // MariaDB: SQLState 42S22 = column not found
         String state = e.getSQLState();
         return "42S22".equals(state) || (e.getMessage() != null && e.getMessage().contains("Unknown column"));
     }
@@ -322,36 +297,55 @@ public class MariaDBAdapter implements IRepository {
     public void deletePlayerFull(UUID uuid) {
         if (uuid == null) return;
         Long plotId = plotDAO.findPlotIdByOwner(uuid);
+
         try (Connection conn = dbManager.getConnection()) {
             conn.setAutoCommit(false);
             try {
                 if (plotId != null) {
                     try (PreparedStatement ps = conn.prepareStatement("DELETE FROM plot_machines WHERE plot_id = ?")) { ps.setLong(1, plotId); ps.executeUpdate(); }
                     try (PreparedStatement ps = conn.prepareStatement("DELETE FROM plot_resources WHERE plot_id = ?")) { ps.setLong(1, plotId); ps.executeUpdate(); }
+
+                    // best-effort reset contatore
+                    try (PreparedStatement ps = conn.prepareStatement("UPDATE plots SET item_placed = 0 WHERE id = ?")) {
+                        ps.setLong(1, plotId);
+                        ps.executeUpdate();
+                    } catch (SQLException e) {
+                        if (!isUnknownColumn(e)) throw e;
+                    }
+
                     try (PreparedStatement ps = conn.prepareStatement("DELETE FROM plots WHERE id = ?")) { ps.setLong(1, plotId); ps.executeUpdate(); }
                 }
+
                 byte[] uuidBytes = UuidUtils.asBytes(uuid);
                 try (PreparedStatement ps = conn.prepareStatement("DELETE FROM player_inventory WHERE player_uuid = ?")) { ps.setBytes(1, uuidBytes); ps.executeUpdate(); }
                 try (PreparedStatement ps = conn.prepareStatement("DELETE FROM verification_codes WHERE player_uuid = ?")) { ps.setBytes(1, uuidBytes); ps.executeUpdate(); }
                 try (PreparedStatement ps = conn.prepareStatement("DELETE FROM transactions WHERE player_uuid = ?")) { ps.setBytes(1, uuidBytes); ps.executeUpdate(); }
                 try (PreparedStatement ps = conn.prepareStatement("DELETE FROM player_session WHERE player_uuid = ?")) { ps.setBytes(1, uuidBytes); ps.executeUpdate(); }
                 try (PreparedStatement ps = conn.prepareStatement("DELETE FROM players WHERE uuid = ?")) { ps.setBytes(1, uuidBytes); ps.executeUpdate(); }
+
                 conn.commit();
             } catch (SQLException ex) {
                 conn.rollback();
                 ex.printStackTrace();
-            } finally { conn.setAutoCommit(true); }
-        } catch (SQLException e) { e.printStackTrace(); }
+            } finally {
+                conn.setAutoCommit(true);
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
     }
 
     @Override public int getInventoryItemCount(UUID ownerId, String itemId) { return inventoryDAO.getItemCount(ownerId, itemId); }
     @Override public void modifyInventoryItem(UUID ownerId, String itemId, int delta) { inventoryDAO.modifyItemCount(ownerId, itemId, delta); }
+
     @Override public List<PlotObject> loadPlotMachines(UUID ownerId) { return plotDAO.loadMachines(ownerId); }
 
     @Override
     public Long createMachine(UUID ownerId, PlacedMachine machine) {
         String jsonMeta = machine.serialize().toString();
-        return plotDAO.insertMachine(ownerId, machine.getTypeId(), machine.getPos().x(), machine.getPos().y(), machine.getPos().z(), jsonMeta);
+        return plotDAO.insertMachine(ownerId, machine.getTypeId(),
+                machine.getPos().x(), machine.getPos().y(), machine.getPos().z(),
+                jsonMeta);
     }
 
     @Override public void deleteMachine(Long dbId) { plotDAO.removeMachine(dbId); }
@@ -391,56 +385,26 @@ public class MariaDBAdapter implements IRepository {
         if (ownerId == null) return;
 
         Long plotId = plotDAO.findPlotIdByOwner(ownerId);
+        if (plotId == null) return;
 
         try (Connection conn = dbManager.getConnection()) {
             conn.setAutoCommit(false);
             try {
-                if (plotId != null) {
-                    try (PreparedStatement stmt = conn.prepareStatement(
-                            "DELETE FROM plot_machines WHERE plot_id = ?")) {
-                        stmt.setLong(1, plotId);
-                        stmt.executeUpdate();
-                    }
-                    try (PreparedStatement stmt = conn.prepareStatement(
-                            "DELETE FROM plot_resources WHERE plot_id = ?")) {
-                        stmt.setLong(1, plotId);
-                        stmt.executeUpdate();
-                    }
+                try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM plot_machines WHERE plot_id = ?")) {
+                    stmt.setLong(1, plotId);
+                    stmt.executeUpdate();
+                }
+                try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM plot_resources WHERE plot_id = ?")) {
+                    stmt.setLong(1, plotId);
+                    stmt.executeUpdate();
+                }
 
-                    // ✅ RESET HARD del contatore
-                    try (PreparedStatement stmt = conn.prepareStatement(
-                            "UPDATE plots SET item_placed = 0 WHERE id = ?")) {
-                        stmt.setLong(1, plotId);
-                        stmt.executeUpdate();
-                    } catch (SQLException e) {
-                        if (!isUnknownColumn(e)) throw e;
-                    }
-                } else {
-                    // fallback: se per qualche motivo non trovi plotId, prova comunque per owner_id
-                    try (PreparedStatement stmt = conn.prepareStatement(
-                            "UPDATE plots SET item_placed = 0 WHERE owner_id = ?")) {
-                        stmt.setBytes(1, UuidUtils.asBytes(ownerId));
-                        stmt.executeUpdate();
-                    } catch (SQLException e) {
-                        if (!isUnknownColumn(e)) throw e;
-                    }
-
-                    // (best effort) prova a pulire anche le righe usando subquery
-                    try (PreparedStatement stmt = conn.prepareStatement(
-                            "DELETE pm FROM plot_machines pm " +
-                                    "JOIN plots p ON pm.plot_id = p.id " +
-                                    "WHERE p.owner_id = ?")) {
-                        stmt.setBytes(1, UuidUtils.asBytes(ownerId));
-                        stmt.executeUpdate();
-                    } catch (SQLException ignored) {}
-
-                    try (PreparedStatement stmt = conn.prepareStatement(
-                            "DELETE pr FROM plot_resources pr " +
-                                    "JOIN plots p ON pr.plot_id = p.id " +
-                                    "WHERE p.owner_id = ?")) {
-                        stmt.setBytes(1, UuidUtils.asBytes(ownerId));
-                        stmt.executeUpdate();
-                    } catch (SQLException ignored) {}
+                // ✅ RESET HARD item_placed
+                try (PreparedStatement stmt = conn.prepareStatement("UPDATE plots SET item_placed = 0 WHERE id = ?")) {
+                    stmt.setLong(1, plotId);
+                    stmt.executeUpdate();
+                } catch (SQLException e) {
+                    if (!isUnknownColumn(e)) throw e;
                 }
 
                 conn.commit();
@@ -455,8 +419,8 @@ public class MariaDBAdapter implements IRepository {
         }
     }
 
-
     @Override public Long getPlotId(UUID ownerId) { return plotDAO.findPlotIdByOwner(ownerId); }
+
     @Override public void saveResource(Long plotId, int x, int z, MatterColor type) { resourceDAO.addResource(plotId, x, z, type); }
     @Override public Map<GridPosition, MatterColor> loadResources(Long plotId) { return resourceDAO.loadResources(plotId); }
 
