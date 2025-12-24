@@ -2,13 +2,14 @@ package com.matterworks.core.ui.swing.factory;
 
 import com.google.gson.JsonObject;
 import com.matterworks.core.common.GridPosition;
+import com.matterworks.core.domain.machines.base.PlacedMachine;
 import com.matterworks.core.domain.machines.inspection.MachineInspectionInfo;
 import com.matterworks.core.domain.machines.inspection.MachineInspector;
-import com.matterworks.core.domain.machines.base.PlacedMachine;
 import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.managers.GridManager;
 
 import javax.swing.*;
+import java.awt.*;
 import java.awt.event.*;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
@@ -81,18 +82,6 @@ final class FactoryPanelController {
         return snapshot;
     }
 
-
-    GridManager.PlotAreaInfo getPlotAreaInfo() {
-        UUID u = state.playerUuid;
-        if (u == null) return null;
-        try {
-            return gridManager.getPlotAreaInfo(u);
-        } catch (Throwable t) {
-            return null;
-        }
-    }
-
-
     JsonObject getMetaCached(PlacedMachine m) {
         if (m == null) return null;
 
@@ -111,6 +100,16 @@ final class FactoryPanelController {
             return meta;
         }
     }
+    GridManager.PlotAreaInfo getPlotAreaInfo() {
+        UUID u = state.playerUuid;
+        if (u == null) return null;
+        try {
+            return gridManager.getPlotAreaInfo(u);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
 
     void forceRefreshNow() {
         if (disposed) return;
@@ -121,12 +120,6 @@ final class FactoryPanelController {
         refreshOnce(true);
     }
 
-    /**
-     * âœ… Tooltip HTML per infobox hover.
-     * - Usa MachineInspector.inspect(m)
-     * - Rispetta showInUi (quindi niente belt/splitter/merger/lift/dropper/nexus)
-     * - Formato: Nome, conteggio Matter/Colori, Stato, Input, Output (target)
-     */
     String getInspectionTooltipHtml(int mouseX, int mouseY) {
         if (disposed) return null;
 
@@ -147,7 +140,6 @@ final class FactoryPanelController {
         }
 
         if (info == null || !info.showInUi()) return null;
-
         return buildTooltipHtml(info);
     }
 
@@ -155,9 +147,8 @@ final class FactoryPanelController {
         String name = safe(info.machineName());
         int matter = info.totalMatterCount();
         int colors = info.totalColorCount();
-        String state = (info.state() != null) ? info.state().name() : "FERMA";
+        String st = (info.state() != null) ? info.state().name() : "FERMA";
 
-        // Output: preferisci "target output" (che output sta cercando di generare)
         var outLines = (info.targetOutputLines() != null && !info.targetOutputLines().isEmpty())
                 ? info.targetOutputLines()
                 : info.outputLines();
@@ -166,7 +157,7 @@ final class FactoryPanelController {
         sb.append("<html>");
         sb.append("<b>").append(esc(name)).append("</b><br/>");
         sb.append("Matter: ").append(matter).append(" | Colori: ").append(colors).append("<br/>");
-        sb.append("Stato: ").append(esc(state)).append("<br/>");
+        sb.append("Stato: ").append(esc(st)).append("<br/>");
 
         sb.append("<br/><u>Input</u><br/>");
         appendLines(sb, info.inputLines());
@@ -183,9 +174,7 @@ final class FactoryPanelController {
             sb.append("-<br/>");
             return;
         }
-        for (String s : lines) {
-            sb.append(esc(s)).append("<br/>");
-        }
+        for (String s : lines) sb.append(esc(s)).append("<br/>");
     }
 
     private static String safe(String s) {
@@ -194,31 +183,67 @@ final class FactoryPanelController {
 
     private static String esc(String s) {
         if (s == null) return "";
-        // HTML escape minimale
-        return s.replace("&", "&amp;")
-                .replace("<", "&lt;")
-                .replace(">", "&gt;");
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
     }
 
     private void hookInputListeners() {
+
         panel.addMouseMotionListener(new MouseMotionAdapter() {
+
             @Override public void mouseMoved(MouseEvent e) {
+                if (disposed) return;
+                // se stai panning, ignora hover
+                if (state.isPanning()) return;
+
                 boolean changed = updateHoverFromMouse(e.getX(), e.getY());
                 if (changed) repaintCoalesced();
-                // tooltip dinamico: Swing richiama getToolTipText su mouse move,
-                // non serve altro qui.
+            }
+
+            @Override public void mouseDragged(MouseEvent e) {
+                if (disposed) return;
+
+                // ✅ PAN: trascina con rotella premuta
+                if (state.isPanning()) {
+                    state.updatePan(e.getX(), e.getY());
+                    repaintCoalesced();
+                    return;
+                }
             }
         });
 
         panel.addMouseListener(new MouseAdapter() {
+
             @Override public void mousePressed(MouseEvent e) {
+                if (disposed) return;
+
+                // ✅ middle mouse pressed -> start pan
+                if (SwingUtilities.isMiddleMouseButton(e)) {
+                    state.beginPan(e.getX(), e.getY());
+                    panel.setCursor(Cursor.getPredefinedCursor(Cursor.MOVE_CURSOR));
+                    return;
+                }
+
                 handleMousePress(e);
+            }
+
+            @Override public void mouseReleased(MouseEvent e) {
+                if (disposed) return;
+
+                if (SwingUtilities.isMiddleMouseButton(e)) {
+                    state.endPan();
+                    panel.setCursor(Cursor.getDefaultCursor());
+
+                    // refresh hover after pan ends
+                    boolean changed = updateHoverFromMouse(e.getX(), e.getY());
+                    if (changed) repaintCoalesced();
+                }
             }
         });
 
-        // âœ… Zoom con rotellina
+        // Zoom con rotellina (scroll)
         panel.addMouseWheelListener(e -> {
             if (disposed) return;
+            // Se stai premendo la rotella e “scrolli”, lo zoom va comunque bene
             state.applyWheelZoom(e.getWheelRotation());
             repaintCoalesced();
         });
@@ -227,6 +252,11 @@ final class FactoryPanelController {
             @Override public void keyPressed(KeyEvent e) {
                 if (e.getKeyCode() == KeyEvent.VK_R) {
                     state.rotate();
+                    repaintCoalesced();
+                }
+                // opzionale: HOME per resettare camera
+                if (e.getKeyCode() == KeyEvent.VK_HOME) {
+                    state.resetCamera();
                     repaintCoalesced();
                 }
             }
@@ -277,7 +307,6 @@ final class FactoryPanelController {
         GridPosition target = gridPosFromMouse(e.getX(), e.getY());
         if (target == null) return;
 
-        // feedback immediato
         state.mouseHoverPos = target;
         state.lastHoverGX = target.x();
         state.lastHoverGZ = target.z();
