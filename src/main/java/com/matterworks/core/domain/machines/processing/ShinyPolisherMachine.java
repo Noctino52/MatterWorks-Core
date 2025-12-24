@@ -6,13 +6,13 @@ import com.matterworks.core.domain.matter.MatterEffect;
 
 import java.util.UUID;
 
-/**
- * Applica l'effetto SHINY.
- * ID consigliato: "shiny_polisher"
- */
 public class ShinyPolisherMachine extends EffectApplicatorMachine {
 
     public ShinyPolisherMachine(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata) {
-        super(dbId, ownerId, pos, typeId, metadata, MatterEffect.SHINY);
+        this(dbId, ownerId, pos, typeId, metadata, 64);
+    }
+
+    public ShinyPolisherMachine(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata, int maxStackPerSlot) {
+        super(dbId, ownerId, pos, typeId, metadata, MatterEffect.SHINY, maxStackPerSlot);
     }
 }

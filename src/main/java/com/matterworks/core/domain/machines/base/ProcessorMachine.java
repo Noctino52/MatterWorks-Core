@@ -14,16 +14,30 @@ public abstract class ProcessorMachine extends PlacedMachine {
 
     public final MachineInventory inputBuffer;
     public final MachineInventory outputBuffer;
+
     public Recipe currentRecipe;
     protected long finishTick = -1;
 
+    /** default legacy */
     protected static final int MAX_INPUT_STACK = 64;
+    /** default legacy */
     public static final int MAX_OUTPUT_STACK = 64;
 
+    protected final int maxStackPerSlot;
+
+    /** Legacy constructor (default 64). */
     public ProcessorMachine(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata) {
+        this(dbId, ownerId, pos, typeId, metadata, 64);
+    }
+
+    /** New constructor with configurable max stack per slot. */
+    public ProcessorMachine(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata, int maxStackPerSlot) {
         super(dbId, ownerId, typeId, pos, metadata);
-        this.inputBuffer = new MachineInventory(2);
-        this.outputBuffer = new MachineInventory(1);
+
+        this.maxStackPerSlot = Math.max(1, maxStackPerSlot);
+
+        this.inputBuffer = new MachineInventory(2, this.maxStackPerSlot);
+        this.outputBuffer = new MachineInventory(1, this.maxStackPerSlot);
 
         if (this.metadata.has("input")) this.inputBuffer.loadState(this.metadata.getAsJsonObject("input"));
         if (this.metadata.has("output")) this.outputBuffer.loadState(this.metadata.getAsJsonObject("output"));
@@ -33,7 +47,10 @@ public abstract class ProcessorMachine extends PlacedMachine {
     public abstract boolean insertItem(MatterPayload item, GridPosition fromPos);
 
     protected boolean insertIntoBuffer(int slotIndex, MatterPayload item) {
-        if (inputBuffer.getCountInSlot(slotIndex) >= MAX_INPUT_STACK) return false;
+        if (item == null) return false;
+
+        if (inputBuffer.getCountInSlot(slotIndex) >= inputBuffer.getMaxStackSize()) return false;
+
         if (inputBuffer.insertIntoSlot(slotIndex, item)) {
             saveState();
             return true;
@@ -55,7 +72,6 @@ public abstract class ProcessorMachine extends PlacedMachine {
         GridPosition targetPos = getOutputPosition();
         PlacedMachine neighbor = getNeighborAt(targetPos);
 
-        // debug utile
         metadata.addProperty("ejectTarget", String.valueOf(targetPos));
         metadata.addProperty("ejectNeighbor", neighbor == null ? "null" : neighbor.getClass().getSimpleName() + "/" + neighbor.getTypeId());
 
@@ -74,7 +90,6 @@ public abstract class ProcessorMachine extends PlacedMachine {
         } else if (neighbor instanceof NexusMachine nexus) {
             MatterPayload item = outputBuffer.extractFirst();
             if (item != null) {
-                // ✅ FIX: fromPos deve essere la posizione del SENDER (macchina), non targetPos
                 if (nexus.insertItem(item, this.pos)) {
                     metadata.addProperty("ejectResult", "OK->NEXUS");
                     saveState();
@@ -94,5 +109,9 @@ public abstract class ProcessorMachine extends PlacedMachine {
         this.metadata.add("input", inputBuffer.serialize());
         this.metadata.add("output", outputBuffer.serialize());
         markDirty();
+    }
+
+    public int getMaxStackPerSlot() {
+        return maxStackPerSlot;
     }
 }

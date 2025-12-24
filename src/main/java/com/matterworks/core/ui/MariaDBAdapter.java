@@ -50,10 +50,16 @@ public class MariaDBAdapter implements IRepository {
 
     @Override
     public ServerConfig loadServerConfig() {
-        String sql = "SELECT player_start_money, vein_raw, vein_red, vein_blue, vein_yellow, sos_threshold FROM server_gamestate WHERE id = 1";
+
+        // nuova query con max_inventory_machine
+        String sqlNew =
+                "SELECT player_start_money, vein_raw, vein_red, vein_blue, vein_yellow, sos_threshold, max_inventory_machine " +
+                        "FROM server_gamestate WHERE id = 1";
+
         try (Connection conn = dbManager.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql);
+             PreparedStatement ps = conn.prepareStatement(sqlNew);
              ResultSet rs = ps.executeQuery()) {
+
             if (rs.next()) {
                 return new ServerConfig(
                         rs.getDouble("player_start_money"),
@@ -61,14 +67,43 @@ public class MariaDBAdapter implements IRepository {
                         rs.getInt("vein_red"),
                         rs.getInt("vein_blue"),
                         rs.getInt("vein_yellow"),
-                        rs.getDouble("sos_threshold")
+                        rs.getDouble("sos_threshold"),
+                        Math.max(1, rs.getInt("max_inventory_machine"))
                 );
             }
+
         } catch (SQLException e) {
-            e.printStackTrace();
+            // se DB vecchio: colonna non esiste -> fallback
+            if (!isUnknownColumn(e)) e.printStackTrace();
+
+            String sqlOld =
+                    "SELECT player_start_money, vein_raw, vein_red, vein_blue, vein_yellow, sos_threshold " +
+                            "FROM server_gamestate WHERE id = 1";
+
+            try (Connection conn2 = dbManager.getConnection();
+                 PreparedStatement ps2 = conn2.prepareStatement(sqlOld);
+                 ResultSet rs2 = ps2.executeQuery()) {
+
+                if (rs2.next()) {
+                    return new ServerConfig(
+                            rs2.getDouble("player_start_money"),
+                            rs2.getInt("vein_raw"),
+                            rs2.getInt("vein_red"),
+                            rs2.getInt("vein_blue"),
+                            rs2.getInt("vein_yellow"),
+                            rs2.getDouble("sos_threshold"),
+                            64
+                    );
+                }
+
+            } catch (SQLException ex) {
+                ex.printStackTrace();
+            }
         }
-        return new ServerConfig(1000.0, 3, 1, 1, 0, 500.0);
+
+        return new ServerConfig(1000.0, 3, 1, 1, 0, 500.0, 64);
     }
+
 
     // ==========================================================
     // MinutesToInactive (server_gamestate)

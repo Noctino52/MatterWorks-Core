@@ -17,7 +17,11 @@ public class CuttingMachine extends ProcessorMachine {
     private static final long PROCESS_TICKS = 40;
 
     public CuttingMachine(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata) {
-        super(dbId, ownerId, pos, typeId, metadata);
+        this(dbId, ownerId, pos, typeId, metadata, 64);
+    }
+
+    public CuttingMachine(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata, int maxStackPerSlot) {
+        super(dbId, ownerId, pos, typeId, metadata, maxStackPerSlot);
         this.dimensions = new Vector3Int(2, 1, 1);
     }
 
@@ -62,7 +66,7 @@ public class CuttingMachine extends ProcessorMachine {
             return;
         }
 
-        if (outputBuffer.getCount() >= MAX_OUTPUT_STACK) return;
+        if (outputBuffer.getCount() >= outputBuffer.getMaxStackSize()) return;
         if (inputBuffer.getCountInSlot(0) <= 0) return;
 
         MatterPayload in = inputBuffer.getItemInSlot(0);

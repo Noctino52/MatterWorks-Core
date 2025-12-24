@@ -6,41 +6,33 @@ import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.domain.machines.base.ProcessorMachine;
 import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.matter.MatterPayload;
+import com.matterworks.core.domain.matter.MatterShape;
 
 import java.util.UUID;
 
-/**
- * Mixer:
- * - Accetta SOLO "colori" (MatterPayload con shape == null) e color != RAW
- * - Mescola due colori diversi e produce un "colore" (shape == null)
- */
 public class ColorMixer extends ProcessorMachine {
 
     public ColorMixer(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata) {
-        super(dbId, ownerId, pos, typeId, metadata);
+        this(dbId, ownerId, pos, typeId, metadata, 64);
+    }
+
+    public ColorMixer(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata, int maxStackPerSlot) {
+        super(dbId, ownerId, pos, typeId, metadata, maxStackPerSlot);
         this.dimensions = new Vector3Int(2, 1, 1);
-        // garantisce i 2 slot
-        if (inputBuffer.getItemInSlot(0) == null) inputBuffer.insertIntoSlot(0, null);
-        if (inputBuffer.getItemInSlot(1) == null) inputBuffer.insertIntoSlot(1, null);
     }
 
     @Override
     public boolean insertItem(MatterPayload item, GridPosition fromPos) {
         if (fromPos == null || item == null) return false;
 
-        // RAW non entra nel mixer
         if (item.color() == MatterColor.RAW) return false;
 
         int targetSlot = getSlotForPosition(fromPos);
         if (targetSlot == -1) return false;
 
-        if (inputBuffer.getCountInSlot(targetSlot) >= MAX_INPUT_STACK) return false;
-
-        // ✅ Normalizza: qualunque cosa arrivi (anche con shape), la trattiamo come "solo colore"
-        MatterPayload dye = new MatterPayload(null, item.color());
-        return insertIntoBuffer(targetSlot, dye);
+        if (inputBuffer.getCountInSlot(targetSlot) >= inputBuffer.getMaxStackSize()) return false;
+        return insertIntoBuffer(targetSlot, item);
     }
-
 
     @Override
     protected GridPosition getOutputPosition() {
@@ -48,7 +40,6 @@ public class ColorMixer extends ProcessorMachine {
         int y = pos.y();
         int z = pos.z();
 
-        // Restituisce il vicino del "Blocco Sinistro" rispetto alla faccia anteriore
         return switch (orientation) {
             case NORTH -> new GridPosition(x, y, z - 1);
             case SOUTH -> new GridPosition(x + 1, y, z + 1);
@@ -79,67 +70,43 @@ public class ColorMixer extends ProcessorMachine {
 
     @Override
     public void tick(long currentTick) {
-        // 1) tenta espulsione output
         super.tryEjectItem(currentTick);
 
-        // 2) se c'è una lavorazione in corso, controlla fine
         if (currentRecipe != null) {
-            if (currentTick >= finishTick) {
-                completeProcessing();
-            }
+            if (currentTick >= finishTick) completeProcessing();
             return;
         }
 
-        // 3) se output pieno, non iniziare nuove lavorazioni
-        if (outputBuffer.getCount() >= MAX_OUTPUT_STACK) return;
+        if (outputBuffer.getCount() >= outputBuffer.getMaxStackSize()) return;
 
-        // 4) servono 2 input (slot 0 e 1)
-        if (inputBuffer.getCountInSlot(0) <= 0 || inputBuffer.getCountInSlot(1) <= 0) return;
+        int count0 = inputBuffer.getCountInSlot(0);
+        int count1 = inputBuffer.getCountInSlot(1);
 
-        MatterPayload in0 = inputBuffer.getItemInSlot(0);
-        MatterPayload in1 = inputBuffer.getItemInSlot(1);
-        if (in0 == null || in1 == null) return;
+        if (count0 > 0 && count1 > 0) {
+            MatterPayload c1 = inputBuffer.getItemInSlot(0);
+            MatterPayload c2 = inputBuffer.getItemInSlot(1);
+            if (c1 == null || c2 == null) return;
 
-        // ✅ Il mixer usa SOLO il colore: ignora totalmente la shape (così accetta anche colori secondari "incapsulati")
-        MatterColor c0 = in0.color();
-        MatterColor c1 = in1.color();
+            if (c1.color() == c2.color()) return;
 
-        // RAW non è un dye valido
-        if (c0 == null || c1 == null) return;
-        if (c0 == MatterColor.RAW || c1 == MatterColor.RAW) return;
+            inputBuffer.decreaseSlot(0, 1);
+            inputBuffer.decreaseSlot(1, 1);
 
-        // stesso colore: non fare nulla (evita consumo inutile)
-        if (c0 == c1) return;
+            MatterColor mixed = MatterColor.mix(c1.color(), c2.color());
+            if (mixed == MatterColor.RAW) mixed = MatterColor.WHITE;
 
-        // 5) consuma input
-        inputBuffer.decreaseSlot(0, 1);
-        inputBuffer.decreaseSlot(1, 1);
+            MatterPayload result = new MatterPayload(MatterShape.SPHERE, mixed);
 
-        // 6) calcola mix (qui dentro deve restare la tua logica: primari+secondari -> anche WHITE)
-        MatterColor mixed = MatterColor.mix(c0, c1);
+            this.currentRecipe = new com.matterworks.core.domain.matter.Recipe(
+                    "mix_" + mixed.name(),
+                    java.util.List.of(c1, c2),
+                    result,
+                    1.5f,
+                    0
+            );
 
-        // safety: non deve uscire RAW
-        if (mixed == MatterColor.RAW) mixed = MatterColor.WHITE;
-
-        // ✅ output: SOLO COLORE (shape == null)
-        MatterPayload result = new MatterPayload(null, mixed);
-
-        // (opzionale ma consigliato) normalizza anche gli input della recipe a "solo colore"
-        MatterPayload norm0 = new MatterPayload(null, c0);
-        MatterPayload norm1 = new MatterPayload(null, c1);
-
-        this.currentRecipe = new com.matterworks.core.domain.matter.Recipe(
-                "mix_" + mixed.name(),
-                java.util.List.of(norm0, norm1),
-                result,
-                1.5f,
-                0
-        );
-
-        this.finishTick = currentTick + 30; // 1.5 sec (se 20 tick/s)
-        saveState();
-
-        System.out.println("Mixer: Mixing " + c0 + " + " + c1 + " -> " + mixed);
+            this.finishTick = currentTick + 30;
+            saveState();
+        }
     }
-
 }

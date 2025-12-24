@@ -190,7 +190,7 @@ public final class MachineInspector {
         if (pm == null) return null;
 
         // se output "pieno" secondo la regola già usata nei tick, non pianifica
-        if (pm.outputBuffer.getCount() >= ProcessorMachine.MAX_OUTPUT_STACK) return null;
+        if (pm.outputBuffer.getCount() >= pm.outputBuffer.getMaxStackSize()) return null;
 
         // Shaper: CUBE -> SPHERE (mantiene color + effects)
         if (pm instanceof ShaperMachine) {

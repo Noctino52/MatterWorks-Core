@@ -17,13 +17,16 @@ public class ShaperMachine extends ProcessorMachine {
     private static final long PROCESS_TICKS = 40;
 
     public ShaperMachine(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata) {
-        super(dbId, ownerId, pos, typeId, metadata);
+        this(dbId, ownerId, pos, typeId, metadata, 64);
+    }
+
+    public ShaperMachine(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata, int maxStackPerSlot) {
+        super(dbId, ownerId, pos, typeId, metadata, maxStackPerSlot);
         this.dimensions = new Vector3Int(2, 1, 1);
     }
 
     private GridPosition stepOutOfSelf(GridPosition start, Vector3Int step) {
         GridPosition p = start;
-        // basta poco: 2x1 -> al massimo 2 step, metto guard 3 per sicurezza
         for (int i = 0; i < 3; i++) {
             PlacedMachine n = getNeighborAt(p);
             if (n == null || n != this) return p;
@@ -50,8 +53,6 @@ public class ShaperMachine extends ProcessorMachine {
     public boolean insertItem(MatterPayload item, GridPosition fromPos) {
         if (item == null || fromPos == null) return false;
         if (item.shape() != MatterShape.CUBE) return false;
-
-        // ✅ 1 SOLO input port (fuori footprint)
         return fromPos.equals(getInputPortPosition()) && insertIntoBuffer(0, item);
     }
 
@@ -64,7 +65,7 @@ public class ShaperMachine extends ProcessorMachine {
             return;
         }
 
-        if (outputBuffer.getCount() >= MAX_OUTPUT_STACK) return;
+        if (outputBuffer.getCount() >= outputBuffer.getMaxStackSize()) return;
         if (inputBuffer.getCountInSlot(0) <= 0) return;
 
         MatterPayload in = inputBuffer.getItemInSlot(0);

@@ -2,6 +2,7 @@ package com.matterworks.core.domain.inventory;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
+import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.matterworks.core.domain.matter.MatterPayload;
 
@@ -12,14 +13,15 @@ import java.util.List;
 /**
  * Inventory per macchine con logica di stacking.
  *
- * NOTE IMPORTANTI:
- * - Mantiene la compatibilità con la serializzazione esistente ("capacity", "items", "count").
- * - Non cambia il comportamento di insert/stacking già in uso.
- * - Aggiunge SOLO metodi read-only (snapshot, conteggi, canInsert, fromSerialized) necessari per inspection/infobox.
+ * Compatibilità:
+ * - Serializzazione: "capacity", "items", "count"
+ * - Metodi read-only per inspection: snapshot(), getMatterCount(), getColorCount(), canInsert(), fromSerialized()
+ *
+ * Nuovo:
+ * - maxStackSize configurabile per slot (default 64).
  */
 public class MachineInventory {
 
-    // Classe interna per rappresentare uno Slot con quantità
     private static class InventorySlot {
         MatterPayload item;
         int count;
@@ -30,19 +32,21 @@ public class MachineInventory {
         }
     }
 
-    /**
-     * Snapshot entry read-only per inspection/UI.
-     */
     public record SnapshotEntry(int slotIndex, MatterPayload item, int count) {}
 
     private final List<InventorySlot> slots;
     private final int slotCount;
-    private final int MAX_STACK_SIZE = 64; // Limite stack per slot
+    private final int maxStackSize;
 
     public MachineInventory(int slotCount) {
+        this(slotCount, 64);
+    }
+
+    public MachineInventory(int slotCount, int maxStackSize) {
         this.slotCount = Math.max(0, slotCount);
+        this.maxStackSize = Math.max(1, maxStackSize);
+
         this.slots = new ArrayList<>(this.slotCount);
-        // Inizializza slot vuoti
         for (int i = 0; i < this.slotCount; i++) {
             slots.add(null);
         }
@@ -57,12 +61,9 @@ public class MachineInventory {
     }
 
     public int getMaxStackSize() {
-        return MAX_STACK_SIZE;
+        return maxStackSize;
     }
 
-    /**
-     * Snapshot degli slot non vuoti con count.
-     */
     public List<SnapshotEntry> snapshot() {
         if (slots.isEmpty()) return Collections.emptyList();
         List<SnapshotEntry> out = new ArrayList<>();
@@ -75,9 +76,7 @@ public class MachineInventory {
         return out;
     }
 
-    /**
-     * Conta totale "Matter" (shape != null).
-     */
+    /** Conta totale "Matter" (shape != null). */
     public int getMatterCount() {
         int total = 0;
         for (InventorySlot s : slots) {
@@ -87,9 +86,7 @@ public class MachineInventory {
         return total;
     }
 
-    /**
-     * Conta totale "Colori/Liquidi" (shape == null).
-     */
+    /** Conta totale "Colori/Liquidi" (shape == null). */
     public int getColorCount() {
         int total = 0;
         for (InventorySlot s : slots) {
@@ -99,32 +96,21 @@ public class MachineInventory {
         return total;
     }
 
-    /**
-     * Verifica se l'inventario ACCETTEREBBE l'item secondo la logica attuale,
-     * ma senza modificare lo stato (read-only).
-     */
     public boolean canInsert(MatterPayload newItem) {
         if (newItem == null) return false;
 
-        // Cerca il primo slot valido (Vuoto o Stesso tipo con spazio)
         for (int i = 0; i < slots.size(); i++) {
             InventorySlot currentSlot = slots.get(i);
 
-            // Slot vuoto -> ok
             if (currentSlot == null) return true;
 
-            // Slot occupato -> stacking se compatibile e c'è spazio
             if (currentSlot.item != null && isSameItem(currentSlot.item, newItem)) {
-                if (currentSlot.count < MAX_STACK_SIZE) return true;
+                if (currentSlot.count < maxStackSize) return true;
             }
         }
         return false;
     }
 
-    /**
-     * Helper comodo: costruisce un MachineInventory da un json serializzato
-     * (richiede "items"; se manca "capacity" usa la size dell'array items).
-     */
     public static MachineInventory fromSerialized(JsonObject json) {
         if (json == null || !json.has("items") || !json.get("items").isJsonArray()) {
             return new MachineInventory(0);
@@ -160,54 +146,41 @@ public class MachineInventory {
         return (slot != null) ? slot.count : 0;
     }
 
-    /**
-     * Tenta di inserire un item in uno slot specifico gestendo lo stacking.
-     */
     public boolean insertIntoSlot(int slotIndex, MatterPayload newItem) {
         if (newItem == null) return false;
 
-        // Assicuriamoci che la lista sia dimensionata
         while (slots.size() <= slotIndex) slots.add(null);
 
         InventorySlot currentSlot = slots.get(slotIndex);
 
-        // CASO 1: Slot vuoto -> Crea nuovo stack
         if (currentSlot == null) {
             slots.set(slotIndex, new InventorySlot(newItem, 1));
             return true;
         }
 
-        // CASO 2: Slot occupato -> Controlla se è lo stesso item e se c'è spazio
         if (currentSlot.item != null && isSameItem(currentSlot.item, newItem)) {
-            if (currentSlot.count < MAX_STACK_SIZE) {
+            if (currentSlot.count < maxStackSize) {
                 currentSlot.count++;
                 return true;
             }
         }
 
-        // CASO 3: Item diverso o Stack pieno -> Rifiuta
         return false;
     }
 
-    /**
-     * Decrementa la quantità in uno slot (Consumo ricetta).
-     */
     public void decreaseSlot(int slotIndex, int amount) {
         if (slotIndex < 0 || slotIndex >= slots.size()) return;
+        if (amount <= 0) return;
 
         InventorySlot slot = slots.get(slotIndex);
         if (slot != null) {
             slot.count -= amount;
-            if (slot.count <= 0) {
-                slots.set(slotIndex, null); // Slot svuotato
-            }
+            if (slot.count <= 0) slots.set(slotIndex, null);
         }
     }
 
-    // --- METODI LEGACY (Per Belt/Drill che non usano slot specifici) ---
-
     public boolean insert(MatterPayload m) {
-        // Cerca il primo slot valido (Vuoto o Stesso tipo con spazio)
+        if (m == null) return false;
         for (int i = 0; i < slots.size(); i++) {
             if (insertIntoSlot(i, m)) return true;
         }
@@ -215,7 +188,6 @@ public class MachineInventory {
     }
 
     public MatterPayload extractFirst() {
-        // Cerca il primo slot non vuoto e decrementa
         for (int i = 0; i < slots.size(); i++) {
             InventorySlot slot = slots.get(i);
             if (slot != null && slot.count > 0) {
@@ -233,20 +205,19 @@ public class MachineInventory {
     }
 
     public int getCount() {
-        // Ritorna la somma totale degli item
         int total = 0;
         for (InventorySlot s : slots) if (s != null) total += s.count;
         return total;
     }
 
-    // --- HELPER ---
-
     private boolean isSameItem(MatterPayload a, MatterPayload b) {
         return a.color() == b.color() && a.shape() == b.shape();
-        // Nota: Ignoriamo effetti per ora per semplicità di stacking (comportamento già esistente)
+        // effetti ignorati come da comportamento attuale
     }
 
-    // --- SERIALIZZAZIONE (Aggiornata con COUNT) ---
+    // ==========================================================
+    // SERIALIZZAZIONE (compat + clamp)
+    // ==========================================================
 
     public JsonObject serialize() {
         JsonObject json = new JsonObject();
@@ -254,12 +225,13 @@ public class MachineInventory {
 
         JsonArray itemsArr = new JsonArray();
         for (InventorySlot slot : slots) {
-            if (slot != null) {
+            if (slot != null && slot.item != null) {
                 JsonObject slotJson = slot.item.serialize();
-                slotJson.addProperty("count", slot.count); // Salviamo quanti ce ne sono
+                int c = Math.max(0, Math.min(slot.count, maxStackSize));
+                slotJson.addProperty("count", c);
                 itemsArr.add(slotJson);
             } else {
-                itemsArr.add((JsonElement) null);
+                itemsArr.add(JsonNull.INSTANCE);
             }
         }
         json.add("items", itemsArr);
@@ -279,7 +251,8 @@ public class MachineInventory {
                 JsonObject obj = el.getAsJsonObject();
                 MatterPayload mp = MatterPayload.fromJson(obj);
                 int count = obj.has("count") ? obj.get("count").getAsInt() : 1;
-                slots.set(i, new InventorySlot(mp, count));
+                count = Math.max(0, Math.min(count, maxStackSize));
+                slots.set(i, (count > 0) ? new InventorySlot(mp, count) : null);
             }
         }
     }

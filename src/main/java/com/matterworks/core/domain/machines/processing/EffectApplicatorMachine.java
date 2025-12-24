@@ -12,14 +12,6 @@ import com.matterworks.core.domain.matter.Recipe;
 import java.util.List;
 import java.util.UUID;
 
-/**
- * Base class per macchine che applicano UN SOLO effetto alla Matter.
- *
- * Regole:
- * - Accetta solo se item.shape() != null
- * - Accetta solo se item.effects() è vuota (nessun effetto già applicato)
- * - Reject senza consumare (stile Chromator) se non valido o da posizione errata.
- */
 public abstract class EffectApplicatorMachine extends ProcessorMachine {
 
     private static final long PROCESS_TICKS = 40;
@@ -32,7 +24,17 @@ public abstract class EffectApplicatorMachine extends ProcessorMachine {
                                    String typeId,
                                    JsonObject metadata,
                                    MatterEffect effectToApply) {
-        super(dbId, ownerId, pos, typeId, metadata);
+        this(dbId, ownerId, pos, typeId, metadata, effectToApply, 64);
+    }
+
+    public EffectApplicatorMachine(Long dbId,
+                                   UUID ownerId,
+                                   GridPosition pos,
+                                   String typeId,
+                                   JsonObject metadata,
+                                   MatterEffect effectToApply,
+                                   int maxStackPerSlot) {
+        super(dbId, ownerId, pos, typeId, metadata, maxStackPerSlot);
         this.effectToApply = effectToApply;
         this.dimensions = new Vector3Int(2, 1, 1);
     }
@@ -69,44 +71,31 @@ public abstract class EffectApplicatorMachine extends ProcessorMachine {
     public boolean insertItem(MatterPayload item, GridPosition fromPos) {
         if (item == null || fromPos == null) return false;
 
-        // ✅ solo se ha una shape (no liquidi)
         if (item.shape() == null) return false;
-
-        // ✅ solo se non ha già un effetto (unico effetto applicabile)
         if (hasAnyEffects(item)) return false;
-
-        // ✅ 1 solo input port (fuori footprint)
         if (!fromPos.equals(getInputPortPosition())) return false;
 
-        // ✅ reject senza consumare: inseriamo solo se valido e c'è spazio
         return insertIntoBuffer(0, item);
     }
 
     @Override
     public void tick(long currentTick) {
-        // 1) tenta espulsione
         super.tryEjectItem(currentTick);
 
-        // 2) completa ricetta se in corso
         if (currentRecipe != null) {
             if (currentTick >= finishTick) completeProcessing();
             return;
         }
 
-        // 3) se output pieno, non partire
-        if (outputBuffer.getCount() >= MAX_OUTPUT_STACK) return;
-
-        // 4) se input vuoto, nulla
+        if (outputBuffer.getCount() >= outputBuffer.getMaxStackSize()) return;
         if (inputBuffer.getCountInSlot(0) <= 0) return;
 
         MatterPayload in = inputBuffer.getItemInSlot(0);
         if (in == null) return;
 
-        // Safety: in teoria non entra mai roba non valida, ma teniamo guard
         if (in.shape() == null) return;
         if (hasAnyEffects(in)) return;
 
-        // Consuma 1 input e avvia processo
         inputBuffer.decreaseSlot(0, 1);
 
         MatterPayload out = new MatterPayload(in.shape(), in.color(), List.of(effectToApply));

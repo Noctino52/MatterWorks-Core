@@ -6,13 +6,13 @@ import com.matterworks.core.domain.matter.MatterEffect;
 
 import java.util.UUID;
 
-/**
- * Applica l'effetto GLITCH.
- * ID consigliato: "glitch_distorter"
- */
 public class GlitchDistorterMachine extends EffectApplicatorMachine {
 
     public GlitchDistorterMachine(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata) {
-        super(dbId, ownerId, pos, typeId, metadata, MatterEffect.GLITCH);
+        this(dbId, ownerId, pos, typeId, metadata, 64);
+    }
+
+    public GlitchDistorterMachine(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata, int maxStackPerSlot) {
+        super(dbId, ownerId, pos, typeId, metadata, MatterEffect.GLITCH, maxStackPerSlot);
     }
 }
