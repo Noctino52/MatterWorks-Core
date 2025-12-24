@@ -1,8 +1,7 @@
 package com.matterworks.core.ui.swing.app;
 
-import com.matterworks.core.ui.MariaDBAdapter;
-import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.domain.machines.registry.BlockRegistry;
+import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.managers.GridManager;
 import com.matterworks.core.ports.IRepository;
 import com.matterworks.core.ui.swing.factory.FactoryPanel;
@@ -57,9 +56,12 @@ public class MatterWorksGUI extends JFrame {
     private volatile int lastVoidCoinsShown = Integer.MIN_VALUE;
     private volatile int lastPrestigeShown = Integer.MIN_VALUE;
 
-    // ✅ NEW cache per items/cap
     private volatile int lastPlotItemsShown = Integer.MIN_VALUE;
     private volatile int lastPlotCapShown = Integer.MIN_VALUE;
+
+    // ✅ NEW: cache plot area string + enabled
+    private volatile String lastPlotAreaShown = null;
+    private volatile boolean lastPlotResizeEnabled = false;
 
     public MatterWorksGUI(GridManager gm,
                           BlockRegistry reg,
@@ -110,7 +112,14 @@ public class MatterWorksGUI extends JFrame {
                 this::handleDeletePlayer
         );
 
+        // ✅ NEW: plot resize (admin only; controlli veri in dominio)
+        statusBar.setPlotResizeActions(
+                () -> handlePlotResize(-1),
+                () -> handlePlotResize(+1)
+        );
+
         refreshPlayerList(true);
+
         topBar.getPlayerSelector().addActionListener(e -> {
             if (suppressPlayerEvents) return;
             if (!glassPane.isVisible() && !isSwitching) handlePlayerSwitch();
@@ -221,6 +230,33 @@ public class MatterWorksGUI extends JFrame {
             factoryPanel.forceRefreshNow();
             updateEconomyLabelsForce();
         }
+    }
+
+    private void handlePlotResize(int dir) {
+        UUID u = currentPlayerUuid;
+        if (u == null) return;
+
+        PlayerProfile p = gridManager.getCachedProfile(u);
+        if (p == null || !p.isAdmin()) return;
+
+        boolean ok;
+        if (dir > 0) {
+            // ✅ questi metodi fanno parte della feature plot unlock (nel GridManager riscritto)
+            ok = gridManager.increasePlotUnlockedArea(u);
+        } else {
+            ok = gridManager.decreasePlotUnlockedArea(u);
+        }
+
+        if (!ok) {
+            String msg = (dir > 0)
+                    ? "Impossibile espandere: già al MAX o non consentito."
+                    : "Impossibile ridurre: ci sono macchine fuori dalla nuova area o sei già allo START.";
+            JOptionPane.showMessageDialog(this, msg, "Plot Resize", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+
+        factoryPanel.forceRefreshNow();
+        updateEconomyLabelsForce();
     }
 
     private void requestEconomyRefresh() {
@@ -459,6 +495,9 @@ public class MatterWorksGUI extends JFrame {
 
         lastPlotItemsShown = Integer.MIN_VALUE;
         lastPlotCapShown = Integer.MIN_VALUE;
+
+        lastPlotAreaShown = null;
+        lastPlotResizeEnabled = false;
     }
 
     private void updateEconomyLabelsForce() {
@@ -475,6 +514,8 @@ public class MatterWorksGUI extends JFrame {
             topBar.getPrestigeLabel().setText("PRESTIGE: ---");
             statusBar.setPlotId("PLOT ID: ---");
             statusBar.setPlotItemsUnknown();
+            statusBar.setPlotAreaUnknown();
+            statusBar.setPlotResizeEnabled(false);
             return;
         }
 
@@ -489,9 +530,22 @@ public class MatterWorksGUI extends JFrame {
 
         Long pid = repository.getPlotId(u);
 
-        // ✅ NEW: items/cap dal DB
         int placed = repository.getPlotItemsPlaced(u);
         int cap = repository.getDefaultItemPlacedOnPlotCap();
+
+        // ✅ Plot area string (se GridManager è quello patchato con PlotAreaInfo)
+        String plotAreaStr = null;
+        try {
+            GridManager.PlotAreaInfo info = gridManager.getPlotAreaInfo(u);
+            if (info != null) {
+                plotAreaStr = info.unlockedX() + "x" + info.unlockedY()
+                        + " (+" + info.extraX() + "/+" + info.extraY() + ")"
+                        + " MAX " + info.maxX() + "x" + info.maxY()
+                        + " INC " + info.increaseX() + "x" + info.increaseY();
+            }
+        } catch (Throwable ignored) {
+            // se per qualche motivo non disponibile, resta null
+        }
 
         boolean changed =
                 Double.compare(money, lastMoneyShown) != 0 ||
@@ -501,7 +555,9 @@ public class MatterWorksGUI extends JFrame {
                         (voidCoins != lastVoidCoinsShown) ||
                         (prestige != lastPrestigeShown) ||
                         (placed != lastPlotItemsShown) ||
-                        (cap != lastPlotCapShown);
+                        (cap != lastPlotCapShown) ||
+                        (plotAreaStr != null && !plotAreaStr.equals(lastPlotAreaShown)) ||
+                        (lastPlotResizeEnabled != isAdmin);
 
         if (!changed) return;
 
@@ -515,6 +571,9 @@ public class MatterWorksGUI extends JFrame {
         lastPlotItemsShown = placed;
         lastPlotCapShown = cap;
 
+        lastPlotAreaShown = plotAreaStr;
+        lastPlotResizeEnabled = isAdmin;
+
         topBar.getMoneyLabel().setText(String.format("MONEY: $%,.2f", money));
         topBar.getRoleLabel().setText("[" + rank + "]");
         topBar.getVoidCoinsLabel().setText("VOID: " + voidCoins);
@@ -527,6 +586,11 @@ public class MatterWorksGUI extends JFrame {
 
         statusBar.setPlotId("PLOT ID: #" + (pid != null ? pid : "ERR"));
         statusBar.setPlotItems(placed, cap);
+
+        if (plotAreaStr != null) statusBar.setPlotAreaText(plotAreaStr);
+        else statusBar.setPlotAreaUnknown();
+
+        statusBar.setPlotResizeEnabled(isAdmin);
     }
 
     private void updateLabels() {

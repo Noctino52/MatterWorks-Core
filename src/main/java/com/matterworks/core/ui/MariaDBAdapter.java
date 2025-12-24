@@ -116,7 +116,8 @@ public class MariaDBAdapter implements IRepository {
     @Override
     public ServerConfig loadServerConfig() {
         String sqlNew =
-                "SELECT player_start_money, vein_raw, vein_red, vein_blue, vein_yellow, sos_threshold, max_inventory_machine " +
+                "SELECT player_start_money, vein_raw, vein_red, vein_blue, vein_yellow, sos_threshold, max_inventory_machine, " +
+                        "Plot_Starting_X, Plot_Starting_Y, Plot_Max_X, Plot_Max_Y, Plot_IncreaseX, Plot_IncreaseY " +
                         "FROM server_gamestate WHERE id = 1";
 
         try (Connection conn = dbManager.getConnection();
@@ -131,13 +132,21 @@ public class MariaDBAdapter implements IRepository {
                         rs.getInt("vein_blue"),
                         rs.getInt("vein_yellow"),
                         rs.getDouble("sos_threshold"),
-                        Math.max(1, rs.getInt("max_inventory_machine"))
+                        Math.max(1, rs.getInt("max_inventory_machine")),
+
+                        Math.max(1, rs.getInt("Plot_Starting_X")),
+                        Math.max(1, rs.getInt("Plot_Starting_Y")),
+                        Math.max(1, rs.getInt("Plot_Max_X")),
+                        Math.max(1, rs.getInt("Plot_Max_Y")),
+                        Math.max(1, rs.getInt("Plot_IncreaseX")),
+                        Math.max(1, rs.getInt("Plot_IncreaseY"))
                 );
             }
 
         } catch (SQLException e) {
             if (!isUnknownColumn(e)) e.printStackTrace();
 
+            // fallback vecchio schema
             String sqlOld =
                     "SELECT player_start_money, vein_raw, vein_red, vein_blue, vein_yellow, sos_threshold " +
                             "FROM server_gamestate WHERE id = 1";
@@ -154,7 +163,9 @@ public class MariaDBAdapter implements IRepository {
                             rs2.getInt("vein_blue"),
                             rs2.getInt("vein_yellow"),
                             rs2.getDouble("sos_threshold"),
-                            64
+                            64,
+
+                            25, 25, 50, 50, 2, 2
                     );
                 }
 
@@ -163,8 +174,19 @@ public class MariaDBAdapter implements IRepository {
             }
         }
 
-        return new ServerConfig(1000.0, 3, 1, 1, 0, 500.0, 64);
+        return new ServerConfig(1000.0, 3, 1, 1, 0, 500.0, 64, 25, 25, 50, 50, 2, 2);
     }
+
+    @Override
+    public com.matterworks.core.model.PlotUnlockState loadPlotUnlockState(UUID ownerId) {
+        return plotDAO.loadPlotUnlockState(ownerId);
+    }
+
+    @Override
+    public boolean updatePlotUnlockState(UUID ownerId, com.matterworks.core.model.PlotUnlockState state) {
+        return plotDAO.updatePlotUnlockState(ownerId, state);
+    }
+
 
     // ==========================================================
     // MinutesToInactive (server_gamestate)
@@ -387,6 +409,7 @@ public class MariaDBAdapter implements IRepository {
         Long plotId = plotDAO.findPlotIdByOwner(ownerId);
         if (plotId == null) return;
 
+
         try (Connection conn = dbManager.getConnection()) {
             conn.setAutoCommit(false);
             try {
@@ -394,6 +417,14 @@ public class MariaDBAdapter implements IRepository {
                     stmt.setLong(1, plotId);
                     stmt.executeUpdate();
                 }
+                // ✅ RESET unlock extras
+                try (PreparedStatement stmt = conn.prepareStatement("UPDATE plots SET unlocked_extra_x = 0, unlocked_extra_y = 0 WHERE id = ?")) {
+                    stmt.setLong(1, plotId);
+                    stmt.executeUpdate();
+                } catch (SQLException e) {
+                    if (!isUnknownColumn(e)) throw e;
+                }
+
                 try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM plot_resources WHERE plot_id = ?")) {
                     stmt.setLong(1, plotId);
                     stmt.executeUpdate();

@@ -5,6 +5,7 @@ import com.matterworks.core.domain.machines.base.PlacedMachine;
 import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.model.PlotObject;
+import com.matterworks.core.model.PlotUnlockState;
 import com.matterworks.core.ui.ServerConfig;
 
 import java.util.List;
@@ -50,4 +51,9 @@ public interface IRepository {
     // --- SESSIONS ---
     void openPlayerSession(UUID playerUuid);
     void closePlayerSession(UUID playerUuid);
+
+    // --- PLOT UNLOCK (area buildabile) ---
+    PlotUnlockState loadPlotUnlockState(UUID ownerId);
+    boolean updatePlotUnlockState(UUID ownerId, PlotUnlockState state);
+
 }

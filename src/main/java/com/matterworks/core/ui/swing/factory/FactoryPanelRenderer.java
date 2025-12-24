@@ -34,7 +34,7 @@ final class FactoryPanelRenderer {
     private static final Color EFFECT_GLITCH = new Color(255, 0, 220);
     private static final Color EFFECT_NONE = new Color(210, 210, 210);
 
-    // ✅ input special per color/dye
+    // âœ… input special per color/dye
     private static final Color PORT_COLOR_INPUT = new Color(255, 80, 200);
 
     private final BlockRegistry registry;
@@ -96,6 +96,7 @@ final class FactoryPanelRenderer {
         this.machineGrid = buildExpandedOccupancy((snap.machines() != null) ? snap.machines() : Map.of());
 
         if (state.currentLayer == 0) drawTerrainResources(g2, snap.resources(), CELL, OFF_X, OFF_Y);
+        drawLockedOverlay(g2, controller.getPlotAreaInfo(), CELL, OFF_X, OFF_Y);
         drawMachines(g2, snap.machines(), CELL, OFF_X, OFF_Y);
         drawGhost(g2, CELL, OFF_X, OFF_Y);
     }
@@ -191,6 +192,30 @@ final class FactoryPanelRenderer {
         }
     }
 
+
+    private void drawLockedOverlay(Graphics2D g, com.matterworks.core.managers.GridManager.PlotAreaInfo info, int CELL, int OFF_X, int OFF_Y) {
+        if (info == null) return;
+
+        int minX = info.minX();
+        int minZ = info.minZ();
+        int maxXEx = info.maxXExclusive();
+        int maxZEx = info.maxZExclusive();
+
+        // Nota rossa molto leggera sulle celle bloccate
+        g.setColor(new Color(255, 0, 0, 35));
+
+        for (int gx = 0; gx < FactoryPanelState.GRID_SIZE; gx++) {
+            for (int gz = 0; gz < FactoryPanelState.GRID_SIZE; gz++) {
+                boolean unlocked = gx >= minX && gx < maxXEx && gz >= minZ && gz < maxZEx;
+                if (unlocked) continue;
+
+                int x = OFF_X + (gx * CELL);
+                int z = OFF_Y + (gz * CELL);
+                g.fillRect(x, z, CELL, CELL);
+            }
+        }
+    }
+
     private void drawMachines(Graphics2D g, Map<GridPosition, PlacedMachine> machines, int CELL, int OFF_X, int OFF_Y) {
         if (machines == null || machines.isEmpty()) return;
 
@@ -248,10 +273,10 @@ final class FactoryPanelRenderer {
 
         // ===== PORTS =====
         if ("drill_mk1".equals(type)) {
-            // ✅ drill: solo OUTPUT (verde), niente input blu
+            // âœ… drill: solo OUTPUT (verde), niente input blu
             drawOutputOnlyPort(g, x, z, w, h, CELL, m.getOrientation());
         } else if ("conveyor_belt".equals(type)) {
-            // ✅ belt: solo OUTPUT (verde), niente input blu
+            // âœ… belt: solo OUTPUT (verde), niente input blu
             drawOutputOnlyPort(g, x, z, w, h, CELL, m.getOrientation());
         } else if ("nexus_core".equals(type)) {
             drawNexusPortsGrid(g, m, x, z, CELL);
@@ -260,10 +285,10 @@ final class FactoryPanelRenderer {
         } else if ("merger".equals(type)) {
             drawMergerPortsGrid(g, m, x, z, CELL);
         } else if ("chromator".equals(type)) {
-            // ✅ chromator: 2 input (slot0 matter=blu, slot1 dye=magenta) + output verde
+            // âœ… chromator: 2 input (slot0 matter=blu, slot1 dye=magenta) + output verde
             drawChromatorPorts_2x1(g, m, x, z, CELL);
         } else if ("color_mixer".equals(type)) {
-            // ✅ mixer: entrambi input sono "dye/color" (nel tuo codice), quindi entrambi magenta
+            // âœ… mixer: entrambi input sono "dye/color" (nel tuo codice), quindi entrambi magenta
             drawColorMixerPorts_2x1(g, m, x, z, CELL);
         } else if ("smoothing".equals(type) || "cutting".equals(type)
                 || "shiny_polisher".equals(type) || "blazing_forge".equals(type) || "glitch_distorter".equals(type)) {
@@ -378,7 +403,7 @@ final class FactoryPanelRenderer {
         drawPortOnCellEdge(g, baseX, baseZ, 0, 0, front, Color.GREEN, CELL);
     }
 
-    // ✅ Chromator: slot0 = matter(blue), slot1 = dye(magenta)
+    // âœ… Chromator: slot0 = matter(blue), slot1 = dye(magenta)
     private void drawChromatorPorts_2x1(Graphics2D g, PlacedMachine m, int baseX, int baseZ, int CELL) {
         Direction o = m.getOrientation();
 
@@ -417,7 +442,7 @@ final class FactoryPanelRenderer {
         }
     }
 
-    // ✅ ColorMixer: entrambi gli input sono dye/color -> entrambi magenta, output verde come prima
+    // âœ… ColorMixer: entrambi gli input sono dye/color -> entrambi magenta, output verde come prima
     private void drawColorMixerPorts_2x1(Graphics2D g, PlacedMachine m, int baseX, int baseZ, int CELL) {
         Direction o = m.getOrientation();
 

@@ -81,6 +81,18 @@ final class FactoryPanelController {
         return snapshot;
     }
 
+
+    GridManager.PlotAreaInfo getPlotAreaInfo() {
+        UUID u = state.playerUuid;
+        if (u == null) return null;
+        try {
+            return gridManager.getPlotAreaInfo(u);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+
     JsonObject getMetaCached(PlacedMachine m) {
         if (m == null) return null;
 
@@ -110,7 +122,7 @@ final class FactoryPanelController {
     }
 
     /**
-     * ✅ Tooltip HTML per infobox hover.
+     * âœ… Tooltip HTML per infobox hover.
      * - Usa MachineInspector.inspect(m)
      * - Rispetta showInUi (quindi niente belt/splitter/merger/lift/dropper/nexus)
      * - Formato: Nome, conteggio Matter/Colori, Stato, Input, Output (target)
@@ -204,7 +216,7 @@ final class FactoryPanelController {
             }
         });
 
-        // ✅ Zoom con rotellina
+        // âœ… Zoom con rotellina
         panel.addMouseWheelListener(e -> {
             if (disposed) return;
             state.applyWheelZoom(e.getWheelRotation());

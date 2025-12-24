@@ -203,4 +203,44 @@ public class PlotDAO {
         }
         return 0;
     }
+
+    public com.matterworks.core.model.PlotUnlockState loadPlotUnlockState(UUID ownerId) {
+        String sql = "SELECT unlocked_extra_x, unlocked_extra_y FROM plots WHERE owner_id = ?";
+        try (Connection conn = dbManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+
+            ps.setBytes(1, UuidUtils.asBytes(ownerId));
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return new com.matterworks.core.model.PlotUnlockState(
+                            rs.getInt("unlocked_extra_x"),
+                            rs.getInt("unlocked_extra_y")
+                    );
+                }
+            }
+        } catch (SQLException e) {
+            // backward compat: se la colonna non esiste ancora
+            String msg = (e.getMessage() != null) ? e.getMessage().toLowerCase() : "";
+            if (!msg.contains("unknown column")) e.printStackTrace();
+        }
+        return com.matterworks.core.model.PlotUnlockState.zero();
+    }
+
+    public boolean updatePlotUnlockState(UUID ownerId, com.matterworks.core.model.PlotUnlockState state) {
+        String sql = "UPDATE plots SET unlocked_extra_x = ?, unlocked_extra_y = ? WHERE owner_id = ?";
+        try (Connection conn = dbManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+
+            ps.setInt(1, Math.max(0, state.extraX()));
+            ps.setInt(2, Math.max(0, state.extraY()));
+            ps.setBytes(3, UuidUtils.asBytes(ownerId));
+            return ps.executeUpdate() > 0;
+
+        } catch (SQLException e) {
+            String msg = (e.getMessage() != null) ? e.getMessage().toLowerCase() : "";
+            if (!msg.contains("unknown column")) e.printStackTrace();
+            return false;
+        }
+    }
+
 }

@@ -12,7 +12,11 @@ public final class StatusBarPanel extends JPanel {
     private final JLabel lblLayer = UiKit.label("LAYER: 0", Color.CYAN, 12);
 
     private final JLabel lblPlotItems = UiKit.label("ITEMS: ---/---", Color.LIGHT_GRAY, 12);
+    private final JLabel lblPlotArea = UiKit.label("PLOT: ---", Color.LIGHT_GRAY, 12);
     private final JLabel lblPlotId = UiKit.label("PLOT ID: #---", Color.LIGHT_GRAY, 12);
+
+    private final JButton btnPlotMinus = tinyButton("-");
+    private final JButton btnPlotPlus  = tinyButton("+");
 
     public StatusBarPanel() {
         super(new BorderLayout());
@@ -24,21 +28,39 @@ public final class StatusBarPanel extends JPanel {
         left.add(lblOrient);
         left.add(lblLayer);
 
-        JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 16, 5));
+        JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 5));
         right.setOpaque(false);
+
         right.add(lblPlotItems);
+        right.add(lblPlotArea);
+        right.add(btnPlotMinus);
+        right.add(btnPlotPlus);
         right.add(lblPlotId);
 
         add(left, BorderLayout.WEST);
         add(right, BorderLayout.EAST);
+
+        // default: disabled finché non sappiamo admin
+        setPlotResizeEnabled(false);
     }
 
+    private static JButton tinyButton(String text) {
+        JButton b = new JButton(text);
+        b.setFocusable(false);
+        b.setMargin(new Insets(0, 8, 0, 8));
+        b.setFont(new Font("SansSerif", Font.BOLD, 12));
+        b.setPreferredSize(new Dimension(40, 22));
+        return b;
+    }
+
+    // ---- base status ----
     public void setTool(String t) { lblTool.setText("TOOL: " + (t != null ? t : "---")); }
     public void setDir(String d) { lblOrient.setText("DIR: " + (d != null ? d : "---")); }
     public void setLayer(int y) { lblLayer.setText("LAYER: " + y); }
 
     public void setPlotId(String s) { lblPlotId.setText(s != null ? s : "PLOT ID: ---"); }
 
+    // ---- items cap ----
     public void setPlotItemsUnknown() {
         lblPlotItems.setText("ITEMS: ---/---");
         lblPlotItems.setForeground(Color.LIGHT_GRAY);
@@ -52,13 +74,33 @@ public final class StatusBarPanel extends JPanel {
         }
 
         lblPlotItems.setText("ITEMS: " + placed + "/" + cap);
+        lblPlotItems.setForeground(placed > cap ? Color.RED : Color.LIGHT_GRAY);
+    }
 
-        // ✅ ROSSO se superi il cap
-        if (placed > cap) {
-            lblPlotItems.setForeground(Color.RED);
-        } else {
-            lblPlotItems.setForeground(Color.LIGHT_GRAY);
-        }
+    // ---- plot area ----
+    public void setPlotAreaUnknown() {
+        lblPlotArea.setText("PLOT: ---");
+        lblPlotArea.setForeground(Color.LIGHT_GRAY);
+    }
+
+    /** Passaci una stringa già formattata (così non duplico logica qui). */
+    public void setPlotAreaText(String areaText) {
+        lblPlotArea.setText("PLOT: " + (areaText != null ? areaText : "---"));
+        lblPlotArea.setForeground(Color.LIGHT_GRAY);
+    }
+
+    // ---- resize buttons ----
+    public void setPlotResizeEnabled(boolean enabled) {
+        btnPlotMinus.setEnabled(enabled);
+        btnPlotPlus.setEnabled(enabled);
+    }
+
+    public void setPlotResizeActions(Runnable onMinus, Runnable onPlus) {
+        for (var al : btnPlotMinus.getActionListeners()) btnPlotMinus.removeActionListener(al);
+        for (var al : btnPlotPlus.getActionListeners()) btnPlotPlus.removeActionListener(al);
+
+        if (onMinus != null) btnPlotMinus.addActionListener(e -> onMinus.run());
+        if (onPlus != null) btnPlotPlus.addActionListener(e -> onPlus.run());
     }
 
     JLabel getPlotIdLabel() { return lblPlotId; }

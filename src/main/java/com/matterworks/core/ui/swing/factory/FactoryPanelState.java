@@ -8,14 +8,14 @@ import java.util.UUID;
 final class FactoryPanelState {
 
     // Grid constants
-    static final int GRID_SIZE = 20;
+    static final int GRID_SIZE = 50;
     static final int BASE_CELL_PX = 40;
 
     // Zoom clamp
     static final double MIN_USER_ZOOM = 0.35;
     static final double MAX_USER_ZOOM = 3.0;
 
-    // Padding minimo dal bordo del panel (quando grid è più piccola)
+    // Padding minimo dal bordo del panel (quando grid Ã¨ piÃ¹ piccola)
     static final int MIN_PAD = 12;
 
     record Viewport(int cellPx, int offX, int offY, int gridPx) {}
@@ -31,7 +31,7 @@ final class FactoryPanelState {
     volatile int lastHoverGX = Integer.MIN_VALUE;
     volatile int lastHoverGZ = Integer.MIN_VALUE;
 
-    // fattore zoom controllato dall’utente (mouse wheel)
+    // fattore zoom controllato dallâ€™utente (mouse wheel)
     volatile double userZoom = 1.0;
 
     // ultimo viewport calcolato (renderer & controller usano lo stesso)
@@ -53,8 +53,8 @@ final class FactoryPanelState {
     }
 
     Viewport computeViewport(int panelW, int panelH) {
-        // Fit: calcolo cellPx per far stare tutto il 20x20 nel pannello
-        // (così non taglia e lo spazio “vuoto” a destra si riduce/annulla)
+        // Fit: calcolo cellPx per far stare tutto il 50x50 nel pannello
+        // (cosÃ¬ non taglia e lo spazio â€œvuotoâ€ a destra si riduce/annulla)
         int w = Math.max(1, panelW);
         int h = Math.max(1, panelH);
 
@@ -76,11 +76,11 @@ final class FactoryPanelState {
 
         int gridPx = cellPx * GRID_SIZE;
 
-        // Offset: centro se c'è spazio, altrimenti negativo (zoom-in -> crop voluto)
+        // Offset: centro se c'Ã¨ spazio, altrimenti negativo (zoom-in -> crop voluto)
         int offX = (w - gridPx) / 2;
         int offY = (h - gridPx) / 2;
 
-        // se grid è più piccola, garantisci un minimo padding (evita “attaccata” ai bordi)
+        // se grid Ã¨ piÃ¹ piccola, garantisci un minimo padding (evita â€œattaccataâ€ ai bordi)
         if (gridPx <= w) offX = Math.max(offX, MIN_PAD);
         if (gridPx <= h) offY = Math.max(offY, MIN_PAD);
 
