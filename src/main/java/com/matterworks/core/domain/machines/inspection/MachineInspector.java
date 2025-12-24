@@ -209,29 +209,40 @@ public final class MachineInspector {
         }
 
         // Chromator: slot0 “base”, slot1 “dye” => output: shape base + color dye
+        // Chromator: slot0 “base” (shape!=null + RAW), slot1 “dye” (SOLO COLORE: shape==null + !=RAW)
+        // output: shape base + color dye
         if (pm instanceof Chromator) {
             if (pm.inputBuffer.getCountInSlot(0) <= 0) return null;
             if (pm.inputBuffer.getCountInSlot(1) <= 0) return null;
             MatterPayload base = pm.inputBuffer.getItemInSlot(0);
             MatterPayload dye = pm.inputBuffer.getItemInSlot(1);
             if (base == null || dye == null) return null;
+
+            if (base.shape() == null) return null;
+            if (base.color() != MatterColor.RAW) return null;
+            if (dye.shape() != null) return null;
+            if (dye.color() == MatterColor.RAW) return null;
+
             return new MatterPayload(base.shape(), dye.color());
         }
 
-        // ColorMixer: combina due colori != RAW e != uguali => output: SPHERE mixed
+        // ColorMixer: combina due colori (shape==null, !=RAW, != uguali) => output: SOLO COLORE (shape==null)
         if (pm instanceof ColorMixer) {
             if (pm.inputBuffer.getCountInSlot(0) <= 0) return null;
             if (pm.inputBuffer.getCountInSlot(1) <= 0) return null;
             MatterPayload c1 = pm.inputBuffer.getItemInSlot(0);
             MatterPayload c2 = pm.inputBuffer.getItemInSlot(1);
             if (c1 == null || c2 == null) return null;
+
+            if (c1.shape() != null || c2.shape() != null) return null;
             if (c1.color() == MatterColor.RAW || c2.color() == MatterColor.RAW) return null;
             if (c1.color() == c2.color()) return null;
 
             MatterColor mixed = MatterColor.mix(c1.color(), c2.color());
             if (mixed == MatterColor.RAW) mixed = MatterColor.WHITE; // safety: come tick
-            return new MatterPayload(MatterShape.SPHERE, mixed);
+            return new MatterPayload(null, mixed);
         }
+
 
         // EffectApplicator: output = stesso shape/color + effetto specifico (derivato dal typeId)
         if (pm instanceof EffectApplicatorMachine) {
