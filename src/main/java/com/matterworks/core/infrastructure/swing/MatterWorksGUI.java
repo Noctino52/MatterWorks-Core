@@ -49,6 +49,8 @@ public class MatterWorksGUI extends JFrame {
     private volatile String lastRankShown = null;
     private volatile Long lastPlotIdShown = null;
     private volatile boolean lastAdminShown = false;
+    private volatile int lastVoidCoinsShown = Integer.MIN_VALUE;
+    private volatile int lastPrestigeShown = Integer.MIN_VALUE;
 
     public MatterWorksGUI(GridManager gm,
                           BlockRegistry reg,
@@ -88,7 +90,6 @@ public class MatterWorksGUI extends JFrame {
         glassPane.addMouseMotionListener(new java.awt.event.MouseAdapter() {});
         setGlassPane(glassPane);
 
-        // top bar callbacks
         this.topBar = new TopBarPanel(
                 this::selectTool,
                 this::buyToolRightClick,
@@ -177,6 +178,7 @@ public class MatterWorksGUI extends JFrame {
         int d = (delta != null ? delta : 0);
         int newY = Math.max(0, factoryPanel.getCurrentLayer() + d);
         factoryPanel.setLayer(newY);
+        topBar.setLayerValue(newY);
         factoryPanel.requestFocusInWindow();
         updateLabels();
     }
@@ -443,6 +445,8 @@ public class MatterWorksGUI extends JFrame {
         lastRankShown = null;
         lastPlotIdShown = null;
         lastAdminShown = false;
+        lastVoidCoinsShown = Integer.MIN_VALUE;
+        lastPrestigeShown = Integer.MIN_VALUE;
     }
 
     private void updateEconomyLabelsForce() {
@@ -454,6 +458,9 @@ public class MatterWorksGUI extends JFrame {
         UUID u = currentPlayerUuid;
         if (u == null) {
             topBar.getMoneyLabel().setText("MONEY: $---");
+            topBar.getRoleLabel().setText("[---]");
+            topBar.getVoidCoinsLabel().setText("VOID: ---");
+            topBar.getPrestigeLabel().setText("PRESTIGE: ---");
             statusBar.setPlotId("PLOT ID: ---");
             return;
         }
@@ -464,6 +471,8 @@ public class MatterWorksGUI extends JFrame {
         double money = p.getMoney();
         String rank = String.valueOf(p.getRank());
         boolean isAdmin = p.isAdmin();
+        int voidCoins = p.getVoidCoins();
+        int prestige = p.getPrestigeLevel();
 
         Long pid = repository.getPlotId(u);
 
@@ -471,7 +480,9 @@ public class MatterWorksGUI extends JFrame {
                 Double.compare(money, lastMoneyShown) != 0 ||
                         (rank != null && !rank.equals(lastRankShown)) ||
                         (pid != null ? !pid.equals(lastPlotIdShown) : lastPlotIdShown != null) ||
-                        (isAdmin != lastAdminShown);
+                        (isAdmin != lastAdminShown) ||
+                        (voidCoins != lastVoidCoinsShown) ||
+                        (prestige != lastPrestigeShown);
 
         if (!changed) return;
 
@@ -479,9 +490,18 @@ public class MatterWorksGUI extends JFrame {
         lastRankShown = rank;
         lastPlotIdShown = pid;
         lastAdminShown = isAdmin;
+        lastVoidCoinsShown = voidCoins;
+        lastPrestigeShown = prestige;
 
-        topBar.getMoneyLabel().setText(String.format("MONEY: $%,.2f [%s]", money, rank));
+        topBar.getMoneyLabel().setText(String.format("MONEY: $%,.2f", money));
+        topBar.getRoleLabel().setText("[" + rank + "]");
+        topBar.getVoidCoinsLabel().setText("VOID: " + voidCoins);
+        topBar.getPrestigeLabel().setText("PRESTIGE: " + prestige);
+
         topBar.getMoneyLabel().setForeground(isAdmin ? new Color(255, 215, 0) : Color.GREEN);
+        topBar.getRoleLabel().setForeground(isAdmin ? new Color(255, 215, 0) : Color.LIGHT_GRAY);
+        topBar.getVoidCoinsLabel().setForeground(new Color(190, 0, 220));
+        topBar.getPrestigeLabel().setForeground(new Color(0, 200, 255));
 
         statusBar.setPlotId("PLOT ID: #" + (pid != null ? pid : "ERR"));
     }
@@ -493,6 +513,7 @@ public class MatterWorksGUI extends JFrame {
         statusBar.setTool(t);
         statusBar.setDir(factoryPanel.getCurrentOrientationName());
         statusBar.setLayer(factoryPanel.getCurrentLayer());
+        topBar.setLayerValue(factoryPanel.getCurrentLayer());
     }
 
     private void setLoading(boolean loading) {
