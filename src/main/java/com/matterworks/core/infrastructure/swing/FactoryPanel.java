@@ -1,6 +1,6 @@
 package com.matterworks.core.infrastructure.swing;
 
-import com.matterworks.core.domain.machines.BlockRegistry; // ✅ FIX
+import com.matterworks.core.domain.machines.BlockRegistry;
 import com.matterworks.core.managers.GridManager;
 
 import javax.swing.*;
@@ -9,7 +9,6 @@ import java.util.UUID;
 
 public class FactoryPanel extends JPanel {
 
-    private final BlockRegistry registry;
     private final FactoryPanelState state;
     private final FactoryPanelController controller;
     private final FactoryPanelRenderer renderer;
@@ -20,8 +19,6 @@ public class FactoryPanel extends JPanel {
                         Runnable onStateChange,
                         Runnable onEconomyMaybeChanged) {
 
-        this.registry = registry;
-
         this.state = new FactoryPanelState();
         this.state.playerUuid = playerUuid;
 
@@ -29,6 +26,8 @@ public class FactoryPanel extends JPanel {
         this.renderer = new FactoryPanelRenderer(registry, controller, state);
 
         setBackground(new Color(30, 30, 30));
+        setFocusable(true);
+        setDoubleBuffered(true);
     }
 
     public void dispose() {
@@ -36,15 +35,8 @@ public class FactoryPanel extends JPanel {
     }
 
     public void forceRefreshNow() {
-        renderer.invalidateGhostCache();
+        renderer.invalidateAllCaches();
         controller.forceRefreshNow();
-    }
-
-    @Override
-    public Dimension getPreferredSize() {
-        int w = FactoryPanelRenderer.OFFSET_X + FactoryPanelRenderer.GRID_SIZE * FactoryPanelRenderer.CELL_SIZE + FactoryPanelRenderer.OFFSET_X;
-        int h = FactoryPanelRenderer.OFFSET_Y + FactoryPanelRenderer.GRID_SIZE * FactoryPanelRenderer.CELL_SIZE + FactoryPanelRenderer.OFFSET_Y;
-        return new Dimension(w, h);
     }
 
     public void setPlayerUuid(UUID uuid) {

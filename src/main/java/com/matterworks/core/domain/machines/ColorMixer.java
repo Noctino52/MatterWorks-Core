@@ -20,15 +20,15 @@ public class ColorMixer extends ProcessorMachine {
 
     @Override
     public boolean insertItem(MatterPayload item, GridPosition fromPos) {
-        if (fromPos == null) return false;
+        if (fromPos == null || item == null) return false;
+
+        // RAW non entra nel mixer (non è un colore “miscelabile”)
         if (item.color() == MatterColor.RAW) return false;
 
         int targetSlot = getSlotForPosition(fromPos);
         if (targetSlot == -1) return false;
 
-        // FIX: Usa la costante MAX_INPUT_STACK (64)
         if (inputBuffer.getCountInSlot(targetSlot) >= MAX_INPUT_STACK) return false;
-
         return insertIntoBuffer(targetSlot, item);
     }
 
@@ -40,18 +40,10 @@ public class ColorMixer extends ProcessorMachine {
 
         // Restituisce il vicino del "Blocco Sinistro" rispetto alla faccia anteriore
         return switch (orientation) {
-            // NORD: Fronte è Z-min. Sinistra è X (Ovest). Output deve essere a (x, z-1).
             case NORTH -> new GridPosition(x, y, z - 1);
-
-            // SUD: Fronte è Z-max. Sinistra è X+1 (Est). Output deve essere a (x+1, z+1).
             case SOUTH -> new GridPosition(x + 1, y, z + 1);
-
-            // EST: Fronte è X-max. Sinistra è Z (Nord). Output deve essere a (x+1, z).
-            case EAST -> new GridPosition(x + 1, y, z);
-
-            // OVEST: Fronte è X-min. Sinistra è Z+1 (Sud). Output deve essere a (x-1, z+1).
-            case WEST -> new GridPosition(x - 1, y, z + 1);
-
+            case EAST  -> new GridPosition(x + 1, y, z);
+            case WEST  -> new GridPosition(x - 1, y, z + 1);
             default -> pos;
         };
     }
@@ -60,14 +52,14 @@ public class ColorMixer extends ProcessorMachine {
         int x = pos.x();
         int y = pos.y();
         int z = pos.z();
-        GridPosition slot0Pos = null, slot1Pos = null;
 
+        GridPosition slot0Pos, slot1Pos;
         switch (orientation) {
-            case NORTH: slot0Pos = new GridPosition(x, y, z + 1); slot1Pos = new GridPosition(x + 1, y, z + 1); break;
-            case SOUTH: slot0Pos = new GridPosition(x + 1, y, z - 1); slot1Pos = new GridPosition(x, y, z - 1); break;
-            case EAST:  slot0Pos = new GridPosition(x - 1, y, z); slot1Pos = new GridPosition(x - 1, y, z + 1); break;
-            case WEST:  slot0Pos = new GridPosition(x + 1, y, z + 1); slot1Pos = new GridPosition(x + 1, y, z); break;
-            default: return -1;
+            case NORTH -> { slot0Pos = new GridPosition(x, y, z + 1); slot1Pos = new GridPosition(x + 1, y, z + 1); }
+            case SOUTH -> { slot0Pos = new GridPosition(x + 1, y, z - 1); slot1Pos = new GridPosition(x, y, z - 1); }
+            case EAST  -> { slot0Pos = new GridPosition(x - 1, y, z); slot1Pos = new GridPosition(x - 1, y, z + 1); }
+            case WEST  -> { slot0Pos = new GridPosition(x + 1, y, z + 1); slot1Pos = new GridPosition(x + 1, y, z); }
+            default -> { return -1; }
         }
 
         if (senderPos.equals(slot0Pos)) return 0;
@@ -78,6 +70,7 @@ public class ColorMixer extends ProcessorMachine {
     @Override
     public void tick(long currentTick) {
         super.tryEjectItem(currentTick);
+
         if (currentRecipe != null) {
             if (currentTick >= finishTick) completeProcessing();
             return;
@@ -90,16 +83,32 @@ public class ColorMixer extends ProcessorMachine {
         if (count0 > 0 && count1 > 0) {
             MatterPayload c1 = inputBuffer.getItemInSlot(0);
             MatterPayload c2 = inputBuffer.getItemInSlot(1);
+            if (c1 == null || c2 == null) return;
+
+            // stesso colore non fa nulla
             if (c1.color() == c2.color()) return;
 
             inputBuffer.decreaseSlot(0, 1);
             inputBuffer.decreaseSlot(1, 1);
 
             MatterColor mixed = MatterColor.mix(c1.color(), c2.color());
+
+            // ✅ Safety: RAW non deve uscire mai dal mixer
+            if (mixed == MatterColor.RAW) mixed = MatterColor.WHITE;
+
             MatterPayload result = new MatterPayload(MatterShape.SPHERE, mixed);
-            this.currentRecipe = new com.matterworks.core.domain.matter.Recipe("mix_" + mixed.name(), java.util.List.of(c1, c2), result, 1.5f, 0);
+
+            this.currentRecipe = new com.matterworks.core.domain.matter.Recipe(
+                    "mix_" + mixed.name(),
+                    java.util.List.of(c1, c2),
+                    result,
+                    1.5f,
+                    0
+            );
+
             this.finishTick = currentTick + 30;
             saveState();
+
             System.out.println("🌀 Mixer: Mixing " + c1.color() + " + " + c2.color() + " -> " + mixed);
         }
     }

@@ -21,7 +21,6 @@ final class FactoryPanelController {
     private final FactoryPanel panel;
     private final GridManager gridManager;
     private final FactoryPanelState state;
-
     private final Runnable onEconomyMaybeChanged;
 
     private final ScheduledExecutorService refreshExec;
@@ -82,14 +81,17 @@ final class FactoryPanelController {
 
     JsonObject getMetaCached(PlacedMachine m) {
         if (m == null) return null;
+
         long now = System.nanoTime();
         synchronized (metaCache) {
             Long last = metaCacheNanos.get(m);
             if (last != null && (now - last) <= META_CACHE_TTL_NANOS) {
                 return metaCache.get(m);
             }
+
             JsonObject meta;
             try { meta = m.serialize(); } catch (Throwable ex) { meta = null; }
+
             metaCache.put(m, meta);
             metaCacheNanos.put(m, now);
             return meta;
@@ -106,28 +108,28 @@ final class FactoryPanelController {
     }
 
     private void hookInputListeners() {
-        panel.setFocusable(true);
-        panel.setDoubleBuffered(true);
-
         panel.addMouseMotionListener(new MouseMotionAdapter() {
-            @Override
-            public void mouseMoved(MouseEvent e) {
+            @Override public void mouseMoved(MouseEvent e) {
                 boolean changed = updateHoverFromMouse(e.getX(), e.getY());
                 if (changed) repaintCoalesced();
             }
         });
 
         panel.addMouseListener(new MouseAdapter() {
-            @Override
-            public void mousePressed(MouseEvent e) {
-                panel.requestFocusInWindow();
+            @Override public void mousePressed(MouseEvent e) {
                 handleMousePress(e);
             }
         });
 
+        // ✅ Zoom con rotellina
+        panel.addMouseWheelListener(e -> {
+            if (disposed) return;
+            state.applyWheelZoom(e.getWheelRotation());
+            repaintCoalesced();
+        });
+
         panel.addKeyListener(new KeyAdapter() {
-            @Override
-            public void keyPressed(KeyEvent e) {
+            @Override public void keyPressed(KeyEvent e) {
                 if (e.getKeyCode() == KeyEvent.VK_R) {
                     state.rotate();
                     repaintCoalesced();
@@ -157,9 +159,15 @@ final class FactoryPanelController {
     }
 
     private GridPosition gridPosFromMouse(int x, int y) {
-        int gx = (x - FactoryPanelRenderer.OFFSET_X) / FactoryPanelRenderer.CELL_SIZE;
-        int gz = (y - FactoryPanelRenderer.OFFSET_Y) / FactoryPanelRenderer.CELL_SIZE;
-        if (gx >= 0 && gx < FactoryPanelRenderer.GRID_SIZE && gz >= 0 && gz < FactoryPanelRenderer.GRID_SIZE) {
+        FactoryPanelState.Viewport vp = state.computeViewport(panel.getWidth(), panel.getHeight());
+        int cell = vp.cellPx();
+        int offX = vp.offX();
+        int offY = vp.offY();
+
+        int gx = Math.floorDiv(x - offX, cell);
+        int gz = Math.floorDiv(y - offY, cell);
+
+        if (gx >= 0 && gx < FactoryPanelState.GRID_SIZE && gz >= 0 && gz < FactoryPanelState.GRID_SIZE) {
             return new GridPosition(gx, state.currentLayer, gz);
         }
         return null;
@@ -224,80 +232,68 @@ final class FactoryPanelController {
                 resources = Map.of();
             } else {
                 Map<GridPosition, PlacedMachine> snap = gridManager.getSnapshot(u);
-                machines = (snap == null || snap.isEmpty()) ? Map.of() : new HashMap<>(snap);
+                machines = (snap != null) ? snap : Map.of();
 
-                if (state.currentLayer == 0) {
-                    Map<GridPosition, MatterColor> res = gridManager.getTerrainResources(u);
-                    resources = (res == null || res.isEmpty()) ? Map.of() : new HashMap<>(res);
-                } else {
-                    resources = Map.of();
-                }
+                // ✅ CORREZIONE: nel tuo GridManager è getTerrainResources(UUID)
+                Map<GridPosition, MatterColor> res = gridManager.getTerrainResources(u);
+                resources = (res != null) ? new HashMap<>(res) : Map.of();
             }
-        } catch (Throwable t) {
+        } catch (Throwable ex) {
+            ex.printStackTrace();
             machines = Map.of();
             resources = Map.of();
         }
 
-        snapshot = new Snapshot(machines, resources);
+        long fp = fingerprint(machines, resources);
+        if (!forceRepaint && fp == lastFingerprint) return;
 
-        long fp = computeFingerprint(machines, resources, state.currentLayer);
-        boolean changed = fp != lastFingerprint;
         lastFingerprint = fp;
-
-        if (forceRepaint || changed) repaintCoalesced();
+        snapshot = new Snapshot(machines, resources);
+        repaintCoalesced();
     }
 
-    private long computeFingerprint(Map<GridPosition, PlacedMachine> machines, Map<GridPosition, MatterColor> resources, int layer) {
+    private long fingerprint(Map<GridPosition, PlacedMachine> machines, Map<GridPosition, MatterColor> resources) {
         long h = 1469598103934665603L;
-        h = fnv64(h, layer);
 
-        if (machines != null && !machines.isEmpty()) {
-            for (Map.Entry<GridPosition, PlacedMachine> e : machines.entrySet()) {
+        if (machines != null) {
+            for (var e : machines.entrySet()) {
                 GridPosition p = e.getKey();
                 PlacedMachine m = e.getValue();
                 if (p == null || m == null) continue;
 
-                h = fnv64(h, p.hashCode());
-                Long id = m.getDbId();
-                h = fnv64(h, id != null ? id.hashCode() : System.identityHashCode(m));
+                h ^= (p.x() * 73856093L) ^ (p.y() * 19349663L) ^ (p.z() * 83492791L);
+                h *= 1099511628211L;
 
-                String t = m.getTypeId();
-                if (t != null) h = fnv64(h, t.hashCode());
-
-                var d = m.getOrientation();
-                if (d != null) h = fnv64(h, d.ordinal());
-
-                h = fnv64(h, m.isDirty() ? 1 : 0);
+                String id = m.getTypeId();
+                if (id != null) {
+                    h ^= id.hashCode();
+                    h *= 1099511628211L;
+                }
             }
         }
 
-        if (resources != null && !resources.isEmpty()) {
-            for (Map.Entry<GridPosition, MatterColor> e : resources.entrySet()) {
+        if (resources != null) {
+            for (var e : resources.entrySet()) {
                 GridPosition p = e.getKey();
                 MatterColor c = e.getValue();
                 if (p == null || c == null) continue;
-                h = fnv64(h, p.hashCode());
-                h = fnv64(h, c.ordinal());
+
+                h ^= (p.x() * 1327L) ^ (p.z() * 7331L) ^ c.name().hashCode();
+                h *= 1099511628211L;
             }
         }
 
-        return h;
-    }
-
-    private long fnv64(long h, int v) {
-        h ^= (v & 0xFFFFFFFFL);
-        h *= 1099511628211L;
         return h;
     }
 
     private void repaintCoalesced() {
         if (disposed) return;
         if (repaintQueued) return;
-        repaintQueued = true;
 
+        repaintQueued = true;
         SwingUtilities.invokeLater(() -> {
             repaintQueued = false;
-            if (!disposed) panel.repaint(0, 0, panel.getWidth(), panel.getHeight());
+            if (!disposed) panel.repaint();
         });
     }
 }
