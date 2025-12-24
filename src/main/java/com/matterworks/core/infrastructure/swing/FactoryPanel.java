@@ -5,6 +5,7 @@ import com.matterworks.core.managers.GridManager;
 
 import javax.swing.*;
 import java.awt.*;
+import java.awt.event.MouseEvent;
 import java.util.UUID;
 
 public class FactoryPanel extends JPanel {
@@ -28,6 +29,15 @@ public class FactoryPanel extends JPanel {
         setBackground(new Color(30, 30, 30));
         setFocusable(true);
         setDoubleBuffered(true);
+
+        // ✅ abilita tooltip e rendilo "immediato" (infobox hover)
+        ToolTipManager.sharedInstance().registerComponent(this);
+        ToolTipManager.sharedInstance().setInitialDelay(0);
+        ToolTipManager.sharedInstance().setReshowDelay(0);
+        ToolTipManager.sharedInstance().setDismissDelay(60_000);
+
+        // serve per "accendere" i tooltip su Swing (poi getToolTipText viene chiamato dinamicamente)
+        setToolTipText(" ");
     }
 
     public void dispose() {
@@ -73,6 +83,13 @@ public class FactoryPanel extends JPanel {
 
     public String getCurrentOrientationName() {
         return state.currentOrientation.name();
+    }
+
+    @Override
+    public String getToolTipText(MouseEvent event) {
+        // ✅ tooltip dinamico basato su MachineInspector/MachineInspectionInfo
+        if (event == null) return null;
+        return controller.getInspectionTooltipHtml(event.getX(), event.getY());
     }
 
     @Override

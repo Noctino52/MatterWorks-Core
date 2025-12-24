@@ -2,6 +2,8 @@ package com.matterworks.core.infrastructure.swing;
 
 import com.google.gson.JsonObject;
 import com.matterworks.core.common.GridPosition;
+import com.matterworks.core.domain.machines.MachineInspectionInfo;
+import com.matterworks.core.domain.machines.MachineInspector;
 import com.matterworks.core.domain.machines.PlacedMachine;
 import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.managers.GridManager;
@@ -107,11 +109,92 @@ final class FactoryPanelController {
         refreshOnce(true);
     }
 
+    /**
+     * ✅ Tooltip HTML per infobox hover.
+     * - Usa MachineInspector.inspect(m)
+     * - Rispetta showInUi (quindi niente belt/splitter/merger/lift/dropper/nexus)
+     * - Formato: Nome, conteggio Matter/Colori, Stato, Input, Output (target)
+     */
+    String getInspectionTooltipHtml(int mouseX, int mouseY) {
+        if (disposed) return null;
+
+        GridPosition p = gridPosFromMouse(mouseX, mouseY);
+        if (p == null) return null;
+
+        Snapshot snap = snapshot;
+        if (snap == null || snap.machines() == null) return null;
+
+        PlacedMachine m = snap.machines().get(p);
+        if (m == null) return null;
+
+        MachineInspectionInfo info;
+        try {
+            info = MachineInspector.inspect(m);
+        } catch (Throwable t) {
+            return null;
+        }
+
+        if (info == null || !info.showInUi()) return null;
+
+        return buildTooltipHtml(info);
+    }
+
+    private static String buildTooltipHtml(MachineInspectionInfo info) {
+        String name = safe(info.machineName());
+        int matter = info.totalMatterCount();
+        int colors = info.totalColorCount();
+        String state = (info.state() != null) ? info.state().name() : "FERMA";
+
+        // Output: preferisci "target output" (che output sta cercando di generare)
+        var outLines = (info.targetOutputLines() != null && !info.targetOutputLines().isEmpty())
+                ? info.targetOutputLines()
+                : info.outputLines();
+
+        StringBuilder sb = new StringBuilder(256);
+        sb.append("<html>");
+        sb.append("<b>").append(esc(name)).append("</b><br/>");
+        sb.append("Matter: ").append(matter).append(" | Colori: ").append(colors).append("<br/>");
+        sb.append("Stato: ").append(esc(state)).append("<br/>");
+
+        sb.append("<br/><u>Input</u><br/>");
+        appendLines(sb, info.inputLines());
+
+        sb.append("<br/><u>Output</u><br/>");
+        appendLines(sb, outLines);
+
+        sb.append("</html>");
+        return sb.toString();
+    }
+
+    private static void appendLines(StringBuilder sb, java.util.List<String> lines) {
+        if (lines == null || lines.isEmpty()) {
+            sb.append("-<br/>");
+            return;
+        }
+        for (String s : lines) {
+            sb.append(esc(s)).append("<br/>");
+        }
+    }
+
+    private static String safe(String s) {
+        return (s == null || s.isBlank()) ? "Unknown" : s;
+    }
+
+    private static String esc(String s) {
+        if (s == null) return "";
+        // HTML escape minimale
+        return s.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;");
+    }
+
     private void hookInputListeners() {
         panel.addMouseMotionListener(new MouseMotionAdapter() {
             @Override public void mouseMoved(MouseEvent e) {
                 boolean changed = updateHoverFromMouse(e.getX(), e.getY());
                 if (changed) repaintCoalesced();
+                // tooltip dinamico: Swing richiama getToolTipText su mouse move,
+                // non serve altro qui.
             }
         });
 
@@ -234,7 +317,6 @@ final class FactoryPanelController {
                 Map<GridPosition, PlacedMachine> snap = gridManager.getSnapshot(u);
                 machines = (snap != null) ? snap : Map.of();
 
-                // ✅ CORREZIONE: nel tuo GridManager è getTerrainResources(UUID)
                 Map<GridPosition, MatterColor> res = gridManager.getTerrainResources(u);
                 resources = (res != null) ? new HashMap<>(res) : Map.of();
             }
