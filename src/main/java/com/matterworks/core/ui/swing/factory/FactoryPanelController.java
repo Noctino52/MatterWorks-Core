@@ -29,6 +29,9 @@ final class FactoryPanelController {
     private final ScheduledExecutorService refreshExec;
     private final ExecutorService commandExec;
 
+    // ✅ NEW: repaint periodico (decoupled dal mouse)
+    private final Timer visualRepaintTimer;
+
     private volatile boolean disposed = false;
 
     private volatile Snapshot snapshot = new Snapshot(Map.of(), Map.of());
@@ -36,9 +39,14 @@ final class FactoryPanelController {
 
     private final IdentityHashMap<PlacedMachine, JsonObject> metaCache = new IdentityHashMap<>();
     private final IdentityHashMap<PlacedMachine, Long> metaCacheNanos = new IdentityHashMap<>();
-    private static final long META_CACHE_TTL_NANOS = 150_000_000L;
+
+    // prima era 150ms; con repaint periodico conviene un TTL un po' più alto
+    private static final long META_CACHE_TTL_NANOS = 500_000_000L; // 0.5s
 
     private volatile boolean repaintQueued = false;
+
+    // ✅ scegli quanto spesso vuoi aggiornare visivamente (250ms = 4fps; 1000ms = 1fps)
+    private static final int VISUAL_REPAINT_MS = 250;
 
     FactoryPanelController(FactoryPanel panel,
                            GridManager gridManager,
@@ -62,12 +70,28 @@ final class FactoryPanelController {
             return t;
         });
 
+        // ✅ heartbeat di repaint: la UI si aggiorna anche se la fingerprint non cambia
+        visualRepaintTimer = new Timer(VISUAL_REPAINT_MS, e -> {
+            if (!disposed && panel.isDisplayable()) {
+                panel.repaint();
+            }
+        });
+        visualRepaintTimer.setRepeats(true);
+        visualRepaintTimer.start();
+
         hookInputListeners();
+
+        // refresh snapshot “strutturale” (macchine piazzate / risorse statiche)
         refreshExec.scheduleWithFixedDelay(this::refreshCacheLoop, 0, 180, TimeUnit.MILLISECONDS);
     }
 
     void dispose() {
         disposed = true;
+
+        try {
+            if (visualRepaintTimer != null) visualRepaintTimer.stop();
+        } catch (Throwable ignored) {}
+
         try { refreshExec.shutdownNow(); } catch (Throwable ignored) {}
         try { commandExec.shutdownNow(); } catch (Throwable ignored) {}
 
@@ -100,6 +124,7 @@ final class FactoryPanelController {
             return meta;
         }
     }
+
     GridManager.PlotAreaInfo getPlotAreaInfo() {
         UUID u = state.playerUuid;
         if (u == null) return null;
@@ -110,7 +135,6 @@ final class FactoryPanelController {
         }
     }
 
-
     void forceRefreshNow() {
         if (disposed) return;
         synchronized (metaCache) {
@@ -118,6 +142,7 @@ final class FactoryPanelController {
             metaCacheNanos.clear();
         }
         refreshOnce(true);
+        repaintCoalesced();
     }
 
     String getInspectionTooltipHtml(int mouseX, int mouseY) {
@@ -192,7 +217,6 @@ final class FactoryPanelController {
 
             @Override public void mouseMoved(MouseEvent e) {
                 if (disposed) return;
-                // se stai panning, ignora hover
                 if (state.isPanning()) return;
 
                 boolean changed = updateHoverFromMouse(e.getX(), e.getY());
@@ -202,11 +226,9 @@ final class FactoryPanelController {
             @Override public void mouseDragged(MouseEvent e) {
                 if (disposed) return;
 
-                // ✅ PAN: trascina con rotella premuta
                 if (state.isPanning()) {
                     state.updatePan(e.getX(), e.getY());
                     repaintCoalesced();
-                    return;
                 }
             }
         });
@@ -216,7 +238,6 @@ final class FactoryPanelController {
             @Override public void mousePressed(MouseEvent e) {
                 if (disposed) return;
 
-                // ✅ middle mouse pressed -> start pan
                 if (SwingUtilities.isMiddleMouseButton(e)) {
                     state.beginPan(e.getX(), e.getY());
                     panel.setCursor(Cursor.getPredefinedCursor(Cursor.MOVE_CURSOR));
@@ -233,17 +254,14 @@ final class FactoryPanelController {
                     state.endPan();
                     panel.setCursor(Cursor.getDefaultCursor());
 
-                    // refresh hover after pan ends
                     boolean changed = updateHoverFromMouse(e.getX(), e.getY());
                     if (changed) repaintCoalesced();
                 }
             }
         });
 
-        // Zoom con rotellina (scroll)
         panel.addMouseWheelListener(e -> {
             if (disposed) return;
-            // Se stai premendo la rotella e “scrolli”, lo zoom va comunque bene
             state.applyWheelZoom(e.getWheelRotation());
             repaintCoalesced();
         });
@@ -254,7 +272,6 @@ final class FactoryPanelController {
                     state.rotate();
                     repaintCoalesced();
                 }
-                // opzionale: HOME per resettare camera
                 if (e.getKeyCode() == KeyEvent.VK_HOME) {
                     state.resetCamera();
                     repaintCoalesced();
@@ -368,11 +385,16 @@ final class FactoryPanelController {
         }
 
         long fp = fingerprint(machines, resources);
-        if (!forceRepaint && fp == lastFingerprint) return;
+        if (!forceRepaint && fp == lastFingerprint) {
+            // ✅ niente repaint qui: ci pensa il timer VISUAL_REPAINT_MS
+            return;
+        }
 
         lastFingerprint = fp;
         snapshot = new Snapshot(machines, resources);
-        repaintCoalesced();
+
+        if (forceRepaint) repaintCoalesced();
+        // altrimenti, ancora una volta: il timer fa repaint “fluido”
     }
 
     private long fingerprint(Map<GridPosition, PlacedMachine> machines, Map<GridPosition, MatterColor> resources) {
