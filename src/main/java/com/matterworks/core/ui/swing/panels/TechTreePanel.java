@@ -11,7 +11,7 @@ import java.util.UUID;
 
 public class TechTreePanel extends JPanel {
 
-    private final IRepository repository;
+    private final IRepository repository; // lasciato per compatibilità: magari lo usi altrove
     private final UUID playerUuid;
     private final GridManager gridManager;
     private final Timer refreshTimer;
@@ -27,7 +27,6 @@ public class TechTreePanel extends JPanel {
 
         renderNodes();
 
-        // Timer di refresh 1 secondo
         refreshTimer = new Timer(1000, e -> {
             if (!this.isDisplayable()) {
                 dispose();
@@ -55,9 +54,7 @@ public class TechTreePanel extends JPanel {
         add(Box.createVerticalStrut(15));
 
         TechManager tm = gridManager.getTechManager();
-        // Use Cache
         PlayerProfile p = gridManager.getCachedProfile(playerUuid);
-
         if (p == null) return;
 
         for (TechManager.TechNode node : tm.getAllNodes()) {
@@ -80,7 +77,8 @@ public class TechTreePanel extends JPanel {
             }
         }
 
-        boolean canAfford = p.getMoney() >= node.cost();
+        double effectiveCost = tm.getEffectiveNodeCost(p, node.id());
+        boolean canAfford = p.isAdmin() || p.getMoney() >= effectiveCost;
 
         JPanel card = new JPanel(new BorderLayout(10, 5));
         card.setBackground(new Color(50, 50, 55));
@@ -90,12 +88,31 @@ public class TechTreePanel extends JPanel {
 
         JPanel info = new JPanel(new GridLayout(2, 1));
         info.setOpaque(false);
+
         JLabel lblName = new JLabel(node.name());
         lblName.setForeground(Color.WHITE);
         lblName.setFont(new Font("SansSerif", Font.BOLD, 13));
 
         String unlockText = String.join(", ", node.unlockItemIds());
-        JLabel lblDetail = new JLabel("Cost: $" + (int)node.cost() + " | Unlocks: " + unlockText);
+
+        String costText;
+        if (p.isAdmin()) {
+            costText = "Cost: $0 (ADMIN) | Unlocks: " + unlockText;
+        } else {
+            int eff = (int) Math.round(effectiveCost);
+            int base = (int) Math.round(node.baseCost());
+            double factor = node.effectiveFactor(p.getPrestigeLevel());
+
+            // Mostra base+fattore solo se cambia davvero (prestigio>0 e mult>0)
+            if (p.getPrestigeLevel() > 0 && node.prestigeCostMult() > 0.0) {
+                costText = "Cost: $" + eff + " (base " + base + " x" + String.format(java.util.Locale.US, "%.2f", factor) + ")"
+                        + " | Unlocks: " + unlockText;
+            } else {
+                costText = "Cost: $" + eff + " | Unlocks: " + unlockText;
+            }
+        }
+
+        JLabel lblDetail = new JLabel(costText);
         lblDetail.setForeground(Color.LIGHT_GRAY);
         lblDetail.setFont(new Font("Monospaced", Font.PLAIN, 10));
 
