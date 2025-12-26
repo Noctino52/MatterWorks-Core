@@ -110,72 +110,136 @@ public class MariaDBAdapter implements IRepository {
         transactionDAO.logTransaction(player, actionType, currency, BigDecimal.valueOf(amount), itemId);
     }
 
+    private boolean columnExists(Connection conn, String table, String column) throws SQLException {
+        String sql =
+                "SELECT 1 " +
+                        "FROM information_schema.COLUMNS " +
+                        "WHERE table_schema = DATABASE() " +
+                        "  AND LOWER(table_name) = LOWER(?) " +
+                        "  AND LOWER(column_name) = LOWER(?) " +
+                        "LIMIT 1";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, table);
+            ps.setString(2, column);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
+    private String firstExistingColumn(Connection conn, String table, String... candidates) throws SQLException {
+        for (String c : candidates) {
+            if (c != null && !c.isBlank() && columnExists(conn, table, c)) return c;
+        }
+        return null;
+    }
+
+
     // ==========================================================
     // CONFIG
     // ==========================================================
     @Override
     public ServerConfig loadServerConfig() {
-        String sqlNew =
-                "SELECT player_start_money, vein_raw, vein_red, vein_blue, vein_yellow, sos_threshold, max_inventory_machine, " +
-                        "Plot_Starting_X, Plot_Starting_Y, Plot_Max_X, Plot_Max_Y, Plot_IncreaseX, Plot_IncreaseY " +
-                        "FROM server_gamestate WHERE id = 1";
 
-        try (Connection conn = dbManager.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sqlNew);
-             ResultSet rs = ps.executeQuery()) {
+        // DEFAULT “hard” se DB è vecchio
+        double playerStartMoney = 1000.0;
+        int veinRaw = 3, veinRed = 1, veinBlue = 1, veinYellow = 0;
+        double sosThreshold = 500.0;
+        int maxInventoryMachine = 64;
 
-            if (rs.next()) {
-                return new ServerConfig(
-                        rs.getDouble("player_start_money"),
-                        rs.getInt("vein_raw"),
-                        rs.getInt("vein_red"),
-                        rs.getInt("vein_blue"),
-                        rs.getInt("vein_yellow"),
-                        rs.getDouble("sos_threshold"),
-                        Math.max(1, rs.getInt("max_inventory_machine")),
+        int plotStartingX = 25, plotStartingY = 25;
+        int plotMaxX = 50, plotMaxY = 50;
+        int plotIncreaseX = 2, plotIncreaseY = 2;
 
-                        Math.max(1, rs.getInt("Plot_Starting_X")),
-                        Math.max(1, rs.getInt("Plot_Starting_Y")),
-                        Math.max(1, rs.getInt("Plot_Max_X")),
-                        Math.max(1, rs.getInt("Plot_Max_Y")),
-                        Math.max(1, rs.getInt("Plot_IncreaseX")),
-                        Math.max(1, rs.getInt("Plot_IncreaseY"))
-                );
+        int prestigeVoidCoinsAdd = 0;
+        int prestigePlotBonus = 0;
+
+        try (Connection conn = dbManager.getConnection()) {
+
+            // colonna max inventory (di solito c’è, ma safe)
+            boolean hasMaxInv = columnExists(conn, "server_gamestate", "max_inventory_machine");
+
+            // plot columns: supporto sia schema nuovo (snake_case) sia legacy (Plot_Starting_X ecc)
+            String colPlotStartX = firstExistingColumn(conn, "server_gamestate",
+                    "plot_start_x", "Plot_Starting_X", "plot_starting_x");
+            String colPlotStartY = firstExistingColumn(conn, "server_gamestate",
+                    "plot_start_y", "Plot_Starting_Y", "plot_starting_y");
+            String colPlotMaxX = firstExistingColumn(conn, "server_gamestate",
+                    "plot_max_x", "Plot_Max_X", "plot_max_x");
+            String colPlotMaxY = firstExistingColumn(conn, "server_gamestate",
+                    "plot_max_y", "Plot_Max_Y", "plot_max_y");
+            String colPlotIncX = firstExistingColumn(conn, "server_gamestate",
+                    "plot_increase_x", "Plot_IncreaseX", "Plot_Increase_X", "plot_increasex");
+            String colPlotIncY = firstExistingColumn(conn, "server_gamestate",
+                    "plot_increase_y", "Plot_IncreaseY", "Plot_Increase_Y", "plot_increasey");
+
+            // prestige columns (nuove)
+            String colPrestigeVoid = firstExistingColumn(conn, "server_gamestate",
+                    "prestige_void_coins_add");
+            String colPrestigePlotBonus = firstExistingColumn(conn, "server_gamestate",
+                    "prestige_plotbonus", "prestige_plot_bonus");
+
+            StringBuilder sql = new StringBuilder();
+            sql.append("SELECT ")
+                    .append("player_start_money, vein_raw, vein_red, vein_blue, vein_yellow, sos_threshold");
+
+            if (hasMaxInv) sql.append(", max_inventory_machine");
+
+            if (colPlotStartX != null) sql.append(", ").append(colPlotStartX).append(" AS plot_start_x");
+            if (colPlotStartY != null) sql.append(", ").append(colPlotStartY).append(" AS plot_start_y");
+            if (colPlotMaxX != null) sql.append(", ").append(colPlotMaxX).append(" AS plot_max_x");
+            if (colPlotMaxY != null) sql.append(", ").append(colPlotMaxY).append(" AS plot_max_y");
+            if (colPlotIncX != null) sql.append(", ").append(colPlotIncX).append(" AS plot_inc_x");
+            if (colPlotIncY != null) sql.append(", ").append(colPlotIncY).append(" AS plot_inc_y");
+
+            if (colPrestigeVoid != null) sql.append(", ").append(colPrestigeVoid).append(" AS prestige_void");
+            if (colPrestigePlotBonus != null) sql.append(", ").append(colPrestigePlotBonus).append(" AS prestige_plotbonus");
+
+            sql.append(" FROM server_gamestate WHERE id = 1");
+
+            try (PreparedStatement ps = conn.prepareStatement(sql.toString());
+                 ResultSet rs = ps.executeQuery()) {
+
+                if (rs.next()) {
+                    playerStartMoney = rs.getDouble("player_start_money");
+                    veinRaw = rs.getInt("vein_raw");
+                    veinRed = rs.getInt("vein_red");
+                    veinBlue = rs.getInt("vein_blue");
+                    veinYellow = rs.getInt("vein_yellow");
+                    sosThreshold = rs.getDouble("sos_threshold");
+
+                    if (hasMaxInv) maxInventoryMachine = Math.max(1, rs.getInt("max_inventory_machine"));
+
+                    if (colPlotStartX != null) plotStartingX = Math.max(1, rs.getInt("plot_start_x"));
+                    if (colPlotStartY != null) plotStartingY = Math.max(1, rs.getInt("plot_start_y"));
+                    if (colPlotMaxX != null) plotMaxX = Math.max(1, rs.getInt("plot_max_x"));
+                    if (colPlotMaxY != null) plotMaxY = Math.max(1, rs.getInt("plot_max_y"));
+                    if (colPlotIncX != null) plotIncreaseX = Math.max(1, rs.getInt("plot_inc_x"));
+                    if (colPlotIncY != null) plotIncreaseY = Math.max(1, rs.getInt("plot_inc_y"));
+
+                    if (colPrestigeVoid != null) prestigeVoidCoinsAdd = Math.max(0, rs.getInt("prestige_void"));
+                    if (colPrestigePlotBonus != null) prestigePlotBonus = Math.max(0, rs.getInt("prestige_plotbonus"));
+                }
             }
 
         } catch (SQLException e) {
-            if (!isUnknownColumn(e)) e.printStackTrace();
-
-            // fallback vecchio schema
-            String sqlOld =
-                    "SELECT player_start_money, vein_raw, vein_red, vein_blue, vein_yellow, sos_threshold " +
-                            "FROM server_gamestate WHERE id = 1";
-
-            try (Connection conn2 = dbManager.getConnection();
-                 PreparedStatement ps2 = conn2.prepareStatement(sqlOld);
-                 ResultSet rs2 = ps2.executeQuery()) {
-
-                if (rs2.next()) {
-                    return new ServerConfig(
-                            rs2.getDouble("player_start_money"),
-                            rs2.getInt("vein_raw"),
-                            rs2.getInt("vein_red"),
-                            rs2.getInt("vein_blue"),
-                            rs2.getInt("vein_yellow"),
-                            rs2.getDouble("sos_threshold"),
-                            64,
-
-                            25, 25, 50, 50, 2, 2
-                    );
-                }
-
-            } catch (SQLException ex) {
-                ex.printStackTrace();
-            }
+            // QUI niente stacktrace “rumorosi”: se DB è rotto davvero lo vediamo altrove.
+            // Se vuoi loggare: System.err.println("loadServerConfig failed: " + e.getMessage());
         }
 
-        return new ServerConfig(1000.0, 3, 1, 1, 0, 500.0, 64, 25, 25, 50, 50, 2, 2);
+        return new ServerConfig(
+                playerStartMoney,
+                veinRaw, veinRed, veinBlue, veinYellow,
+                sosThreshold,
+                maxInventoryMachine,
+                plotStartingX, plotStartingY,
+                plotMaxX, plotMaxY,
+                plotIncreaseX, plotIncreaseY,
+                prestigeVoidCoinsAdd,
+                prestigePlotBonus
+        );
     }
+
 
     @Override
     public com.matterworks.core.model.PlotUnlockState loadPlotUnlockState(UUID ownerId) {

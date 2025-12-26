@@ -190,7 +190,7 @@ public final class TopBarPanel extends JPanel {
         btnReset.setBackground(new Color(180, 0, 0));
 
         // ✅ dummy (per ora non fa niente)
-        btnPrestige = UiKit.button("🟣 PRESTIGE", e -> onPrestigeDummy.run());
+        btnPrestige = UiKit.button("🟣 PRESTIGE", e -> onPrestigeDummy.run()); // (puoi rinominare il parametro, ma non serve)
         btnPrestige.setBackground(new Color(150, 0, 200));
         btnPrestige.setEnabled(false);
         btnPrestige.setToolTipText("Finish the Tech Tree to unlock Prestige.");

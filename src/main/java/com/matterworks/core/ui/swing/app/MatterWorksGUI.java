@@ -9,6 +9,7 @@ import com.matterworks.core.ui.swing.panels.InventoryDebugPanel;
 import com.matterworks.core.ui.swing.panels.StatusBarPanel;
 import com.matterworks.core.ui.swing.panels.TechTreePanel;
 import com.matterworks.core.ui.swing.panels.TopBarPanel;
+import com.matterworks.core.ui.ServerConfig;
 
 import javax.swing.*;
 import java.awt.*;
@@ -109,7 +110,7 @@ public class MatterWorksGUI extends JFrame {
                 this::handleSOS,
                 this::handleSave,
                 this::handleReset,
-                this::handlePrestigeDummy, // ✅ NEW
+                this::handlePrestige, // ✅ NEW
                 this::handleDeletePlayer
         );
 
@@ -178,12 +179,56 @@ public class MatterWorksGUI extends JFrame {
         if (currentPlayerUuid != null) gridManager.touchPlayer(currentPlayerUuid);
     }
 
-    private void handlePrestigeDummy() {
-        JOptionPane.showMessageDialog(this,
-                "Prestige is unlocked! (Dummy button for now)",
+    private void handlePrestige() {
+        UUID u = currentPlayerUuid;
+        if (u == null) return;
+
+        PlayerProfile p = gridManager.getCachedProfile(u);
+        if (p == null) return;
+
+        // sicurezza: anche se il bottone è già disabilitato, ricontrollo
+        boolean unlocked = gridManager.getTechManager().isPrestigeUnlocked(p);
+        if (!unlocked) {
+            JOptionPane.showMessageDialog(this,
+                    "Prestige is locked. Finish the Tech Tree first.",
+                    "Prestige",
+                    JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+
+        ServerConfig cfg = repository.loadServerConfig();
+        int addVoid = Math.max(0, cfg.prestigeVoidCoinsAdd());
+        int plotBonus = Math.max(0, cfg.prestigePlotBonus());
+
+        int nextPrestige = p.getPrestigeLevel() + 1;
+
+        String msg =
+                "Advance to PRESTIGE " + nextPrestige + "?\n\n" +
+                        "This will:\n" +
+                        " - Reset plot, inventory and tech tree\n" +
+                        " - Grant +" + addVoid + " VOID coins\n" +
+                        " - Increase plot size by +" + plotBonus + " X and +" + plotBonus + " Y\n\n" +
+                        "This action cannot be undone.";
+
+        int res = JOptionPane.showConfirmDialog(
+                this,
+                msg,
                 "Prestige",
-                JOptionPane.INFORMATION_MESSAGE);
+                JOptionPane.YES_NO_OPTION
+        );
+
+        if (res != JOptionPane.YES_OPTION) return;
+
+        // disabilito subito per evitare spam-click
+        topBar.setPrestigeButtonEnabled(false);
+
+        gridManager.touchPlayer(u);
+        gridManager.prestigeUser(u);
+
+        factoryPanel.forceRefreshNow();
+        updateEconomyLabelsForce();
     }
+
 
 
     private void buyToolRightClick(String itemId, Integer amount) {

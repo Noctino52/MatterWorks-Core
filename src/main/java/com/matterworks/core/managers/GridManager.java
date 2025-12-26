@@ -385,6 +385,61 @@ public class GridManager {
         });
     }
 
+    public void prestigeUser(UUID ownerId) {
+        if (ownerId == null) return;
+        touchPlayer(ownerId);
+
+        // ricarico config per prendere startMoney + parametri prestige
+        this.serverConfig = repository.loadServerConfig();
+        final double startMoney = serverConfig.startMoney();
+        final int addVoidCoins = Math.max(0, serverConfig.prestigeVoidCoinsAdd());
+        final int plotBonus = Math.max(0, serverConfig.prestigePlotBonus());
+
+        ioExecutor.submit(() -> {
+            saveAndUnloadSpecific(ownerId);
+
+            // 1) reset plot (NON deve toccare unlocked_extra_x/y)
+            repository.clearPlotData(ownerId);
+
+            // 3) incremento dimensione plot (unlocked_extra_x/y) PRIMA del reload (così rigeneri vene su nuova area)
+            try {
+                PlotUnlockState cur = repository.loadPlotUnlockState(ownerId);
+                if (cur == null) cur = PlotUnlockState.zero();
+                PlotUnlockState upd = new PlotUnlockState(
+                        cur.extraX() + plotBonus,
+                        cur.extraY() + plotBonus
+                );
+                repository.updatePlotUnlockState(ownerId, upd);
+            } catch (Throwable t) {
+                t.printStackTrace();
+            }
+
+            // 2) +void coins, +prestige level, reset money + reset tech tree
+            try {
+                PlayerProfile p = repository.loadPlayerProfile(ownerId);
+                if (p != null) {
+                    p.setPrestigeLevel(p.getPrestigeLevel() + 1);
+                    if (addVoidCoins > 0) p.modifyVoidCoins(addVoidCoins);
+
+                    p.setMoney(startMoney);
+                    p.resetTechTreeToDefaults(); // <-- IMPORTANTISSIMO (reset completo tech)
+                    repository.savePlayerProfile(p);
+                    activeProfileCache.put(ownerId, p);
+                }
+            } catch (Throwable t) {
+                t.printStackTrace();
+            }
+
+            // starter inventory (come reset)
+            ensureInventoryAtLeast(ownerId, "conveyor_belt", 10);
+            ensureInventoryAtLeast(ownerId, "drill_mk1", 1);
+            ensureInventoryAtLeast(ownerId, "nexus_core", 1);
+
+            loadPlotSynchronously(ownerId);
+        });
+    }
+
+
 
 
     private void ensureInventoryAtLeast(UUID ownerId, String itemId, int target) {
