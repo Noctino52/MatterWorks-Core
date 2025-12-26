@@ -321,19 +321,44 @@ public class GridManager {
         PlayerProfile p = getCachedProfile(playerId);
         if (p == null) return false;
 
-        // ✅ Nexus non comprabile (il player ne ha uno solo via inventario/reset)
         if (!p.isAdmin() && "nexus_core".equals(itemId)) return false;
 
         if (!techManager.canBuyItem(p, itemId)) return false;
         if (!p.isAdmin() && !checkItemCap(playerId, itemId, amount)) return false;
 
-        double cost = blockRegistry.getStats(itemId).basePrice() * amount;
+        double unit = getEffectiveShopUnitPrice(p, itemId);
+        double cost = unit * amount;
+
         if (!p.isAdmin() && p.getMoney() < cost) return false;
 
         if (!p.isAdmin()) addMoney(playerId, -cost, "ITEM_BUY", itemId);
         repository.modifyInventoryItem(playerId, itemId, amount);
         return true;
     }
+
+    public double getEffectiveShopUnitPrice(UUID playerId, String itemId) {
+        PlayerProfile p = getCachedProfile(playerId);
+        return getEffectiveShopUnitPrice(p, itemId);
+    }
+
+    public double getEffectiveShopUnitPrice(PlayerProfile p, String itemId) {
+        if (itemId == null) return 0.0;
+
+        var stats = blockRegistry.getStats(itemId);
+        double base = (stats != null ? stats.basePrice() : 0.0);
+        double mult = (stats != null ? Math.max(0.0, stats.prestigeCostMult()) : 0.0);
+
+        int prestige = (p != null ? Math.max(0, p.getPrestigeLevel()) : 0);
+
+        double factor = 1.0 + (prestige * mult);
+        double out = base * factor;
+
+        if (Double.isNaN(out) || Double.isInfinite(out)) return base;
+        return Math.max(0.0, out);
+    }
+
+
+
 
 
     public boolean attemptBailout(UUID ownerId) {

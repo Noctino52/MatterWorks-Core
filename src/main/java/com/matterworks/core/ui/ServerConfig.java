@@ -16,11 +16,10 @@ public record ServerConfig(
         int plotIncreaseX,
         int plotIncreaseY,
 
-        // ✅ PRESTIGE (nuovo)
         int prestigeVoidCoinsAdd,
-        int prestigePlotBonus
+        int prestigePlotBonus,
+        double prestigeSellK
 ) {
-    // Backward-compat: vecchio codice chiama startMoney()
     public double startMoney() {
         return playerStartMoney;
     }

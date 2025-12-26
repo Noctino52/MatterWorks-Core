@@ -112,11 +112,10 @@ public class MariaDBAdapter implements IRepository {
 
     private boolean columnExists(Connection conn, String table, String column) throws SQLException {
         String sql =
-                "SELECT 1 " +
-                        "FROM information_schema.COLUMNS " +
+                "SELECT 1 FROM information_schema.COLUMNS " +
                         "WHERE table_schema = DATABASE() " +
-                        "  AND LOWER(table_name) = LOWER(?) " +
-                        "  AND LOWER(column_name) = LOWER(?) " +
+                        "AND LOWER(table_name) = LOWER(?) " +
+                        "AND LOWER(column_name) = LOWER(?) " +
                         "LIMIT 1";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, table);
@@ -141,7 +140,7 @@ public class MariaDBAdapter implements IRepository {
     @Override
     public ServerConfig loadServerConfig() {
 
-        // DEFAULT “hard” se DB è vecchio
+        // defaults “safe”
         double playerStartMoney = 1000.0;
         int veinRaw = 3, veinRed = 1, veinBlue = 1, veinYellow = 0;
         double sosThreshold = 500.0;
@@ -153,13 +152,13 @@ public class MariaDBAdapter implements IRepository {
 
         int prestigeVoidCoinsAdd = 0;
         int prestigePlotBonus = 0;
+        double prestigeSellK = 0.0;
 
         try (Connection conn = dbManager.getConnection()) {
 
-            // colonna max inventory (di solito c’è, ma safe)
             boolean hasMaxInv = columnExists(conn, "server_gamestate", "max_inventory_machine");
 
-            // plot columns: supporto sia schema nuovo (snake_case) sia legacy (Plot_Starting_X ecc)
+            // plot columns: legacy + snake_case
             String colPlotStartX = firstExistingColumn(conn, "server_gamestate",
                     "plot_start_x", "Plot_Starting_X", "plot_starting_x");
             String colPlotStartY = firstExistingColumn(conn, "server_gamestate",
@@ -173,11 +172,10 @@ public class MariaDBAdapter implements IRepository {
             String colPlotIncY = firstExistingColumn(conn, "server_gamestate",
                     "plot_increase_y", "Plot_IncreaseY", "Plot_Increase_Y", "plot_increasey");
 
-            // prestige columns (nuove)
-            String colPrestigeVoid = firstExistingColumn(conn, "server_gamestate",
-                    "prestige_void_coins_add");
-            String colPrestigePlotBonus = firstExistingColumn(conn, "server_gamestate",
-                    "prestige_plotbonus", "prestige_plot_bonus");
+            // prestige columns
+            String colPrestigeVoid = firstExistingColumn(conn, "server_gamestate", "prestige_void_coins_add");
+            String colPrestigePlotBonus = firstExistingColumn(conn, "server_gamestate", "prestige_plotbonus", "prestige_plot_bonus");
+            String colPrestigeSellK = firstExistingColumn(conn, "server_gamestate", "prestige_sell_k");
 
             StringBuilder sql = new StringBuilder();
             sql.append("SELECT ")
@@ -192,8 +190,9 @@ public class MariaDBAdapter implements IRepository {
             if (colPlotIncX != null) sql.append(", ").append(colPlotIncX).append(" AS plot_inc_x");
             if (colPlotIncY != null) sql.append(", ").append(colPlotIncY).append(" AS plot_inc_y");
 
-            if (colPrestigeVoid != null) sql.append(", ").append(colPrestigeVoid).append(" AS prestige_void");
+            if (colPrestigeVoid != null) sql.append(", ").append(colPrestigeVoid).append(" AS prestige_void_coins_add");
             if (colPrestigePlotBonus != null) sql.append(", ").append(colPrestigePlotBonus).append(" AS prestige_plotbonus");
+            if (colPrestigeSellK != null) sql.append(", ").append(colPrestigeSellK).append(" AS prestige_sell_k");
 
             sql.append(" FROM server_gamestate WHERE id = 1");
 
@@ -217,14 +216,14 @@ public class MariaDBAdapter implements IRepository {
                     if (colPlotIncX != null) plotIncreaseX = Math.max(1, rs.getInt("plot_inc_x"));
                     if (colPlotIncY != null) plotIncreaseY = Math.max(1, rs.getInt("plot_inc_y"));
 
-                    if (colPrestigeVoid != null) prestigeVoidCoinsAdd = Math.max(0, rs.getInt("prestige_void"));
+                    if (colPrestigeVoid != null) prestigeVoidCoinsAdd = Math.max(0, rs.getInt("prestige_void_coins_add"));
                     if (colPrestigePlotBonus != null) prestigePlotBonus = Math.max(0, rs.getInt("prestige_plotbonus"));
+                    if (colPrestigeSellK != null) prestigeSellK = Math.max(0.0, rs.getDouble("prestige_sell_k"));
                 }
             }
 
-        } catch (SQLException e) {
-            // QUI niente stacktrace “rumorosi”: se DB è rotto davvero lo vediamo altrove.
-            // Se vuoi loggare: System.err.println("loadServerConfig failed: " + e.getMessage());
+        } catch (SQLException ignored) {
+            // niente spam stacktrace: default safe
         }
 
         return new ServerConfig(
@@ -236,9 +235,11 @@ public class MariaDBAdapter implements IRepository {
                 plotMaxX, plotMaxY,
                 plotIncreaseX, plotIncreaseY,
                 prestigeVoidCoinsAdd,
-                prestigePlotBonus
+                prestigePlotBonus,
+                prestigeSellK
         );
     }
+
 
 
     @Override

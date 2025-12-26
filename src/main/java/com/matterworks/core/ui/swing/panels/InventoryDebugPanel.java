@@ -4,30 +4,12 @@ import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.managers.GridManager;
 import com.matterworks.core.ports.IRepository;
 
-import javax.swing.BorderFactory;
-import javax.swing.Box;
-import javax.swing.BoxLayout;
-import javax.swing.JButton;
-import javax.swing.JLabel;
-import javax.swing.JPanel;
-import javax.swing.SwingUtilities;
+import javax.swing.*;
 import javax.swing.Timer;
-import java.awt.BorderLayout;
-import java.awt.Color;
-import java.awt.Dimension;
-import java.awt.Font;
-import java.awt.GridLayout;
-import java.awt.Insets;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
+import java.awt.*;
+import java.util.*;
 import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.Set;
-import java.util.UUID;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.*;
 
 public class InventoryDebugPanel extends JPanel {
 
@@ -48,7 +30,6 @@ public class InventoryDebugPanel extends JPanel {
             "nexus_core"
     );
 
-    // ✅ Nexus non comprabile/vendibile (niente + / -)
     private static final Set<String> NON_TRADEABLE = Set.of("nexus_core");
 
     private final IRepository repository;
@@ -72,15 +53,13 @@ public class InventoryDebugPanel extends JPanel {
         final JLabel label;
         final JButton btnRem;
         final JButton btnAdd;
-        final double price;
         final boolean tradeable;
 
-        RowUI(String itemId, JLabel label, JButton btnRem, JButton btnAdd, double price, boolean tradeable) {
+        RowUI(String itemId, JLabel label, JButton btnRem, JButton btnAdd, boolean tradeable) {
             this.itemId = itemId;
             this.label = label;
             this.btnRem = btnRem;
             this.btnAdd = btnAdd;
-            this.price = price;
             this.tradeable = tradeable;
         }
     }
@@ -104,8 +83,8 @@ public class InventoryDebugPanel extends JPanel {
         List<String> itemIds = gridManager.getBlockRegistry().getShopMachineIdsFromDb();
         if (itemIds == null || itemIds.isEmpty()) itemIds = FALLBACK_ITEMS;
 
-        for (String id : itemIds) {
-            add(createItemRow(id, isPlayer));
+        for (String itemId : itemIds) {
+            add(createItemRow(itemId, isPlayer));
             add(Box.createVerticalStrut(8));
         }
 
@@ -130,17 +109,9 @@ public class InventoryDebugPanel extends JPanel {
         row.setOpaque(false);
         row.setMaximumSize(new Dimension(350, 42));
 
-        double price = gridManager.getBlockRegistry().getPrice(itemId);
-
         JLabel lblInfo = new JLabel(itemId + ": 0");
         lblInfo.setForeground(Color.WHITE);
         lblInfo.setFont(new Font("Monospaced", Font.BOLD, 12));
-
-        if (isPlayer && tradeable) {
-            lblInfo.setToolTipText("Price: $" + String.format(Locale.US, "%.0f", price));
-        } else {
-            lblInfo.setToolTipText(null);
-        }
 
         JPanel buttons = new JPanel(new GridLayout(1, 2, 6, 0));
         buttons.setOpaque(false);
@@ -153,7 +124,7 @@ public class InventoryDebugPanel extends JPanel {
         setupTinyButton(btnRem, new Color(120, 50, 50));
         setupTinyButton(btnAdd, new Color(50, 110, 50));
 
-        // ✅ Nexus: niente +/-
+        // Nexus: niente +/- (solo visual)
         if (!tradeable) {
             btnRem.setVisible(false);
             btnAdd.setVisible(false);
@@ -166,25 +137,20 @@ public class InventoryDebugPanel extends JPanel {
             row.add(lblInfo, BorderLayout.CENTER);
             row.add(buttons, BorderLayout.EAST);
 
-            rows.put(itemId, new RowUI(itemId, lblInfo, btnRem, btnAdd, price, false));
+            rows.put(itemId, new RowUI(itemId, lblInfo, btnRem, btnAdd, false));
             return row;
         }
 
-        if (isPlayer) btnAdd.setToolTipText("Buy for $" + String.format(Locale.US, "%.0f", price));
-
         btnAdd.addActionListener(e -> runAsyncButton(btnAdd, () -> {
-            if (isPlayer) {
-                gridManager.buyItem(playerUuid, itemId, 1);
-            } else {
-                repository.modifyInventoryItem(playerUuid, itemId, 1);
-            }
+            if (isPlayer) gridManager.buyItem(playerUuid, itemId, 1);
+            else repository.modifyInventoryItem(playerUuid, itemId, 1);
         }, true));
 
         btnRem.addActionListener(e -> runAsyncButton(btnRem, () -> {
             if (isPlayer) {
                 int have = repository.getInventoryItemCount(playerUuid, itemId);
                 if (have > 0) {
-                    double refund = gridManager.getBlockRegistry().getPrice(itemId) * 0.5;
+                    double refund = gridManager.getEffectiveShopUnitPrice(playerUuid, itemId) * 0.5;
                     gridManager.addMoney(playerUuid, refund, "ITEM_SELL", itemId);
                     repository.modifyInventoryItem(playerUuid, itemId, -1);
                 }
@@ -199,7 +165,7 @@ public class InventoryDebugPanel extends JPanel {
         row.add(lblInfo, BorderLayout.CENTER);
         row.add(buttons, BorderLayout.EAST);
 
-        rows.put(itemId, new RowUI(itemId, lblInfo, btnRem, btnAdd, price, true));
+        rows.put(itemId, new RowUI(itemId, lblInfo, btnRem, btnAdd, true));
         return row;
     }
 
@@ -246,9 +212,10 @@ public class InventoryDebugPanel extends JPanel {
 
         try {
             exec.submit(() -> {
+
                 Map<String, Integer> counts = new HashMap<>();
-                for (String id : rows.keySet()) {
-                    counts.put(id, repository.getInventoryItemCount(playerUuid, id));
+                for (String itemId : rows.keySet()) {
+                    counts.put(itemId, repository.getInventoryItemCount(playerUuid, itemId));
                 }
 
                 PlayerProfile p = gridManager.getCachedProfile(playerUuid);
@@ -257,15 +224,18 @@ public class InventoryDebugPanel extends JPanel {
 
                 Map<String, Boolean> canBuy = new HashMap<>();
                 Map<String, Boolean> canAfford = new HashMap<>();
+                Map<String, Double> pricesNow = new HashMap<>();
 
                 if (isPlayer && p != null) {
-                    for (String id : rows.keySet()) {
-                        boolean okTech = gridManager.getTechManager().canBuyItem(p, id);
-                        canBuy.put(id, okTech);
+                    for (String itemId : rows.keySet()) {
+                        boolean okTech = gridManager.getTechManager().canBuyItem(p, itemId);
+                        canBuy.put(itemId, okTech);
 
-                        RowUI r = rows.get(id);
-                        boolean afford = isAdmin || money >= (r != null ? r.price : 0.0);
-                        canAfford.put(id, afford);
+                        double priceNow = gridManager.getEffectiveShopUnitPrice(p, itemId);
+                        pricesNow.put(itemId, priceNow);
+
+                        boolean affordNow = isAdmin || money >= priceNow;
+                        canAfford.put(itemId, affordNow);
                     }
                 }
 
@@ -286,6 +256,7 @@ public class InventoryDebugPanel extends JPanel {
 
                         boolean unlocked = canBuy.getOrDefault(r.itemId, false);
                         boolean afford = canAfford.getOrDefault(r.itemId, true);
+                        double priceNow = pricesNow.getOrDefault(r.itemId, 0.0);
 
                         String suffix = unlocked ? "" : "  [LOCKED]";
                         r.label.setText(r.itemId + ": " + c + suffix);
@@ -299,8 +270,9 @@ public class InventoryDebugPanel extends JPanel {
                         r.btnAdd.setEnabled(unlocked && afford);
 
                         if (!unlocked) r.btnAdd.setToolTipText("Locked: unlock via Tech Tree");
-                        else r.btnAdd.setToolTipText("Buy for $" + String.format(Locale.US, "%.0f", r.price));
+                        else r.btnAdd.setToolTipText("Buy for $" + String.format(Locale.US, "%.0f", priceNow));
 
+                        r.label.setToolTipText("Price: $" + String.format(Locale.US, "%.0f", priceNow));
                         r.btnRem.setEnabled(c > 0);
                     }
                 });

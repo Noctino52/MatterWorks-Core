@@ -3,8 +3,10 @@ package com.matterworks.core.domain.shop;
 import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.matter.MatterPayload;
 import com.matterworks.core.domain.matter.MatterShape;
+import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.managers.GridManager;
 import com.matterworks.core.ports.IRepository;
+import com.matterworks.core.ui.ServerConfig;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -36,9 +38,10 @@ public class MarketManager {
     }
 
     public void sellItem(MatterPayload item, UUID sellerId) {
-        if (item == null) return;
+        if (item == null || sellerId == null) return;
 
-        double value = calculateValue(item);
+        double value = calculateBaseValue(item);
+        value = applyPrestigeSellMultiplier(value, sellerId);
 
         gridManager.addMoney(
                 sellerId,
@@ -52,19 +55,31 @@ public class MarketManager {
         String effTxt = formatEffects(item);
 
         System.out.println("💰 MARKET: Venduto " + shapeTxt + " (" + colorTxt + ") " + effTxt
-                + " per $" + String.format("%.2f", value));
+                + " per $" + String.format(java.util.Locale.US, "%.2f", value));
+    }
+
+    private double applyPrestigeSellMultiplier(double value, UUID sellerId) {
+        PlayerProfile p = gridManager.getCachedProfile(sellerId);
+        int prestige = (p != null ? Math.max(0, p.getPrestigeLevel()) : 0);
+        if (prestige <= 0) return value;
+
+        ServerConfig cfg = repository.loadServerConfig();
+        double k = (cfg != null ? Math.max(0.0, cfg.prestigeSellK()) : 0.0);
+        if (k <= 0.0) return value;
+
+        double factor = 1.0 + (prestige * k);
+        double out = value * factor;
+        if (Double.isNaN(out) || Double.isInfinite(out)) return value;
+        return Math.max(0.0, out);
     }
 
     private String formatEffects(MatterPayload item) {
-        if (item.effects() == null || item.effects().isEmpty()) {
-            return "[NO_EFFECT]";
-        }
-        // per design nuovo è 1 solo effetto, ma gestisco anche eventuali legacy
+        if (item.effects() == null || item.effects().isEmpty()) return "[NO_EFFECT]";
         String joined = item.effects().stream().map(Enum::name).collect(Collectors.joining("+"));
         return "[" + joined + "]";
     }
 
-    private double calculateValue(MatterPayload item) {
+    private double calculateBaseValue(MatterPayload item) {
         double base = basePrices.getOrDefault(item.color(), 0.5);
         double multiplier = 1.0;
         if (item.shape() == MatterShape.SPHERE) multiplier = 1.5;
