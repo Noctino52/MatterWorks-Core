@@ -20,13 +20,14 @@ public final class TopBarPanel extends JPanel {
     private final JLabel voidCoinsLabel = UiKit.label("VOID: ---", new Color(190, 0, 220), 14);
     private final JLabel prestigeLabel = UiKit.label("PRESTIGE: ---", new Color(0, 200, 255), 14);
 
+    private final JButton btnPrestige; // ✅ NEW
+
     private final JSpinner layerSpinner;
     private volatile boolean suppressLayerEvents = false;
     private volatile int lastLayerValue = 0;
 
-    // Heights per allineare i controlli (Structure/Y) alle righe bottoni
-    private static final int SECTION_LABEL_H = 14;  // altezza label "LOGISTICS"/"PROCESSING"
-    private static final int ROW_GAP_H = 2;         // gap tra row1 e rowHeader2 (Box.createVerticalStrut(2) precedente)
+    private static final int SECTION_LABEL_H = 14;
+    private static final int ROW_GAP_H = 2;
 
     public TopBarPanel(
             Consumer<String> onSelectTool,
@@ -36,6 +37,7 @@ public final class TopBarPanel extends JPanel {
             Runnable onSOS,
             Runnable onSave,
             Runnable onReset,
+            Runnable onPrestigeDummy, // ✅ NEW
             Runnable onDelete
     ) {
         super(new BorderLayout());
@@ -62,7 +64,6 @@ public final class TopBarPanel extends JPanel {
         JPanel leftOuter = new JPanel(new BorderLayout(10, 0));
         leftOuter.setOpaque(false);
 
-        // ========== MACHINES: 2 ROWS ==========
         JPanel machines2Rows = new JPanel();
         machines2Rows.setOpaque(false);
         machines2Rows.setLayout(new BoxLayout(machines2Rows, BoxLayout.Y_AXIS));
@@ -85,22 +86,21 @@ public final class TopBarPanel extends JPanel {
         JPanel row2 = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 5));
         row2.setOpaque(false);
 
-        // ---- ROW 1: logistics + nexus ----
         row1.add(toolButton("⛏ Drill", "drill_mk1", onSelectTool, onBuyToolRightClick));
         row1.add(toolButton("➡ Belt", "conveyor_belt", onSelectTool, onBuyToolRightClick));
         row1.add(vSep());
 
         row1.add(toolButton("🔀 Split", "splitter", onSelectTool, onBuyToolRightClick));
-        row1.add(toolButton("🔗 Merge", "merger", onSelectTool, onBuyToolRightClick));
+        row1.add(toolButton("🔁 Merge", "merger", onSelectTool, onBuyToolRightClick));
         row1.add(vSep());
 
         row1.add(toolButton("⬆ Lift", "lift", onSelectTool, onBuyToolRightClick));
         row1.add(toolButton("⬇ Drop", "dropper", onSelectTool, onBuyToolRightClick));
         row1.add(vSep());
 
-        row1.add(toolButton("🌀 Nexus", "nexus_core", onSelectTool, onBuyToolRightClick));
+        // ✅ Nexus selezionabile, buy disattivato (right click)
+        row1.add(toolButton("🌌 Nexus", "nexus_core", onSelectTool, null));
 
-        // ---- ROW 2: processors + effects ----
         row2.add(toolButton("🎨 Chroma", "chromator", onSelectTool, onBuyToolRightClick));
         row2.add(toolButton("🧪 Mixer", "color_mixer", onSelectTool, onBuyToolRightClick));
         row2.add(vSep());
@@ -119,12 +119,10 @@ public final class TopBarPanel extends JPanel {
         machines2Rows.add(rowHeader2);
         machines2Rows.add(row2);
 
-        // ========== CONTROLS: allineati alle 2 righe bottoni ==========
         JPanel controls = new JPanel();
         controls.setOpaque(false);
         controls.setLayout(new BoxLayout(controls, BoxLayout.Y_AXIS));
 
-        // Spacer per allinearsi sotto "LOGISTICS"
         controls.add(Box.createVerticalStrut(SECTION_LABEL_H));
 
         JButton btnStructure = UiKit.button("🧱 Structure", e -> {
@@ -140,7 +138,6 @@ public final class TopBarPanel extends JPanel {
 
         controls.add(btnStructure);
 
-        // Spacer per “gap + header2”
         controls.add(Box.createVerticalStrut(ROW_GAP_H + SECTION_LABEL_H));
 
         JPanel yPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
@@ -179,8 +176,8 @@ public final class TopBarPanel extends JPanel {
         leftOuter.add(machines2Rows, BorderLayout.CENTER);
         leftOuter.add(controls, BorderLayout.EAST);
 
-        // ========== RIGHT SYSTEM BUTTONS ==========
-        JPanel rightSystem = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 8));
+        // ========== RIGHT SYSTEM BUTTONS (con Prestige sotto Reset) ==========
+        JPanel rightSystem = new JPanel(new GridBagLayout());
         rightSystem.setOpaque(false);
 
         JButton btnSOS = UiKit.button("🆘 SOS", e -> onSOS.run());
@@ -192,15 +189,31 @@ public final class TopBarPanel extends JPanel {
         JButton btnReset = UiKit.button("♻ RESET", e -> onReset.run());
         btnReset.setBackground(new Color(180, 0, 0));
 
+        // ✅ dummy (per ora non fa niente)
+        btnPrestige = UiKit.button("🟣 PRESTIGE", e -> onPrestigeDummy.run());
+        btnPrestige.setBackground(new Color(150, 0, 200));
+        btnPrestige.setEnabled(false);
+        btnPrestige.setToolTipText("Finish the Tech Tree to unlock Prestige.");
+
         JButton btnDelete = UiKit.button("🗑 DELETE", e -> onDelete.run());
         btnDelete.setBackground(Color.BLACK);
         btnDelete.setForeground(Color.RED);
         btnDelete.setBorder(BorderFactory.createLineBorder(Color.RED, 1));
 
-        rightSystem.add(btnSOS);
-        rightSystem.add(btnSave);
-        rightSystem.add(btnReset);
-        rightSystem.add(btnDelete);
+        GridBagConstraints c = new GridBagConstraints();
+        c.gridy = 0;
+        c.insets = new Insets(0, 6, 0, 6);
+        c.anchor = GridBagConstraints.EAST;
+
+        c.gridx = 0; rightSystem.add(btnSOS, c);
+        c.gridx = 1; rightSystem.add(btnSave, c);
+        c.gridx = 2; rightSystem.add(btnReset, c);
+        c.gridx = 3; rightSystem.add(btnDelete, c);
+
+        c.gridy = 1;
+        c.gridx = 2;
+        c.insets = new Insets(4, 6, 0, 6);
+        rightSystem.add(btnPrestige, c);
 
         toolbar.add(leftOuter, BorderLayout.CENTER);
         toolbar.add(rightSystem, BorderLayout.EAST);
@@ -214,6 +227,11 @@ public final class TopBarPanel extends JPanel {
     public JLabel getRoleLabel() { return roleLabel; }
     public JLabel getVoidCoinsLabel() { return voidCoinsLabel; }
     public JLabel getPrestigeLabel() { return prestigeLabel; }
+
+    // ✅ NEW: abilita/disabilita bottone prestige
+    public void setPrestigeButtonEnabled(boolean enabled) {
+        btnPrestige.setEnabled(enabled);
+    }
 
     public void setLayerValue(int y) {
         int val = Math.max(0, Math.min(255, y));
@@ -249,7 +267,8 @@ public final class TopBarPanel extends JPanel {
         JButton btn = UiKit.button(text, e -> onSelectTool.accept(itemId));
         btn.addMouseListener(new MouseAdapter() {
             @Override public void mousePressed(MouseEvent e) {
-                if (SwingUtilities.isRightMouseButton(e)) {
+                // ✅ null-safe
+                if (SwingUtilities.isRightMouseButton(e) && onBuyToolRightClick != null) {
                     onBuyToolRightClick.accept(itemId, 1);
                 }
             }

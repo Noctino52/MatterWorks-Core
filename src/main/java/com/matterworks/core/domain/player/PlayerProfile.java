@@ -14,6 +14,7 @@ public class PlayerProfile {
     private int voidCoins;
     private int prestigeLevel;
     private PlayerRank rank;
+
     private Set<String> unlockedTechs = new HashSet<>();
 
     public PlayerProfile(UUID playerId) {
@@ -22,14 +23,18 @@ public class PlayerProfile {
         this.voidCoins = 0;
         this.prestigeLevel = 0;
         this.rank = PlayerRank.PLAYER;
+        resetTechTreeToDefaults();
     }
 
     public boolean isAdmin() { return rank == PlayerRank.ADMIN; }
     public PlayerRank getRank() { return rank; }
     public void setRank(PlayerRank rank) { this.rank = rank; }
+
     public UUID getPlayerId() { return playerId; }
+
     public String getUsername() { return username; }
     public void setUsername(String username) { this.username = username; }
+
     public double getMoney() { return money; }
     public void setMoney(double money) { this.money = money; }
     public void modifyMoney(double amount) { this.money += amount; }
@@ -41,13 +46,32 @@ public class PlayerProfile {
     public int getPrestigeLevel() { return prestigeLevel; }
     public void setPrestigeLevel(int level) { this.prestigeLevel = level; }
 
+    public Set<String> getUnlockedTechs() { return unlockedTechs; }
+
+    public void addTech(String techId) {
+        if (techId == null || techId.isBlank()) return;
+        if (unlockedTechs == null) unlockedTechs = new HashSet<>();
+        unlockedTechs.add(techId);
+    }
+
+    public boolean hasTech(String techId) {
+        if (techId == null || techId.isBlank()) return false;
+        return unlockedTechs != null && unlockedTechs.contains(techId);
+    }
+
+    public void clearUnlockedTechs() {
+        if (unlockedTechs == null) unlockedTechs = new HashSet<>();
+        else unlockedTechs.clear();
+    }
+
+    /** ✅ Reset “pulito”: nessuna tech di base obbligatoria */
+    public void resetTechTreeToDefaults() {
+        clearUnlockedTechs();
+    }
+
     @Override
     public String toString() {
         String shortId = playerId.toString().substring(0, 8);
         return username + " (" + shortId + ")";
     }
-
-    public Set<String> getUnlockedTechs() { return unlockedTechs; }
-    public void addTech(String techId) { this.unlockedTechs.add(techId); }
-    public boolean hasTech(String techId) { return unlockedTechs.contains(techId); }
 }

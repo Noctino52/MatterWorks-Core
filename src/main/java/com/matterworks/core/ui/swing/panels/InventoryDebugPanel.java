@@ -1,36 +1,36 @@
-// FILE: src/main/java/com/matterworks/core/infrastructure/swing/InventoryDebugPanel.java
 package com.matterworks.core.ui.swing.panels;
 
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.managers.GridManager;
 import com.matterworks.core.ports.IRepository;
 
-import javax.swing.*;
+import javax.swing.BorderFactory;
+import javax.swing.Box;
+import javax.swing.BoxLayout;
+import javax.swing.JButton;
+import javax.swing.JLabel;
+import javax.swing.JPanel;
+import javax.swing.SwingUtilities;
 import javax.swing.Timer;
-import java.awt.*;
+import java.awt.BorderLayout;
+import java.awt.Color;
+import java.awt.Dimension;
+import java.awt.Font;
+import java.awt.GridLayout;
+import java.awt.Insets;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.*;
-import java.util.concurrent.*;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 
 public class InventoryDebugPanel extends JPanel {
 
-    private final IRepository repository;
-    private final UUID playerUuid;
-    private final GridManager gridManager;
-    private final Runnable onEconomyMaybeChanged;
-
-    private final Map<String, RowUI> rows = new LinkedHashMap<>();
-    private final Timer refreshTimer;
-
-    private final ExecutorService exec = Executors.newSingleThreadExecutor(r -> {
-        Thread t = new Thread(r, "mw-inventory-panel-worker");
-        t.setDaemon(true);
-        return t;
-    });
-
-    private volatile boolean disposed = false;
-
-    // fallback se DB non ha ancora definizioni (non rompo nulla)
     private static final List<String> FALLBACK_ITEMS = List.of(
             "drill_mk1",
             "conveyor_belt",
@@ -38,16 +38,34 @@ public class InventoryDebugPanel extends JPanel {
             "merger",
             "lift",
             "dropper",
-            "nexus_core",
             "chromator",
             "color_mixer",
             "smoothing",
             "cutting",
-            // nuovi effetti
             "shiny_polisher",
             "blazing_forge",
-            "glitch_distorter"
+            "glitch_distorter",
+            "nexus_core"
     );
+
+    // ✅ Nexus non comprabile/vendibile (niente + / -)
+    private static final Set<String> NON_TRADEABLE = Set.of("nexus_core");
+
+    private final IRepository repository;
+    private final UUID playerUuid;
+    private final GridManager gridManager;
+    private final Runnable onEconomyMaybeChanged;
+
+    private final Map<String, RowUI> rows = new LinkedHashMap<>();
+
+    private final ExecutorService exec = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "mw-inventory-panel");
+        t.setDaemon(true);
+        return t;
+    });
+
+    private Timer refreshTimer;
+    private volatile boolean disposed = false;
 
     private static final class RowUI {
         final String itemId;
@@ -55,13 +73,15 @@ public class InventoryDebugPanel extends JPanel {
         final JButton btnRem;
         final JButton btnAdd;
         final double price;
+        final boolean tradeable;
 
-        RowUI(String itemId, JLabel label, JButton btnRem, JButton btnAdd, double price) {
+        RowUI(String itemId, JLabel label, JButton btnRem, JButton btnAdd, double price, boolean tradeable) {
             this.itemId = itemId;
             this.label = label;
             this.btnRem = btnRem;
             this.btnAdd = btnAdd;
             this.price = price;
+            this.tradeable = tradeable;
         }
     }
 
@@ -84,7 +104,6 @@ public class InventoryDebugPanel extends JPanel {
         List<String> itemIds = gridManager.getBlockRegistry().getShopMachineIdsFromDb();
         if (itemIds == null || itemIds.isEmpty()) itemIds = FALLBACK_ITEMS;
 
-        // costruzione righe
         for (String id : itemIds) {
             add(createItemRow(id, isPlayer));
             add(Box.createVerticalStrut(8));
@@ -105,6 +124,8 @@ public class InventoryDebugPanel extends JPanel {
     }
 
     private JPanel createItemRow(String itemId, boolean isPlayer) {
+        boolean tradeable = !NON_TRADEABLE.contains(itemId);
+
         JPanel row = new JPanel(new BorderLayout(10, 0));
         row.setOpaque(false);
         row.setMaximumSize(new Dimension(350, 42));
@@ -115,8 +136,10 @@ public class InventoryDebugPanel extends JPanel {
         lblInfo.setForeground(Color.WHITE);
         lblInfo.setFont(new Font("Monospaced", Font.BOLD, 12));
 
-        if (isPlayer) {
-            lblInfo.setToolTipText("Price: $" + price);
+        if (isPlayer && tradeable) {
+            lblInfo.setToolTipText("Price: $" + String.format(Locale.US, "%.0f", price));
+        } else {
+            lblInfo.setToolTipText(null);
         }
 
         JPanel buttons = new JPanel(new GridLayout(1, 2, 6, 0));
@@ -130,12 +153,28 @@ public class InventoryDebugPanel extends JPanel {
         setupTinyButton(btnRem, new Color(120, 50, 50));
         setupTinyButton(btnAdd, new Color(50, 110, 50));
 
-        if (isPlayer) btnAdd.setToolTipText("Buy for $" + price);
+        // ✅ Nexus: niente +/-
+        if (!tradeable) {
+            btnRem.setVisible(false);
+            btnAdd.setVisible(false);
+            btnRem.setEnabled(false);
+            btnAdd.setEnabled(false);
+
+            buttons.add(btnRem);
+            buttons.add(btnAdd);
+
+            row.add(lblInfo, BorderLayout.CENTER);
+            row.add(buttons, BorderLayout.EAST);
+
+            rows.put(itemId, new RowUI(itemId, lblInfo, btnRem, btnAdd, price, false));
+            return row;
+        }
+
+        if (isPlayer) btnAdd.setToolTipText("Buy for $" + String.format(Locale.US, "%.0f", price));
 
         btnAdd.addActionListener(e -> runAsyncButton(btnAdd, () -> {
             if (isPlayer) {
-                boolean ok = gridManager.buyItem(playerUuid, itemId, 1);
-                if (!ok) System.out.println("Purchase failed: " + itemId);
+                gridManager.buyItem(playerUuid, itemId, 1);
             } else {
                 repository.modifyInventoryItem(playerUuid, itemId, 1);
             }
@@ -160,7 +199,7 @@ public class InventoryDebugPanel extends JPanel {
         row.add(lblInfo, BorderLayout.CENTER);
         row.add(buttons, BorderLayout.EAST);
 
-        rows.put(itemId, new RowUI(itemId, lblInfo, btnRem, btnAdd, price));
+        rows.put(itemId, new RowUI(itemId, lblInfo, btnRem, btnAdd, price, true));
         return row;
     }
 
@@ -207,7 +246,6 @@ public class InventoryDebugPanel extends JPanel {
 
         try {
             exec.submit(() -> {
-                // snapshot counts
                 Map<String, Integer> counts = new HashMap<>();
                 for (String id : rows.keySet()) {
                     counts.put(id, repository.getInventoryItemCount(playerUuid, id));
@@ -217,7 +255,6 @@ public class InventoryDebugPanel extends JPanel {
                 double money = (p != null ? p.getMoney() : 0.0);
                 boolean isAdmin = (p != null && p.isAdmin());
 
-                // snapshot lock/afford
                 Map<String, Boolean> canBuy = new HashMap<>();
                 Map<String, Boolean> canAfford = new HashMap<>();
 
@@ -225,7 +262,10 @@ public class InventoryDebugPanel extends JPanel {
                     for (String id : rows.keySet()) {
                         boolean okTech = gridManager.getTechManager().canBuyItem(p, id);
                         canBuy.put(id, okTech);
-                        canAfford.put(id, isAdmin || money >= rows.get(id).price);
+
+                        RowUI r = rows.get(id);
+                        boolean afford = isAdmin || money >= (r != null ? r.price : 0.0);
+                        canAfford.put(id, afford);
                     }
                 }
 
@@ -237,8 +277,10 @@ public class InventoryDebugPanel extends JPanel {
 
                         if (!isPlayer) {
                             r.label.setText(r.itemId + ": " + c);
-                            r.btnAdd.setEnabled(true);
-                            r.btnRem.setEnabled(true);
+                            if (r.tradeable) {
+                                r.btnAdd.setEnabled(true);
+                                r.btnRem.setEnabled(true);
+                            }
                             continue;
                         }
 
@@ -248,21 +290,21 @@ public class InventoryDebugPanel extends JPanel {
                         String suffix = unlocked ? "" : "  [LOCKED]";
                         r.label.setText(r.itemId + ": " + c + suffix);
 
-                        // Buy enabled solo se tech ok e soldi ok
-                        r.btnAdd.setEnabled(unlocked && afford);
-
-                        if (!unlocked) {
-                            r.btnAdd.setToolTipText("Locked: unlock via Tech Tree");
-                        } else {
-                            r.btnAdd.setToolTipText("Buy for $" + r.price);
+                        if (!r.tradeable) {
+                            r.btnAdd.setEnabled(false);
+                            r.btnRem.setEnabled(false);
+                            continue;
                         }
 
-                        // Sell: abilito se hai almeno 1
+                        r.btnAdd.setEnabled(unlocked && afford);
+
+                        if (!unlocked) r.btnAdd.setToolTipText("Locked: unlock via Tech Tree");
+                        else r.btnAdd.setToolTipText("Buy for $" + String.format(Locale.US, "%.0f", r.price));
+
                         r.btnRem.setEnabled(c > 0);
                     }
                 });
             });
-        } catch (RejectedExecutionException ignored) {
-        }
+        } catch (RejectedExecutionException ignored) {}
     }
 }

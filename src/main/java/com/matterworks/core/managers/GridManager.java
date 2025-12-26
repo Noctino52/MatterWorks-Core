@@ -320,6 +320,10 @@ public class GridManager {
 
         PlayerProfile p = getCachedProfile(playerId);
         if (p == null) return false;
+
+        // ✅ Nexus non comprabile (il player ne ha uno solo via inventario/reset)
+        if (!p.isAdmin() && "nexus_core".equals(itemId)) return false;
+
         if (!techManager.canBuyItem(p, itemId)) return false;
         if (!p.isAdmin() && !checkItemCap(playerId, itemId, amount)) return false;
 
@@ -330,6 +334,7 @@ public class GridManager {
         repository.modifyInventoryItem(playerId, itemId, amount);
         return true;
     }
+
 
     public boolean attemptBailout(UUID ownerId) {
         touchPlayer(ownerId);
@@ -350,12 +355,55 @@ public class GridManager {
         if (ownerId == null) return;
         touchPlayer(ownerId);
 
+        this.serverConfig = repository.loadServerConfig();
+        final double startMoney = serverConfig.startMoney();
+
         ioExecutor.submit(() -> {
             saveAndUnloadSpecific(ownerId);
+
+            // plot reset (NON deve toccare unlocked_extra_x/y)
             repository.clearPlotData(ownerId);
+
+            // ✅ reset money + reset tech tree (con root hidden)
+            try {
+                PlayerProfile p = repository.loadPlayerProfile(ownerId);
+                if (p != null) {
+                    p.setMoney(startMoney);
+                    p.resetTechTreeToDefaults(); // <-- IMPORTANTISSIMO
+                    repository.savePlayerProfile(p);
+                    activeProfileCache.put(ownerId, p);
+                }
+            } catch (Throwable t) {
+                t.printStackTrace();
+            }
+
+            ensureInventoryAtLeast(ownerId, "conveyor_belt", 10);
+            ensureInventoryAtLeast(ownerId, "drill_mk1", 1);
+            ensureInventoryAtLeast(ownerId, "nexus_core", 1);
+
             loadPlotSynchronously(ownerId);
         });
     }
+
+
+
+    private void ensureInventoryAtLeast(UUID ownerId, String itemId, int target) {
+        if (ownerId == null || itemId == null || target <= 0) return;
+
+        int cur;
+        try {
+            cur = repository.getInventoryItemCount(ownerId, itemId);
+        } catch (Throwable t) {
+            cur = 0;
+        }
+
+        if (cur < target) repository.modifyInventoryItem(ownerId, itemId, target - cur);
+    }
+
+
+
+
+
 
     public PlayerProfile createNewPlayer(String username) {
         this.serverConfig = repository.loadServerConfig();
@@ -581,7 +629,7 @@ public class GridManager {
 
 
 
-    
+
     public void removeComponent(UUID ownerId, GridPosition pos) {
         touchPlayer(ownerId);
 
@@ -714,7 +762,7 @@ public class GridManager {
         return true;
     }
 
-    
+
     // ==========================================================
     // RESOURCES GENERATION
     // ==========================================================
@@ -723,37 +771,118 @@ public class GridManager {
 
         PlotAreaInfo info = getPlotAreaInfo(ownerId);
 
-        // "Zona iniziale" = STARTING (non dipende dall'unlock attuale, ma dalla config)
-        int startX = info.startingX();
-        int startY = info.startingY();
         int maxX = info.maxX();
         int maxY = info.maxY();
-
-        int startMinX = Math.max(0, (maxX - startX) / 2);
-        int startMinZ = Math.max(0, (maxY - startY) / 2);
-        int startMaxXEx = Math.min(maxX, startMinX + startX);
-        int startMaxZEx = Math.min(maxY, startMinZ + startY);
-
         int y = 0;
 
-        // ✅ Garanzia: almeno 1 di OGNI vena nella zona iniziale
-        ensureAtLeastOneInBounds(db, pid, out, MatterColor.RAW, y, startMinX, startMaxXEx, startMinZ, startMaxZEx);
-        ensureAtLeastOneInBounds(db, pid, out, MatterColor.RED, y, startMinX, startMaxXEx, startMinZ, startMaxZEx);
-        ensureAtLeastOneInBounds(db, pid, out, MatterColor.BLUE, y, startMinX, startMaxXEx, startMinZ, startMaxZEx);
-        ensureAtLeastOneInBounds(db, pid, out, MatterColor.YELLOW, y, startMinX, startMaxXEx, startMinZ, startMaxZEx);
-
-        // Il resto delle vene può spawnare in tutto il plot MAX (50x50)
+        // target totali da config (almeno 1)
         int targetRaw = Math.max(serverConfig.veinRaw(), 1);
         int targetRed = Math.max(serverConfig.veinRed(), 1);
         int targetBlue = Math.max(serverConfig.veinBlue(), 1);
         int targetYellow = Math.max(serverConfig.veinYellow(), 1);
 
-        // abbiamo già piazzato 1 per colore, quindi riempiamo fino al target
-        for (int i = countColor(out, MatterColor.RAW); i < targetRaw; i++) spawnVeinInBounds(db, pid, out, MatterColor.RAW, y, 0, maxX, 0, maxY);
-        for (int i = countColor(out, MatterColor.RED); i < targetRed; i++) spawnVeinInBounds(db, pid, out, MatterColor.RED, y, 0, maxX, 0, maxY);
-        for (int i = countColor(out, MatterColor.BLUE); i < targetBlue; i++) spawnVeinInBounds(db, pid, out, MatterColor.BLUE, y, 0, maxX, 0, maxY);
-        for (int i = countColor(out, MatterColor.YELLOW); i < targetYellow; i++) spawnVeinInBounds(db, pid, out, MatterColor.YELLOW, y, 0, maxX, 0, maxY);
+        // ✅ dentro unlocked: max 2 raw + 1 per colore
+        int unlockedRaw = Math.min(2, targetRaw);
+        int unlockedRed = Math.min(1, targetRed);
+        int unlockedBlue = Math.min(1, targetBlue);
+        int unlockedYellow = Math.min(1, targetYellow);
+
+        // 1) piazza prima quelle “visibili subito” nell’area unlocked
+        spawnInUnlockedUntil(db, pid, out, MatterColor.RAW, unlockedRaw, y, info);
+        spawnInUnlockedUntil(db, pid, out, MatterColor.RED, unlockedRed, y, info);
+        spawnInUnlockedUntil(db, pid, out, MatterColor.BLUE, unlockedBlue, y, info);
+        spawnInUnlockedUntil(db, pid, out, MatterColor.YELLOW, unlockedYellow, y, info);
+
+        // 2) tutte le altre vene (se config ne richiede di più) -> SOLO in area locked
+        for (int i = countColor(out, MatterColor.RAW); i < targetRaw; i++) {
+            spawnVeinInLockedArea(db, pid, out, MatterColor.RAW, y, info, maxX, maxY);
+        }
+        for (int i = countColor(out, MatterColor.RED); i < targetRed; i++) {
+            spawnVeinInLockedArea(db, pid, out, MatterColor.RED, y, info, maxX, maxY);
+        }
+        for (int i = countColor(out, MatterColor.BLUE); i < targetBlue; i++) {
+            spawnVeinInLockedArea(db, pid, out, MatterColor.BLUE, y, info, maxX, maxY);
+        }
+        for (int i = countColor(out, MatterColor.YELLOW); i < targetYellow; i++) {
+            spawnVeinInLockedArea(db, pid, out, MatterColor.YELLOW, y, info, maxX, maxY);
+        }
     }
+
+    private void spawnInUnlockedUntil(MariaDBAdapter db, Long pid, Map<GridPosition, MatterColor> out,
+                                      MatterColor t, int desiredUnlocked, int y, PlotAreaInfo info) {
+        if (desiredUnlocked <= 0) return;
+
+        int minX = info.minX();
+        int maxXEx = info.maxXExclusive();
+        int minZ = info.minZ();
+        int maxZEx = info.maxZExclusive();
+
+        while (countColorInUnlocked(out, t, y, info) < desiredUnlocked) {
+            int before = out.size();
+            spawnVeinInBounds(db, pid, out, t, y, minX, maxXEx, minZ, maxZEx);
+
+            // se non riesce a piazzare (area piena), evitiamo loop infinito
+            if (out.size() == before) break;
+        }
+    }
+
+    private int countColorInUnlocked(Map<GridPosition, MatterColor> out, MatterColor c, int y, PlotAreaInfo info) {
+        if (out == null || out.isEmpty() || c == null) return 0;
+
+        int minX = info.minX();
+        int maxXEx = info.maxXExclusive();
+        int minZ = info.minZ();
+        int maxZEx = info.maxZExclusive();
+
+        int n = 0;
+        for (var e : out.entrySet()) {
+            GridPosition p = e.getKey();
+            MatterColor t = e.getValue();
+            if (p == null || t == null) continue;
+            if (p.y() != y) continue;
+            if (t != c) continue;
+
+            if (p.x() >= minX && p.x() < maxXEx && p.z() >= minZ && p.z() < maxZEx) n++;
+        }
+        return n;
+    }
+
+    private void spawnVeinInLockedArea(MariaDBAdapter db, Long pid, Map<GridPosition, MatterColor> out,
+                                       MatterColor t, int y, PlotAreaInfo info, int maxX, int maxY) {
+        if (out == null) return;
+
+        int uMinX = info.minX();
+        int uMaxXEx = info.maxXExclusive();
+        int uMinZ = info.minZ();
+        int uMaxZEx = info.maxZExclusive();
+
+        boolean hasLockedArea = (uMinX > 0) || (uMinZ > 0) || (uMaxXEx < maxX) || (uMaxZEx < maxY);
+
+        Random r = new Random();
+
+        // tenta random SOLO fuori dall’unlocked
+        if (hasLockedArea) {
+            for (int attempt = 0; attempt < 800; attempt++) {
+                int x = r.nextInt(maxX);
+                int z = r.nextInt(maxY);
+
+                // scarta coordinate dentro area sbloccata
+                if (x >= uMinX && x < uMaxXEx && z >= uMinZ && z < uMaxZEx) continue;
+
+                GridPosition key = new GridPosition(x, y, z);
+                if (out.containsKey(key)) continue;
+
+                db.saveResource(pid, x, z, t);
+                out.put(key, t);
+                return;
+            }
+        }
+
+        // fallback: se non esiste area locked (o è troppo piccola) piazza ovunque nel max plot
+        spawnVeinInBounds(db, pid, out, t, y, 0, maxX, 0, maxY);
+    }
+
+
 
     private int countColor(Map<GridPosition, MatterColor> out, MatterColor c) {
         if (out == null || out.isEmpty() || c == null) return 0;

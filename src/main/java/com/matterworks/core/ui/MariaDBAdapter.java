@@ -409,28 +409,25 @@ public class MariaDBAdapter implements IRepository {
         Long plotId = plotDAO.findPlotIdByOwner(ownerId);
         if (plotId == null) return;
 
-
         try (Connection conn = dbManager.getConnection()) {
             conn.setAutoCommit(false);
             try {
+                // 1) delete macchine
                 try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM plot_machines WHERE plot_id = ?")) {
                     stmt.setLong(1, plotId);
                     stmt.executeUpdate();
                 }
-                // ✅ RESET unlock extras
-                try (PreparedStatement stmt = conn.prepareStatement("UPDATE plots SET unlocked_extra_x = 0, unlocked_extra_y = 0 WHERE id = ?")) {
-                    stmt.setLong(1, plotId);
-                    stmt.executeUpdate();
-                } catch (SQLException e) {
-                    if (!isUnknownColumn(e)) throw e;
-                }
 
+                // ❌ NON TOCCARE unlocked_extra_x / unlocked_extra_y
+                // (prima qui avevi l'UPDATE plots SET unlocked_extra_x=0,...)
+
+                // 2) delete risorse
                 try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM plot_resources WHERE plot_id = ?")) {
                     stmt.setLong(1, plotId);
                     stmt.executeUpdate();
                 }
 
-                // ✅ RESET HARD item_placed
+                // 3) reset item_placed
                 try (PreparedStatement stmt = conn.prepareStatement("UPDATE plots SET item_placed = 0 WHERE id = ?")) {
                     stmt.setLong(1, plotId);
                     stmt.executeUpdate();
@@ -449,6 +446,7 @@ public class MariaDBAdapter implements IRepository {
             e.printStackTrace();
         }
     }
+
 
     @Override public Long getPlotId(UUID ownerId) { return plotDAO.findPlotIdByOwner(ownerId); }
 

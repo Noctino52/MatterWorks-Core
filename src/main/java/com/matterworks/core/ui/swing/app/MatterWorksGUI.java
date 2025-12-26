@@ -109,8 +109,10 @@ public class MatterWorksGUI extends JFrame {
                 this::handleSOS,
                 this::handleSave,
                 this::handleReset,
+                this::handlePrestigeDummy, // ✅ NEW
                 this::handleDeletePlayer
         );
+
 
         // ✅ NEW: plot resize (admin only; controlli veri in dominio)
         statusBar.setPlotResizeActions(
@@ -175,6 +177,14 @@ public class MatterWorksGUI extends JFrame {
         updateLabels();
         if (currentPlayerUuid != null) gridManager.touchPlayer(currentPlayerUuid);
     }
+
+    private void handlePrestigeDummy() {
+        JOptionPane.showMessageDialog(this,
+                "Prestige is unlocked! (Dummy button for now)",
+                "Prestige",
+                JOptionPane.INFORMATION_MESSAGE);
+    }
+
 
     private void buyToolRightClick(String itemId, Integer amount) {
         UUID u = currentPlayerUuid;
@@ -508,6 +518,7 @@ public class MatterWorksGUI extends JFrame {
     private void updateEconomyLabelsIfChanged() {
         UUID u = currentPlayerUuid;
         if (u == null) {
+            topBar.setPrestigeButtonEnabled(false);
             topBar.getMoneyLabel().setText("MONEY: $---");
             topBar.getRoleLabel().setText("[---]");
             topBar.getVoidCoinsLabel().setText("VOID: ---");
@@ -521,6 +532,9 @@ public class MatterWorksGUI extends JFrame {
 
         PlayerProfile p = gridManager.getCachedProfile(u);
         if (p == null) return;
+
+        boolean prestigeBtnEnabled = gridManager.getTechManager().isPrestigeUnlocked(p);
+        topBar.setPrestigeButtonEnabled(prestigeBtnEnabled);
 
         double money = p.getMoney();
         String rank = String.valueOf(p.getRank());

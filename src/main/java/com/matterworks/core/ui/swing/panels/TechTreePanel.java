@@ -11,7 +11,7 @@ import java.util.UUID;
 
 public class TechTreePanel extends JPanel {
 
-    private final IRepository repository; // lasciato per compatibilità: magari lo usi altrove
+    private final IRepository repository; // compat
     private final UUID playerUuid;
     private final GridManager gridManager;
     private final Timer refreshTimer;
@@ -38,9 +38,7 @@ public class TechTreePanel extends JPanel {
     }
 
     public void dispose() {
-        if (refreshTimer != null && refreshTimer.isRunning()) {
-            refreshTimer.stop();
-        }
+        if (refreshTimer != null && refreshTimer.isRunning()) refreshTimer.stop();
     }
 
     private void renderNodes() {
@@ -69,19 +67,15 @@ public class TechTreePanel extends JPanel {
     private JPanel createTechCard(TechManager.TechNode node, TechManager tm, PlayerProfile p) {
         boolean unlocked = p.hasTech(node.id());
 
-        boolean parentsUnlocked = true;
-        for (String parentId : node.parentIds()) {
-            if (!p.hasTech(parentId)) {
-                parentsUnlocked = false;
-                break;
-            }
-        }
+        boolean parentsUnlocked = tm.areParentsSatisfied(p, node);
 
         double effectiveCost = tm.getEffectiveNodeCost(p, node.id());
         boolean canAfford = p.isAdmin() || p.getMoney() >= effectiveCost;
 
+        boolean isPrestigeNode = tm.isPrestigeUnlockTech(node.id());
+
         JPanel card = new JPanel(new BorderLayout(10, 5));
-        card.setBackground(new Color(50, 50, 55));
+        card.setBackground(isPrestigeNode ? new Color(55, 35, 70) : new Color(50, 50, 55));
         card.setBorder(BorderFactory.createLineBorder(Color.DARK_GRAY, 1));
         card.setMaximumSize(new Dimension(310, 70));
         card.setPreferredSize(new Dimension(310, 70));
@@ -93,23 +87,15 @@ public class TechTreePanel extends JPanel {
         lblName.setForeground(Color.WHITE);
         lblName.setFont(new Font("SansSerif", Font.BOLD, 13));
 
-        String unlockText = String.join(", ", node.unlockItemIds());
+        String unlockText = (node.unlockItemIds() == null) ? "" : String.join(", ", node.unlockItemIds());
+        if (unlockText.isBlank() && isPrestigeNode) unlockText = "Unlocks Prestige Button";
 
         String costText;
         if (p.isAdmin()) {
             costText = "Cost: $0 (ADMIN) | Unlocks: " + unlockText;
         } else {
             int eff = (int) Math.round(effectiveCost);
-            int base = (int) Math.round(node.baseCost());
-            double factor = node.effectiveFactor(p.getPrestigeLevel());
-
-            // Mostra base+fattore solo se cambia davvero (prestigio>0 e mult>0)
-            if (p.getPrestigeLevel() > 0 && node.prestigeCostMult() > 0.0) {
-                costText = "Cost: $" + eff + " (base " + base + " x" + String.format(java.util.Locale.US, "%.2f", factor) + ")"
-                        + " | Unlocks: " + unlockText;
-            } else {
-                costText = "Cost: $" + eff + " | Unlocks: " + unlockText;
-            }
+            costText = "Cost: $" + eff + " | Unlocks: " + unlockText;
         }
 
         JLabel lblDetail = new JLabel(costText);
@@ -135,17 +121,12 @@ public class TechTreePanel extends JPanel {
             btnAction.setBackground(new Color(120, 40, 40));
             btnAction.setForeground(Color.WHITE);
             btnAction.setEnabled(false);
-            if (!node.parentIds().isEmpty()) {
-                btnAction.setToolTipText("Richiede: " + String.join(", ", node.parentIds()));
-            }
         } else {
             btnAction.setText("SBLOCCA");
             btnAction.setBackground(canAfford ? new Color(40, 140, 40) : new Color(100, 100, 40));
             btnAction.setForeground(Color.WHITE);
             btnAction.addActionListener(e -> {
-                if (tm.unlockNode(p, node.id())) {
-                    renderNodes();
-                }
+                if (tm.unlockNode(p, node.id())) renderNodes();
             });
         }
 
