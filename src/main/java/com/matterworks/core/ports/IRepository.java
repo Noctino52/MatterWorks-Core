@@ -56,4 +56,9 @@ public interface IRepository {
     PlotUnlockState loadPlotUnlockState(UUID ownerId);
     boolean updatePlotUnlockState(UUID ownerId, PlotUnlockState state);
 
+
+    default int getItemCapIncreaseStep() { return 0; }
+
+    // ✅ NEW: cap massimo assoluto (server_gamestate.max_item_placed_on_plot)
+    default int getMaxItemPlacedOnPlotCap() { return 2147483647; } // Integer.MAX_VALUE
 }

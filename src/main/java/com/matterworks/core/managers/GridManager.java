@@ -1039,22 +1039,41 @@ public class GridManager {
     private boolean canPlaceAnotherItem(UUID ownerId) {
         PlayerProfile p = getCachedProfile(ownerId);
         if (p != null && p.isAdmin()) {
-            return true; // âœ… ADMIN bypass
+            return true; // ✅ ADMIN bypass
         }
 
-        int cap = repository.getDefaultItemPlacedOnPlotCap();
+        int cap = getEffectiveItemPlacedOnPlotCap(ownerId);
         int placed = repository.getPlotItemsPlaced(ownerId);
 
-        if (cap <= 0) cap = 1;
-
         if (placed >= cap) {
-            System.out.println("âš ï¸ CAP RAGGIUNTO: plot owner=" + ownerId
+            System.out.println("⚠️ CAP RAGGIUNTO: plot owner=" + ownerId
                     + " item_placed=" + placed + " cap=" + cap
                     + " -> non puoi piazzare altri item, rimuovi qualcosa dalla fabbrica!");
             return false;
         }
         return true;
     }
+
+
+    public int getEffectiveItemPlacedOnPlotCap(UUID ownerId) {
+        int base = repository.getDefaultItemPlacedOnPlotCap();
+        if (base <= 0) base = 1;
+
+        int step = Math.max(0, repository.getItemCapIncreaseStep());
+        int max = repository.getMaxItemPlacedOnPlotCap();
+        if (max <= 0) max = 2147483647;
+
+        int prestige = 0;
+        PlayerProfile p = getCachedProfile(ownerId);
+        if (p != null) prestige = Math.max(0, p.getPrestigeLevel());
+
+        long raw = (long) base + (long) prestige * (long) step;
+        int cap = raw > 2147483647L ? 2147483647 : (int) raw;
+
+        cap = Math.min(cap, max);
+        return Math.max(1, cap);
+    }
+
 
 
 }

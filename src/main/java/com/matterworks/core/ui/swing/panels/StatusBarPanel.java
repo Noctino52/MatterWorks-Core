@@ -64,6 +64,7 @@ public final class StatusBarPanel extends JPanel {
     public void setPlotItemsUnknown() {
         lblPlotItems.setText("ITEMS: ---/---");
         lblPlotItems.setForeground(Color.LIGHT_GRAY);
+        lblPlotItems.setToolTipText(null);
     }
 
     public void setPlotItems(int placed, int cap) {
@@ -74,7 +75,15 @@ public final class StatusBarPanel extends JPanel {
         }
 
         lblPlotItems.setText("ITEMS: " + placed + "/" + cap);
-        lblPlotItems.setForeground(placed > cap ? Color.RED : Color.LIGHT_GRAY);
+
+        // 🔴 rosso quando cap raggiunto o superato
+        lblPlotItems.setForeground(placed >= cap ? Color.RED : Color.LIGHT_GRAY);
+    }
+
+    // ✅ NEW: versione con tooltip (dettaglio calcolo cap)
+    public void setPlotItems(int placed, int cap, String tooltip) {
+        setPlotItems(placed, cap);
+        lblPlotItems.setToolTipText(tooltip);
     }
 
     // ---- plot area ----

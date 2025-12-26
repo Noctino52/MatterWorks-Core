@@ -240,6 +240,40 @@ public class MariaDBAdapter implements IRepository {
         );
     }
 
+    @Override
+    public int getItemCapIncreaseStep() {
+        String sql = "SELECT itemcap_increase_step FROM server_gamestate WHERE id = 1";
+        try (Connection conn = dbManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+
+            if (rs.next()) {
+                return Math.max(0, rs.getInt("itemcap_increase_step"));
+            }
+        } catch (SQLException e) {
+            if (!isUnknownColumn(e)) e.printStackTrace();
+        }
+        return 0;
+    }
+
+    @Override
+    public int getMaxItemPlacedOnPlotCap() {
+        String sql = "SELECT max_item_placed_on_plot FROM server_gamestate WHERE id = 1";
+        try (Connection conn = dbManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+
+            if (rs.next()) {
+                int v = rs.getInt("max_item_placed_on_plot");
+                return (v <= 0) ? 2147483647 : v;
+            }
+        } catch (SQLException e) {
+            if (!isUnknownColumn(e)) e.printStackTrace();
+        }
+        return 2147483647;
+    }
+
+
 
 
     @Override
