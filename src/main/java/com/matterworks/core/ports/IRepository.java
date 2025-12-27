@@ -4,6 +4,7 @@ import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.domain.machines.base.PlacedMachine;
 import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.player.PlayerProfile;
+import com.matterworks.core.domain.shop.VoidShopItem;
 import com.matterworks.core.model.PlotObject;
 import com.matterworks.core.model.PlotUnlockState;
 import com.matterworks.core.ui.ServerConfig;
@@ -20,7 +21,7 @@ public interface IRepository {
     // --- CONFIG ---
     ServerConfig loadServerConfig();
 
-    // ✅ NEW: cap default (server_gamestate.default_item_placed_on_plot)
+    // ✅ cap default (server_gamestate.default_item_placed_on_plot)
     int getDefaultItemPlacedOnPlotCap();
 
     // --- PLAYER & PROFILE ---
@@ -37,7 +38,7 @@ public interface IRepository {
     void clearPlotData(UUID ownerId);
     Long getPlotId(UUID ownerId);
 
-    // ✅ NEW: contatore item piazzati nel plot (plots.item_placed)
+    // ✅ contatore item piazzati nel plot (plots.item_placed)
     int getPlotItemsPlaced(UUID ownerId);
 
     // --- RISORSE ---
@@ -56,9 +57,19 @@ public interface IRepository {
     PlotUnlockState loadPlotUnlockState(UUID ownerId);
     boolean updatePlotUnlockState(UUID ownerId, PlotUnlockState state);
 
-
+    // --- ITEM CAP (prestige scaling) ---
     default int getItemCapIncreaseStep() { return 0; }
 
-    // ✅ NEW: cap massimo assoluto (server_gamestate.max_item_placed_on_plot)
-    default int getMaxItemPlacedOnPlotCap() { return 2147483647; } // Integer.MAX_VALUE
+    // ✅ cap massimo assoluto (server_gamestate.max_item_placed_on_plot)
+    default int getMaxItemPlacedOnPlotCap() { return Integer.MAX_VALUE; }
+
+    /**
+     * Alcune build hanno questo metodo come abstract (da vecchie patch).
+     * Lo metto DEFAULT per non obbligare tutti gli adapter.
+     */
+    default void updateMaxItemPlacedOnPlotCap(int newCap) { /* no-op */ }
+
+    // --- VOID SHOP (DEFAULTS: adapter legacy non rompe) ---
+    default List<VoidShopItem> loadVoidShopCatalog() { return List.of(); }
+    default VoidShopItem loadVoidShopItem(String itemId) { return null; }
 }

@@ -3,17 +3,27 @@ package com.matterworks.core.ui;
 import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.database.DatabaseManager;
 import com.matterworks.core.database.UuidUtils;
-import com.matterworks.core.database.dao.*;
+import com.matterworks.core.database.dao.InventoryDAO;
+import com.matterworks.core.database.dao.PlayerDAO;
+import com.matterworks.core.database.dao.PlotDAO;
+import com.matterworks.core.database.dao.PlotResourceDAO;
+import com.matterworks.core.database.dao.TechDefinitionDAO;
+import com.matterworks.core.database.dao.TransactionDAO;
+import com.matterworks.core.database.dao.VoidShopDAO;
 import com.matterworks.core.domain.machines.base.PlacedMachine;
 import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.player.PlayerProfile;
+import com.matterworks.core.domain.shop.VoidShopItem;
 import com.matterworks.core.model.PlotObject;
+import com.matterworks.core.model.PlotUnlockState;
 import com.matterworks.core.ports.IRepository;
 
 import java.math.BigDecimal;
-import java.sql.*;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.*;
-import java.util.concurrent.ExecutorService;
 import java.util.stream.Collectors;
 
 public class MariaDBAdapter implements IRepository {
@@ -26,6 +36,9 @@ public class MariaDBAdapter implements IRepository {
     private final TechDefinitionDAO techDefinitionDAO;
     private final TransactionDAO transactionDAO;
 
+    // ✅ VOID SHOP
+    private final VoidShopDAO voidShopDAO;
+
     public MariaDBAdapter(DatabaseManager dbManager) {
         this.dbManager = dbManager;
         this.playerDAO = new PlayerDAO(dbManager);
@@ -34,6 +47,8 @@ public class MariaDBAdapter implements IRepository {
         this.inventoryDAO = new InventoryDAO(dbManager);
         this.techDefinitionDAO = new TechDefinitionDAO(dbManager);
         this.transactionDAO = new TransactionDAO(dbManager);
+
+        this.voidShopDAO = new VoidShopDAO(dbManager);
     }
 
     // --- Extra (non in IRepository) ---
@@ -42,7 +57,29 @@ public class MariaDBAdapter implements IRepository {
     }
 
     // ==========================================================
-    // CAP PLOT ITEMS (NEW)
+    // VOID SHOP
+    // ==========================================================
+    @Override
+    public List<VoidShopItem> loadVoidShopCatalog() {
+        try {
+            return voidShopDAO.loadAll();
+        } catch (Throwable t) {
+            return List.of();
+        }
+    }
+
+    @Override
+    public VoidShopItem loadVoidShopItem(String itemId) {
+        if (itemId == null || itemId.isBlank()) return null;
+        try {
+            return voidShopDAO.loadById(itemId);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    // ==========================================================
+    // CAP PLOT ITEMS
     // ==========================================================
     @Override
     public int getDefaultItemPlacedOnPlotCap() {
@@ -109,30 +146,6 @@ public class MariaDBAdapter implements IRepository {
     public void logTransaction(PlayerProfile player, String actionType, String currency, double amount, String itemId) {
         transactionDAO.logTransaction(player, actionType, currency, BigDecimal.valueOf(amount), itemId);
     }
-
-    private boolean columnExists(Connection conn, String table, String column) throws SQLException {
-        String sql =
-                "SELECT 1 FROM information_schema.COLUMNS " +
-                        "WHERE table_schema = DATABASE() " +
-                        "AND LOWER(table_name) = LOWER(?) " +
-                        "AND LOWER(column_name) = LOWER(?) " +
-                        "LIMIT 1";
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, table);
-            ps.setString(2, column);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next();
-            }
-        }
-    }
-
-    private String firstExistingColumn(Connection conn, String table, String... candidates) throws SQLException {
-        for (String c : candidates) {
-            if (c != null && !c.isBlank() && columnExists(conn, table, c)) return c;
-        }
-        return null;
-    }
-
 
     // ==========================================================
     // CONFIG
@@ -223,7 +236,6 @@ public class MariaDBAdapter implements IRepository {
             }
 
         } catch (SQLException ignored) {
-            // niente spam stacktrace: default safe
         }
 
         return new ServerConfig(
@@ -247,9 +259,7 @@ public class MariaDBAdapter implements IRepository {
              PreparedStatement ps = conn.prepareStatement(sql);
              ResultSet rs = ps.executeQuery()) {
 
-            if (rs.next()) {
-                return Math.max(0, rs.getInt("itemcap_increase_step"));
-            }
+            if (rs.next()) return Math.max(0, rs.getInt("itemcap_increase_step"));
         } catch (SQLException e) {
             if (!isUnknownColumn(e)) e.printStackTrace();
         }
@@ -265,27 +275,39 @@ public class MariaDBAdapter implements IRepository {
 
             if (rs.next()) {
                 int v = rs.getInt("max_item_placed_on_plot");
-                return (v <= 0) ? 2147483647 : v;
+                return (v <= 0) ? Integer.MAX_VALUE : v;
             }
         } catch (SQLException e) {
             if (!isUnknownColumn(e)) e.printStackTrace();
         }
-        return 2147483647;
+        return Integer.MAX_VALUE;
     }
 
-
-
-
     @Override
-    public com.matterworks.core.model.PlotUnlockState loadPlotUnlockState(UUID ownerId) {
+    public void updateMaxItemPlacedOnPlotCap(int newCap) {
+        String sql = "UPDATE server_gamestate SET max_item_placed_on_plot = ? WHERE id = 1";
+        int cap = (newCap <= 0) ? 0 : newCap; // 0 = unlimited (come già gestisci in lettura)
+        try (Connection conn = dbManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, cap);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            if (!isUnknownColumn(e)) e.printStackTrace();
+        }
+    }
+
+    // ==========================================================
+    // PLOT UNLOCK
+    // ==========================================================
+    @Override
+    public PlotUnlockState loadPlotUnlockState(UUID ownerId) {
         return plotDAO.loadPlotUnlockState(ownerId);
     }
 
     @Override
-    public boolean updatePlotUnlockState(UUID ownerId, com.matterworks.core.model.PlotUnlockState state) {
+    public boolean updatePlotUnlockState(UUID ownerId, PlotUnlockState state) {
         return plotDAO.updatePlotUnlockState(ownerId, state);
     }
-
 
     // ==========================================================
     // MinutesToInactive (server_gamestate)
@@ -407,6 +429,29 @@ public class MariaDBAdapter implements IRepository {
         return "42S22".equals(state) || (e.getMessage() != null && e.getMessage().contains("Unknown column"));
     }
 
+    private boolean columnExists(Connection conn, String table, String column) throws SQLException {
+        String sql =
+                "SELECT 1 FROM information_schema.COLUMNS " +
+                        "WHERE table_schema = DATABASE() " +
+                        "AND LOWER(table_name) = LOWER(?) " +
+                        "AND LOWER(column_name) = LOWER(?) " +
+                        "LIMIT 1";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, table);
+            ps.setString(2, column);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
+    private String firstExistingColumn(Connection conn, String table, String... candidates) throws SQLException {
+        for (String c : candidates) {
+            if (c != null && !c.isBlank() && columnExists(conn, table, c)) return c;
+        }
+        return null;
+    }
+
     // ==========================================================
     // IRepository standard
     // ==========================================================
@@ -511,22 +556,18 @@ public class MariaDBAdapter implements IRepository {
         try (Connection conn = dbManager.getConnection()) {
             conn.setAutoCommit(false);
             try {
-                // 1) delete macchine
                 try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM plot_machines WHERE plot_id = ?")) {
                     stmt.setLong(1, plotId);
                     stmt.executeUpdate();
                 }
 
                 // ❌ NON TOCCARE unlocked_extra_x / unlocked_extra_y
-                // (prima qui avevi l'UPDATE plots SET unlocked_extra_x=0,...)
 
-                // 2) delete risorse
                 try (PreparedStatement stmt = conn.prepareStatement("DELETE FROM plot_resources WHERE plot_id = ?")) {
                     stmt.setLong(1, plotId);
                     stmt.executeUpdate();
                 }
 
-                // 3) reset item_placed
                 try (PreparedStatement stmt = conn.prepareStatement("UPDATE plots SET item_placed = 0 WHERE id = ?")) {
                     stmt.setLong(1, plotId);
                     stmt.executeUpdate();
@@ -546,7 +587,6 @@ public class MariaDBAdapter implements IRepository {
         }
     }
 
-
     @Override public Long getPlotId(UUID ownerId) { return plotDAO.findPlotIdByOwner(ownerId); }
 
     @Override public void saveResource(Long plotId, int x, int z, MatterColor type) { resourceDAO.addResource(plotId, x, z, type); }
@@ -554,4 +594,61 @@ public class MariaDBAdapter implements IRepository {
 
     public TechDefinitionDAO getTechDefinitionDAO() { return techDefinitionDAO; }
     public DatabaseManager getDbManager() { return dbManager; }
+
+    public boolean purchaseVoidShopItemAtomic(UUID playerId, String itemId, int unitPrice, int amount, boolean isAdmin) {
+        if (playerId == null || itemId == null || itemId.isBlank() || amount <= 0) return false;
+
+        long totalL = (long) unitPrice * (long) amount;
+        if (totalL > Integer.MAX_VALUE) totalL = Integer.MAX_VALUE;
+        int total = (int) totalL;
+
+        Connection conn = null;
+        try {
+            conn = dbManager.getConnection();
+            conn.setAutoCommit(false);
+
+            // 1) scala void coins SOLO se non admin
+            if (!isAdmin) {
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "UPDATE players SET void_coins = void_coins - ? WHERE uuid = ? AND void_coins >= ?"
+                )) {
+                    ps.setInt(1, total);
+                    ps.setBytes(2, UuidUtils.asBytes(playerId));
+                    ps.setInt(3, total);
+
+                    int rows = ps.executeUpdate();
+                    if (rows != 1) {
+                        conn.rollback();
+                        return false; // non abbastanza void coins (o player non trovato)
+                    }
+                }
+            }
+
+            // 2) assegna item in inventario (upsert)
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "INSERT INTO player_inventory (player_uuid, item_id, quantity) VALUES (?, ?, ?) " +
+                            "ON DUPLICATE KEY UPDATE quantity = quantity + VALUES(quantity)"
+            )) {
+                ps.setBytes(1, UuidUtils.asBytes(playerId));
+                ps.setString(2, itemId);
+                ps.setInt(3, amount);
+                ps.executeUpdate();
+            }
+
+            conn.commit();
+            return true;
+
+        } catch (SQLException e) {
+            try { if (conn != null) conn.rollback(); } catch (SQLException ignored) {}
+            e.printStackTrace();
+            return false;
+
+        } finally {
+            if (conn != null) {
+                try { conn.setAutoCommit(true); } catch (SQLException ignored) {}
+                try { conn.close(); } catch (SQLException ignored) {}
+            }
+        }
+    }
+
 }

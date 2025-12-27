@@ -11,12 +11,13 @@ import com.matterworks.core.domain.machines.structure.StructuralBlock;
 import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.domain.shop.MarketManager;
-import com.matterworks.core.ui.MariaDBAdapter;
-import com.matterworks.core.ui.ServerConfig;
+import com.matterworks.core.domain.shop.VoidShopItem;
 import com.matterworks.core.model.PlotObject;
 import com.matterworks.core.model.PlotUnlockState;
 import com.matterworks.core.ports.IRepository;
 import com.matterworks.core.ports.IWorldAccess;
+import com.matterworks.core.ui.MariaDBAdapter;
+import com.matterworks.core.ui.ServerConfig;
 
 import java.util.*;
 import java.util.concurrent.*;
@@ -39,7 +40,6 @@ public class GridManager {
     private final Map<UUID, PlayerProfile> activeProfileCache = new ConcurrentHashMap<>();
     private final Map<UUID, Map<GridPosition, PlacedMachine>> playerGrids = new ConcurrentHashMap<>();
     private final Map<UUID, Map<GridPosition, MatterColor>> playerResources = new ConcurrentHashMap<>();
-    // Plot unlock state (extra unlocked cells vs starting)
     private final Map<UUID, PlotUnlockState> plotUnlockCache = new ConcurrentHashMap<>();
 
     private final List<PlacedMachine> tickingMachines = Collections.synchronizedList(new ArrayList<>());
@@ -51,6 +51,11 @@ public class GridManager {
 
     // --- MAINTENANCE ---
     private long lastSweepTick = 0;
+
+    // ==========================================================
+    // VOID SHOP / PREMIUM
+    // ==========================================================
+    public static final String ITEM_INSTANT_PRESTIGE = "instant_prestige";
 
     public GridManager(IRepository repository, IWorldAccess worldAdapter, BlockRegistry registry) {
         this.repository = repository;
@@ -72,6 +77,160 @@ public class GridManager {
     public BlockRegistry getBlockRegistry() { return blockRegistry; }
 
     // ==========================================================
+    // VOID SHOP API
+    // ==========================================================
+    public List<VoidShopItem> getVoidShopCatalog() {
+        return repository.loadVoidShopCatalog();
+    }
+
+    public boolean buyVoidShopItem(UUID playerId, String premiumItemId, int amount) {
+        touchPlayer(playerId);
+
+        if (playerId == null || premiumItemId == null || premiumItemId.isBlank() || amount <= 0) return false;
+
+        PlayerProfile p = getCachedProfile(playerId);
+        if (p == null) return false;
+
+        VoidShopItem def = repository.loadVoidShopItem(premiumItemId);
+        if (def == null) return false;
+
+        int unit = Math.max(0, def.voidPrice());
+
+        // ✅ path atomico per MariaDB (niente più coin persi se inventario fallisce)
+        if (repository instanceof com.matterworks.core.ui.MariaDBAdapter db) {
+            boolean ok = db.purchaseVoidShopItemAtomic(playerId, premiumItemId, unit, amount, p.isAdmin());
+            if (!ok) return false;
+
+            // ricarica profilo per aggiornare void coins in cache/UI
+            PlayerProfile fresh = repository.loadPlayerProfile(playerId);
+            if (fresh != null) activeProfileCache.put(playerId, fresh);
+
+            if (!p.isAdmin()) {
+                repository.logTransaction(fresh != null ? fresh : p, "VOID_SHOP_BUY", "VOID_COINS", (double) unit * amount, premiumItemId);
+            } else {
+                repository.logTransaction(fresh != null ? fresh : p, "VOID_SHOP_BUY_ADMIN", "VOID_COINS", 0, premiumItemId);
+            }
+            return true;
+        }
+
+        // fallback (non dovresti usarlo nel tuo progetto, ma lasciato safe)
+        long totalL = (long) unit * (long) amount;
+        if (totalL > Integer.MAX_VALUE) totalL = Integer.MAX_VALUE;
+        int total = (int) totalL;
+
+        if (!p.isAdmin() && p.getVoidCoins() < total) return false;
+
+        try {
+            repository.modifyInventoryItem(playerId, premiumItemId, amount);
+        } catch (Throwable t) {
+            t.printStackTrace();
+            return false;
+        }
+
+        if (!p.isAdmin()) {
+            p.modifyVoidCoins(-total);
+            repository.savePlayerProfile(p);
+            activeProfileCache.put(playerId, p);
+            repository.logTransaction(p, "VOID_SHOP_BUY", "VOID_COINS", total, premiumItemId);
+        } else {
+            repository.logTransaction(p, "VOID_SHOP_BUY_ADMIN", "VOID_COINS", 0, premiumItemId);
+        }
+
+        return true;
+    }
+
+
+    public boolean canInstantPrestige(UUID ownerId) {
+        if (ownerId == null) return false;
+        PlayerProfile p = getCachedProfile(ownerId);
+        if (p != null && p.isAdmin()) return true;
+        return repository.getInventoryItemCount(ownerId, ITEM_INSTANT_PRESTIGE) > 0;
+    }
+
+    /**
+     * Premium prestige:
+     * +1 prestige, +void coins reward, +plot unlock bonus, +item cap (via prestige scaling)
+     * ✅ NO reset plot
+     * ✅ NO reset tech tree
+     * ✅ NO reset money
+     * consumes 1x "instant_prestige" (unless admin)
+     */
+    public void instantPrestigeUser(UUID ownerId) {
+        if (ownerId == null) return;
+        touchPlayer(ownerId);
+
+        PlayerProfile cached = getCachedProfile(ownerId);
+        if (cached == null) return;
+
+        if (!cached.isAdmin()) {
+            int have = repository.getInventoryItemCount(ownerId, ITEM_INSTANT_PRESTIGE);
+            if (have <= 0) return;
+        }
+
+        this.serverConfig = repository.loadServerConfig();
+        final int addVoidCoins = Math.max(0, serverConfig.prestigeVoidCoinsAdd());
+        final int plotBonus = Math.max(0, serverConfig.prestigePlotBonus());
+
+        ioExecutor.submit(() -> {
+            // salva stati ma NON resetta DB
+            saveAndUnloadSpecific(ownerId);
+
+            // consuma item premium
+            try {
+                PlayerProfile p = repository.loadPlayerProfile(ownerId);
+                if (p == null) return;
+
+                if (!p.isAdmin()) {
+                    int have = repository.getInventoryItemCount(ownerId, ITEM_INSTANT_PRESTIGE);
+                    if (have <= 0) return;
+
+                    repository.modifyInventoryItem(ownerId, ITEM_INSTANT_PRESTIGE, -1);
+                    repository.logTransaction(p, "INSTANT_PRESTIGE_USE", "ITEM", 1, ITEM_INSTANT_PRESTIGE);
+                }
+            } catch (Throwable t) {
+                t.printStackTrace();
+                return;
+            }
+
+            // plot bonus (unlocked_extra_x/y)
+            try {
+                PlotUnlockState cur = repository.loadPlotUnlockState(ownerId);
+                if (cur == null) cur = PlotUnlockState.zero();
+
+                PlotUnlockState upd = new PlotUnlockState(
+                        cur.extraX() + plotBonus,
+                        cur.extraY() + plotBonus
+                );
+                repository.updatePlotUnlockState(ownerId, upd);
+            } catch (Throwable t) {
+                t.printStackTrace();
+            }
+
+            // prestige + void coins (NO reset)
+            try {
+                PlayerProfile p = repository.loadPlayerProfile(ownerId);
+                if (p != null) {
+                    p.setPrestigeLevel(p.getPrestigeLevel() + 1);
+                    if (addVoidCoins > 0) p.modifyVoidCoins(addVoidCoins);
+
+                    repository.savePlayerProfile(p);
+                    activeProfileCache.put(ownerId, p);
+
+                    repository.logTransaction(p, "INSTANT_PRESTIGE", "NONE", 0, "prestige+1");
+                    if (addVoidCoins > 0) {
+                        repository.logTransaction(p, "INSTANT_PRESTIGE_REWARD", "VOID_COINS", addVoidCoins, "prestige_reward");
+                    }
+                }
+            } catch (Throwable t) {
+                t.printStackTrace();
+            }
+
+            // ricarica per aggiornare UI/mondo
+            loadPlotSynchronously(ownerId);
+        });
+    }
+
+    // ==========================================================
     // SNAPSHOTS (GUI)
     // ==========================================================
     public Map<GridPosition, PlacedMachine> getSnapshot(UUID ownerId) {
@@ -88,7 +247,6 @@ public class GridManager {
     public Map<GridPosition, MatterColor> getTerrainResources(UUID playerId) {
         return playerResources.getOrDefault(playerId, Collections.emptyMap());
     }
-
 
     // ==========================================================
     // PLOT AREA (unlock / bounds)
@@ -120,7 +278,6 @@ public class GridManager {
         int incX = Math.max(1, cfg.plotIncreaseX());
         int incY = Math.max(1, cfg.plotIncreaseY());
 
-        // clamp stored extras (in case config changed)
         int extraX = Math.max(0, Math.min(st.extraX(), maxX - startX));
         int extraY = Math.max(0, Math.min(st.extraY(), maxY - startY));
 
@@ -210,7 +367,6 @@ public class GridManager {
                 Math.max(0, cur.extraY() - info.increaseY())
         );
 
-        // shrink-safe: niente macchine in celle che verrebbero bloccate
         PlotAreaInfo nextInfo = new PlotAreaInfo(
                 info.startingX(), info.startingY(),
                 info.maxX(), info.maxY(),
@@ -234,7 +390,6 @@ public class GridManager {
         plotUnlockCache.put(ownerId, next);
         return true;
     }
-
 
     // ==========================================================
     // CONFIG: MinutesToInactive
@@ -266,10 +421,6 @@ public class GridManager {
                 }
             }
         }
-    }
-
-    public boolean isSleeping(UUID ownerId) {
-        return ownerId != null && sleepingPlayers.contains(ownerId);
     }
 
     private void sweepInactivePlayers(long currentTick) {
@@ -313,7 +464,7 @@ public class GridManager {
     }
 
     // ==========================================================
-    // SHOP / GUI API
+    // SHOP / ECONOMY
     // ==========================================================
     public boolean buyItem(UUID playerId, String itemId, int amount) {
         touchPlayer(playerId);
@@ -357,10 +508,9 @@ public class GridManager {
         return Math.max(0.0, out);
     }
 
-
-
-
-
+    // ==========================================================
+    // SOS
+    // ==========================================================
     public boolean attemptBailout(UUID ownerId) {
         touchPlayer(ownerId);
 
@@ -376,6 +526,9 @@ public class GridManager {
         return false;
     }
 
+    // ==========================================================
+    // RESET / PRESTIGE CLASSICO (rimangono come nel tuo)
+    // ==========================================================
     public void resetUserPlot(UUID ownerId) {
         if (ownerId == null) return;
         touchPlayer(ownerId);
@@ -386,15 +539,13 @@ public class GridManager {
         ioExecutor.submit(() -> {
             saveAndUnloadSpecific(ownerId);
 
-            // plot reset (NON deve toccare unlocked_extra_x/y)
             repository.clearPlotData(ownerId);
 
-            // ✅ reset money + reset tech tree (con root hidden)
             try {
                 PlayerProfile p = repository.loadPlayerProfile(ownerId);
                 if (p != null) {
                     p.setMoney(startMoney);
-                    p.resetTechTreeToDefaults(); // <-- IMPORTANTISSIMO
+                    p.resetTechTreeToDefaults();
                     repository.savePlayerProfile(p);
                     activeProfileCache.put(ownerId, p);
                 }
@@ -414,7 +565,6 @@ public class GridManager {
         if (ownerId == null) return;
         touchPlayer(ownerId);
 
-        // ricarico config per prendere startMoney + parametri prestige
         this.serverConfig = repository.loadServerConfig();
         final double startMoney = serverConfig.startMoney();
         final int addVoidCoins = Math.max(0, serverConfig.prestigeVoidCoinsAdd());
@@ -423,10 +573,8 @@ public class GridManager {
         ioExecutor.submit(() -> {
             saveAndUnloadSpecific(ownerId);
 
-            // 1) reset plot (NON deve toccare unlocked_extra_x/y)
             repository.clearPlotData(ownerId);
 
-            // 3) incremento dimensione plot (unlocked_extra_x/y) PRIMA del reload (così rigeneri vene su nuova area)
             try {
                 PlotUnlockState cur = repository.loadPlotUnlockState(ownerId);
                 if (cur == null) cur = PlotUnlockState.zero();
@@ -439,7 +587,6 @@ public class GridManager {
                 t.printStackTrace();
             }
 
-            // 2) +void coins, +prestige level, reset money + reset tech tree
             try {
                 PlayerProfile p = repository.loadPlayerProfile(ownerId);
                 if (p != null) {
@@ -447,7 +594,7 @@ public class GridManager {
                     if (addVoidCoins > 0) p.modifyVoidCoins(addVoidCoins);
 
                     p.setMoney(startMoney);
-                    p.resetTechTreeToDefaults(); // <-- IMPORTANTISSIMO (reset completo tech)
+                    p.resetTechTreeToDefaults();
                     repository.savePlayerProfile(p);
                     activeProfileCache.put(ownerId, p);
                 }
@@ -455,7 +602,6 @@ public class GridManager {
                 t.printStackTrace();
             }
 
-            // starter inventory (come reset)
             ensureInventoryAtLeast(ownerId, "conveyor_belt", 10);
             ensureInventoryAtLeast(ownerId, "drill_mk1", 1);
             ensureInventoryAtLeast(ownerId, "nexus_core", 1);
@@ -464,27 +610,19 @@ public class GridManager {
         });
     }
 
-
-
-
     private void ensureInventoryAtLeast(UUID ownerId, String itemId, int target) {
         if (ownerId == null || itemId == null || target <= 0) return;
 
         int cur;
-        try {
-            cur = repository.getInventoryItemCount(ownerId, itemId);
-        } catch (Throwable t) {
-            cur = 0;
-        }
+        try { cur = repository.getInventoryItemCount(ownerId, itemId); }
+        catch (Throwable t) { cur = 0; }
 
         if (cur < target) repository.modifyInventoryItem(ownerId, itemId, target - cur);
     }
 
-
-
-
-
-
+    // ==========================================================
+    // PLAYER MGMT
+    // ==========================================================
     public PlayerProfile createNewPlayer(String username) {
         this.serverConfig = repository.loadServerConfig();
 
@@ -541,6 +679,7 @@ public class GridManager {
         });
     }
 
+    // ✅ Questo è quello che ti mancava (Main/MatterWorksGUI lo chiamano)
     public void loadPlotFromDB(UUID ownerId) {
         if (ownerId == null) return;
 
@@ -569,9 +708,9 @@ public class GridManager {
         }
 
         try {
-            // load plot unlock state (safe default)
             try {
-                plotUnlockCache.put(ownerId, repository.loadPlotUnlockState(ownerId));
+                PlotUnlockState st = repository.loadPlotUnlockState(ownerId);
+                plotUnlockCache.put(ownerId, (st != null ? st : PlotUnlockState.zero()));
             } catch (Throwable t) {
                 plotUnlockCache.put(ownerId, PlotUnlockState.zero());
             }
@@ -590,9 +729,7 @@ public class GridManager {
                 PlacedMachine m = MachineFactory.createFromModel(d, ownerId);
                 if (m == null) continue;
 
-                // FIX: senza questo, dopo reload/switch tutto resta fermo
                 m.setGridContext(this);
-
                 internalAddMachine(ownerId, m);
             }
 
@@ -623,18 +760,14 @@ public class GridManager {
     public boolean placeStructure(UUID ownerId, GridPosition pos, String nativeBlockId) {
         touchPlayer(ownerId);
 
-        // ✅ BLOCCO se cap raggiunto
         if (!canPlaceAnotherItem(ownerId)) return false;
 
-        // ✅ bounds + unlock (DOMINIO, non GUI)
         if (!isWithinPlotBounds(ownerId, pos, Vector3Int.one())) return false;
         if (!isAreaUnlocked(ownerId, pos, Vector3Int.one())) return false;
 
         if (!isAreaClear(ownerId, pos, Vector3Int.one())) return false;
 
         StructuralBlock block = new StructuralBlock(ownerId, pos, nativeBlockId);
-        block.setGridContext(this);
-
         internalAddMachine(ownerId, block);
         block.onPlace(worldAdapter);
 
@@ -644,11 +777,11 @@ public class GridManager {
         return true;
     }
 
-
     public boolean placeMachine(UUID ownerId, GridPosition pos, String typeId, Direction orientation) {
         touchPlayer(ownerId);
 
-        // âœ… BLOCCO se cap raggiunto (prima di consumare inventario!)
+        if (ownerId == null || pos == null || typeId == null) return false;
+
         if (!canPlaceAnotherItem(ownerId)) return false;
 
         PlayerProfile p = getCachedProfile(ownerId);
@@ -659,14 +792,12 @@ public class GridManager {
                 ? new Vector3Int(dim.z(), dim.y(), dim.x())
                 : dim;
 
-        // ✅ bounds + unlock (DOMINIO, non GUI)
         if (!isWithinPlotBounds(ownerId, pos, effDim)) return false;
         if (!isAreaUnlocked(ownerId, pos, effDim)) return false;
 
         if (!isAreaClear(ownerId, pos, effDim)) return false;
 
-        // consuma inventario solo DOPO il cap check
-        if (!p.isAdmin()) {
+        if (!(p.isAdmin())) {
             if (repository.getInventoryItemCount(ownerId, typeId) <= 0) return false;
             repository.modifyInventoryItem(ownerId, typeId, -1);
         }
@@ -674,26 +805,22 @@ public class GridManager {
         PlotObject dto = new PlotObject(null, null, pos.x(), pos.y(), pos.z(), typeId, null);
         PlacedMachine m = MachineFactory.createFromModel(dto, ownerId);
         if (m == null) {
-            // rollback inventario se createFromModel fallisce
             if (!p.isAdmin()) repository.modifyInventoryItem(ownerId, typeId, +1);
             return false;
         }
 
         m.setOrientation(orientation);
-        m.setGridContext(this);
 
-        // âœ… REGOLA DOMINIO: la trivella si piazza SOLO su una vena
+        // drill only on veins
         if (m instanceof DrillMachine drill) {
             Map<GridPosition, MatterColor> resMap = playerResources.get(ownerId);
             MatterColor resAt = (resMap != null) ? resMap.get(pos) : null;
 
             if (resAt == null) {
-                // niente vena sotto -> annulla piazzamento + rollback inventario
                 if (!p.isAdmin()) repository.modifyInventoryItem(ownerId, typeId, +1);
                 return false;
             }
 
-            // vena presente -> trivella minerÃ  quella risorsa
             drill.setResourceToMine(resAt);
         }
 
@@ -707,9 +834,7 @@ public class GridManager {
         return true;
     }
 
-
-
-
+    // ✅ metodo richiesto da FactoryPanelController
     public void removeComponent(UUID ownerId, GridPosition pos) {
         touchPlayer(ownerId);
 
@@ -718,7 +843,6 @@ public class GridManager {
         PlayerProfile p = getCachedProfile(ownerId);
         if (p == null) return;
 
-        // ✅ niente interazioni su celle bloccate (tranne admin)
         if (!p.isAdmin() && !isCellUnlocked(ownerId, pos.x(), pos.z())) return;
 
         PlacedMachine target = getMachineAt(ownerId, pos);
@@ -740,9 +864,8 @@ public class GridManager {
         repository.logTransaction(p, "REMOVE_MACHINE", "NONE", 0, target.getTypeId());
     }
 
-
     // ==========================================================
-    // SAVE / UNLOAD
+    // SAVE / UNLOAD  (pubblico: altre classi lo possono chiamare)
     // ==========================================================
     public void saveAndUnloadSpecific(UUID ownerId) {
         if (ownerId == null) return;
@@ -776,6 +899,7 @@ public class GridManager {
     // ==========================================================
     // GRID INTERNALS
     // ==========================================================
+    // ✅ metodo richiesto da PlacedMachine.java
     public PlacedMachine getMachineAt(UUID ownerId, GridPosition pos) {
         if (ownerId == null || pos == null) return null;
         Map<GridPosition, PlacedMachine> g = playerGrids.get(ownerId);
@@ -821,9 +945,7 @@ public class GridManager {
         if (ownerId == null || m == null) return;
 
         Map<GridPosition, PlacedMachine> grid = playerGrids.get(ownerId);
-        if (grid != null) {
-            grid.entrySet().removeIf(e -> e.getValue() == m);
-        }
+        if (grid != null) grid.entrySet().removeIf(e -> e.getValue() == m);
 
         synchronized (tickingMachines) {
             tickingMachines.removeIf(x -> x == m);
@@ -842,50 +964,36 @@ public class GridManager {
         return true;
     }
 
-
     // ==========================================================
-    // RESOURCES GENERATION
+    // RESOURCES GENERATION (lasciata come tuo bundle)
     // ==========================================================
     private void generateDefaultResources(UUID ownerId, MariaDBAdapter db, Long pid, Map<GridPosition, MatterColor> out) {
         this.serverConfig = repository.loadServerConfig();
 
         PlotAreaInfo info = getPlotAreaInfo(ownerId);
-
         int maxX = info.maxX();
         int maxY = info.maxY();
         int y = 0;
 
-        // target totali da config (almeno 1)
         int targetRaw = Math.max(serverConfig.veinRaw(), 1);
         int targetRed = Math.max(serverConfig.veinRed(), 1);
         int targetBlue = Math.max(serverConfig.veinBlue(), 1);
         int targetYellow = Math.max(serverConfig.veinYellow(), 1);
 
-        // ✅ dentro unlocked: max 2 raw + 1 per colore
         int unlockedRaw = Math.min(2, targetRaw);
         int unlockedRed = Math.min(1, targetRed);
         int unlockedBlue = Math.min(1, targetBlue);
         int unlockedYellow = Math.min(1, targetYellow);
 
-        // 1) piazza prima quelle “visibili subito” nell’area unlocked
         spawnInUnlockedUntil(db, pid, out, MatterColor.RAW, unlockedRaw, y, info);
         spawnInUnlockedUntil(db, pid, out, MatterColor.RED, unlockedRed, y, info);
         spawnInUnlockedUntil(db, pid, out, MatterColor.BLUE, unlockedBlue, y, info);
         spawnInUnlockedUntil(db, pid, out, MatterColor.YELLOW, unlockedYellow, y, info);
 
-        // 2) tutte le altre vene (se config ne richiede di più) -> SOLO in area locked
-        for (int i = countColor(out, MatterColor.RAW); i < targetRaw; i++) {
-            spawnVeinInLockedArea(db, pid, out, MatterColor.RAW, y, info, maxX, maxY);
-        }
-        for (int i = countColor(out, MatterColor.RED); i < targetRed; i++) {
-            spawnVeinInLockedArea(db, pid, out, MatterColor.RED, y, info, maxX, maxY);
-        }
-        for (int i = countColor(out, MatterColor.BLUE); i < targetBlue; i++) {
-            spawnVeinInLockedArea(db, pid, out, MatterColor.BLUE, y, info, maxX, maxY);
-        }
-        for (int i = countColor(out, MatterColor.YELLOW); i < targetYellow; i++) {
-            spawnVeinInLockedArea(db, pid, out, MatterColor.YELLOW, y, info, maxX, maxY);
-        }
+        for (int i = countColor(out, MatterColor.RAW); i < targetRaw; i++) spawnVeinInLockedArea(db, pid, out, MatterColor.RAW, y, info, maxX, maxY);
+        for (int i = countColor(out, MatterColor.RED); i < targetRed; i++) spawnVeinInLockedArea(db, pid, out, MatterColor.RED, y, info, maxX, maxY);
+        for (int i = countColor(out, MatterColor.BLUE); i < targetBlue; i++) spawnVeinInLockedArea(db, pid, out, MatterColor.BLUE, y, info, maxX, maxY);
+        for (int i = countColor(out, MatterColor.YELLOW); i < targetYellow; i++) spawnVeinInLockedArea(db, pid, out, MatterColor.YELLOW, y, info, maxX, maxY);
     }
 
     private void spawnInUnlockedUntil(MariaDBAdapter db, Long pid, Map<GridPosition, MatterColor> out,
@@ -900,8 +1008,6 @@ public class GridManager {
         while (countColorInUnlocked(out, t, y, info) < desiredUnlocked) {
             int before = out.size();
             spawnVeinInBounds(db, pid, out, t, y, minX, maxXEx, minZ, maxZEx);
-
-            // se non riesce a piazzare (area piena), evitiamo loop infinito
             if (out.size() == before) break;
         }
     }
@@ -931,23 +1037,32 @@ public class GridManager {
                                        MatterColor t, int y, PlotAreaInfo info, int maxX, int maxY) {
         if (out == null) return;
 
-        int uMinX = info.minX();
-        int uMaxXEx = info.maxXExclusive();
-        int uMinZ = info.minZ();
-        int uMaxZEx = info.maxZExclusive();
-
-        boolean hasLockedArea = (uMinX > 0) || (uMinZ > 0) || (uMaxXEx < maxX) || (uMaxZEx < maxY);
+        int minX = info.minX();
+        int maxXEx = info.maxXExclusive();
+        int minZ = info.minZ();
+        int maxZEx = info.maxZExclusive();
 
         Random r = new Random();
 
-        // tenta random SOLO fuori dall’unlocked
-        if (hasLockedArea) {
-            for (int attempt = 0; attempt < 800; attempt++) {
-                int x = r.nextInt(maxX);
-                int z = r.nextInt(maxY);
+        for (int tries = 0; tries < 3000; tries++) {
+            int x = r.nextInt(maxX);
+            int z = r.nextInt(maxY);
 
-                // scarta coordinate dentro area sbloccata
-                if (x >= uMinX && x < uMaxXEx && z >= uMinZ && z < uMaxZEx) continue;
+            boolean insideUnlocked = x >= minX && x < maxXEx && z >= minZ && z < maxZEx;
+            if (insideUnlocked) continue;
+
+            GridPosition key = new GridPosition(x, y, z);
+            if (out.containsKey(key)) continue;
+
+            db.saveResource(pid, x, z, t);
+            out.put(key, t);
+            return;
+        }
+
+        for (int x = 0; x < maxX; x++) {
+            for (int z = 0; z < maxY; z++) {
+                boolean insideUnlocked = x >= minX && x < maxXEx && z >= minZ && z < maxZEx;
+                if (insideUnlocked) continue;
 
                 GridPosition key = new GridPosition(x, y, z);
                 if (out.containsKey(key)) continue;
@@ -957,38 +1072,22 @@ public class GridManager {
                 return;
             }
         }
-
-        // fallback: se non esiste area locked (o è troppo piccola) piazza ovunque nel max plot
-        spawnVeinInBounds(db, pid, out, t, y, 0, maxX, 0, maxY);
     }
-
-
 
     private int countColor(Map<GridPosition, MatterColor> out, MatterColor c) {
         if (out == null || out.isEmpty() || c == null) return 0;
         int n = 0;
-        for (MatterColor v : out.values()) if (c == v) n++;
+        for (MatterColor t : out.values()) if (t == c) n++;
         return n;
     }
 
-    private void ensureAtLeastOneInBounds(MariaDBAdapter db, Long pid, Map<GridPosition, MatterColor> out,
-                                          MatterColor t, int y,
-                                          int minX, int maxXEx, int minZ, int maxZEx) {
-        if (countColor(out, t) > 0) return;
-        spawnVeinInBounds(db, pid, out, t, y, minX, maxXEx, minZ, maxZEx);
-    }
-
     private void spawnVeinInBounds(MariaDBAdapter db, Long pid, Map<GridPosition, MatterColor> out,
-                                   MatterColor t, int y,
-                                   int minX, int maxXEx, int minZ, int maxZEx) {
-
+                                   MatterColor t, int y, int minX, int maxXEx, int minZ, int maxZEx) {
         if (out == null) return;
-        if (minX >= maxXEx || minZ >= maxZEx) return;
 
         Random r = new Random();
 
-        // tenta un po' di volte, poi degrada a scan
-        for (int attempt = 0; attempt < 300; attempt++) {
+        for (int tries = 0; tries < 2000; tries++) {
             int x = r.nextInt(maxXEx - minX) + minX;
             int z = r.nextInt(maxZEx - minZ) + minZ;
 
@@ -1014,7 +1113,6 @@ public class GridManager {
 
     // ==========================================================
     // CAPS
-
     // ==========================================================
     private boolean checkItemCap(UUID playerId, String itemId, int incomingAmount) {
         int inInventory = repository.getInventoryItemCount(playerId, itemId);
@@ -1038,9 +1136,7 @@ public class GridManager {
 
     private boolean canPlaceAnotherItem(UUID ownerId) {
         PlayerProfile p = getCachedProfile(ownerId);
-        if (p != null && p.isAdmin()) {
-            return true; // ✅ ADMIN bypass
-        }
+        if (p != null && p.isAdmin()) return true;
 
         int cap = getEffectiveItemPlacedOnPlotCap(ownerId);
         int placed = repository.getPlotItemsPlaced(ownerId);
@@ -1048,12 +1144,11 @@ public class GridManager {
         if (placed >= cap) {
             System.out.println("⚠️ CAP RAGGIUNTO: plot owner=" + ownerId
                     + " item_placed=" + placed + " cap=" + cap
-                    + " -> non puoi piazzare altri item, rimuovi qualcosa dalla fabbrica!");
+                    + " -> non puoi piazzare altri item, rimuovi qualcosa!");
             return false;
         }
         return true;
     }
-
 
     public int getEffectiveItemPlacedOnPlotCap(UUID ownerId) {
         int base = repository.getDefaultItemPlacedOnPlotCap();
@@ -1061,19 +1156,16 @@ public class GridManager {
 
         int step = Math.max(0, repository.getItemCapIncreaseStep());
         int max = repository.getMaxItemPlacedOnPlotCap();
-        if (max <= 0) max = 2147483647;
+        if (max <= 0) max = Integer.MAX_VALUE;
 
         int prestige = 0;
         PlayerProfile p = getCachedProfile(ownerId);
         if (p != null) prestige = Math.max(0, p.getPrestigeLevel());
 
         long raw = (long) base + (long) prestige * (long) step;
-        int cap = raw > 2147483647L ? 2147483647 : (int) raw;
+        int cap = raw > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) raw;
 
         cap = Math.min(cap, max);
         return Math.max(1, cap);
     }
-
-
-
 }

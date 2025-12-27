@@ -10,6 +10,7 @@ import com.matterworks.core.ui.swing.panels.InventoryDebugPanel;
 import com.matterworks.core.ui.swing.panels.StatusBarPanel;
 import com.matterworks.core.ui.swing.panels.TechTreePanel;
 import com.matterworks.core.ui.swing.panels.TopBarPanel;
+import com.matterworks.core.ui.swing.panels.VoidShopPanel;
 
 import javax.swing.*;
 import java.awt.*;
@@ -66,6 +67,7 @@ public class MatterWorksGUI extends JFrame {
     private volatile String lastPlotAreaShown = null;
     private volatile boolean lastPlotResizeEnabled = false;
 
+    // NEW: per instant button refresh (non serve cache separata: ricalcoliamo sempre)
     public MatterWorksGUI(GridManager gm,
                           BlockRegistry reg,
                           UUID initialUuid,
@@ -105,6 +107,7 @@ public class MatterWorksGUI extends JFrame {
         glassPane.addMouseMotionListener(new java.awt.event.MouseAdapter() {});
         setGlassPane(glassPane);
 
+        // ✅ usa il costruttore a 10 parametri: classic + instant
         this.topBar = new TopBarPanel(
                 this::selectTool,
                 this::buyToolRightClick,
@@ -114,6 +117,7 @@ public class MatterWorksGUI extends JFrame {
                 this::handleSave,
                 this::handleReset,
                 this::handlePrestige,
+                this::handleInstantPrestige,
                 this::handleDeletePlayer
         );
 
@@ -254,7 +258,6 @@ public class MatterWorksGUI extends JFrame {
             return;
         }
 
-        // info prestige (void + plot)
         ServerConfig cfg = repository.loadServerConfig();
         int addVoid = Math.max(0, cfg.prestigeVoidCoinsAdd());
         int plotBonus = Math.max(0, cfg.prestigePlotBonus());
@@ -262,7 +265,6 @@ public class MatterWorksGUI extends JFrame {
         int currentPrestige = Math.max(0, p.getPrestigeLevel());
         int nextPrestige = currentPrestige + 1;
 
-        // cap items (effettivo) now vs next
         int baseCap = safeGetDefaultItemCap();
         int step = safeGetItemCapStep();
         int maxCap = safeGetMaxItemCap();
@@ -287,11 +289,67 @@ public class MatterWorksGUI extends JFrame {
         );
         if (res != JOptionPane.YES_OPTION) return;
 
-        // disabilito subito per evitare spam-click
         topBar.setPrestigeButtonEnabled(false);
 
         gridManager.touchPlayer(u);
         gridManager.prestigeUser(u);
+
+        factoryPanel.forceRefreshNow();
+        updateEconomyLabelsForce();
+    }
+
+    // ✅ NEW: Instant Prestige (premium, NO reset)
+    private void handleInstantPrestige() {
+        UUID u = currentPlayerUuid;
+        if (u == null) return;
+
+        PlayerProfile p = gridManager.getCachedProfile(u);
+        if (p == null) return;
+
+        if (!gridManager.canInstantPrestige(u)) {
+            JOptionPane.showMessageDialog(
+                    this,
+                    "Instant Prestige locked.\nBuy 'instant_prestige' in the Void Shop first.",
+                    "Instant Prestige",
+                    JOptionPane.WARNING_MESSAGE
+            );
+            return;
+        }
+
+        ServerConfig cfg = repository.loadServerConfig();
+        int addVoid = Math.max(0, cfg.prestigeVoidCoinsAdd());
+        int plotBonus = Math.max(0, cfg.prestigePlotBonus());
+
+        int currentPrestige = Math.max(0, p.getPrestigeLevel());
+        int nextPrestige = currentPrestige + 1;
+
+        int baseCap = safeGetDefaultItemCap();
+        int step = safeGetItemCapStep();
+        int maxCap = safeGetMaxItemCap();
+
+        int capNow = computeEffectiveCap(baseCap, step, maxCap, currentPrestige);
+        int capNext = computeEffectiveCap(baseCap, step, maxCap, nextPrestige);
+
+        String msg =
+                "Use INSTANT PRESTIGE to reach PRESTIGE " + nextPrestige + "?\n\n" +
+                        "This will (NO RESET):\n" +
+                        " - Keep plot and tech tree (no malus)\n" +
+                        " - +1 Prestige level\n" +
+                        " - Grant +" + addVoid + " VOID coins\n" +
+                        " - Increase plot size by +" + plotBonus + " X and +" + plotBonus + " Y\n" +
+                        " - Increase item cap: " + capNow + " -> " + capNext + "\n\n" +
+                        (p.isAdmin() ? "(ADMIN: does not consume item)\n" : "Consumes: 1x instant_prestige\n");
+
+        int res = JOptionPane.showConfirmDialog(
+                this,
+                msg,
+                "Instant Prestige",
+                JOptionPane.YES_NO_OPTION
+        );
+        if (res != JOptionPane.YES_OPTION) return;
+
+        gridManager.touchPlayer(u);
+        gridManager.instantPrestigeUser(u);
 
         factoryPanel.forceRefreshNow();
         updateEconomyLabelsForce();
@@ -305,11 +363,8 @@ public class MatterWorksGUI extends JFrame {
         if (p == null || !p.isAdmin()) return;
 
         boolean ok;
-        if (dir > 0) {
-            ok = gridManager.increasePlotUnlockedArea(u);
-        } else {
-            ok = gridManager.decreasePlotUnlockedArea(u);
-        }
+        if (dir > 0) ok = gridManager.increasePlotUnlockedArea(u);
+        else ok = gridManager.decreasePlotUnlockedArea(u);
 
         if (!ok) {
             String msg = (dir > 0)
@@ -333,6 +388,7 @@ public class MatterWorksGUI extends JFrame {
         for (Component c : rightTabbedPane.getComponents()) {
             if (c instanceof InventoryDebugPanel p) p.dispose();
             if (c instanceof TechTreePanel p) p.dispose();
+            if (c instanceof VoidShopPanel p) p.dispose();
         }
 
         rightTabbedPane.removeAll();
@@ -340,6 +396,7 @@ public class MatterWorksGUI extends JFrame {
         if (currentPlayerUuid != null) {
             rightTabbedPane.addTab("Shop", new InventoryDebugPanel(repository, currentPlayerUuid, gridManager, this::requestEconomyRefresh));
             rightTabbedPane.addTab("Tech Tree", new TechTreePanel(repository, currentPlayerUuid, gridManager));
+            rightTabbedPane.addTab("Void Shop", new VoidShopPanel(repository, currentPlayerUuid, gridManager, this::requestEconomyRefresh));
         } else {
             rightTabbedPane.addTab("Info", new JPanel() {{ add(new JLabel("No Player Selected")); }});
         }
@@ -479,15 +536,8 @@ public class MatterWorksGUI extends JFrame {
         });
     }
 
-    private void safeOpenSession(UUID uuid) {
-        if (uuid == null) return;
-        repository.openPlayerSession(uuid);
-    }
-
-    private void safeCloseSession(UUID uuid) {
-        if (uuid == null) return;
-        repository.closePlayerSession(uuid);
-    }
+    private void safeOpenSession(UUID uuid) { if (uuid != null) repository.openPlayerSession(uuid); }
+    private void safeCloseSession(UUID uuid) { if (uuid != null) repository.closePlayerSession(uuid); }
 
     private void shutdownAndExit() {
         if (isSwitching) return;
@@ -573,6 +623,8 @@ public class MatterWorksGUI extends JFrame {
         UUID u = currentPlayerUuid;
         if (u == null) {
             topBar.setPrestigeButtonEnabled(false);
+            topBar.setInstantPrestigeButtonEnabled(false);
+
             topBar.getMoneyLabel().setText("MONEY: $---");
             topBar.getRoleLabel().setText("[---]");
             topBar.getVoidCoinsLabel().setText("VOID: ---");
@@ -591,6 +643,9 @@ public class MatterWorksGUI extends JFrame {
         boolean prestigeBtnEnabled = gridManager.getTechManager().isPrestigeUnlocked(p);
         topBar.setPrestigeButtonEnabled(prestigeBtnEnabled);
 
+        // ✅ NEW: instant enabled if item present (or admin)
+        topBar.setInstantPrestigeButtonEnabled(gridManager.canInstantPrestige(u));
+
         double money = p.getMoney();
         String rank = String.valueOf(p.getRank());
         boolean isAdmin = p.isAdmin();
@@ -598,7 +653,6 @@ public class MatterWorksGUI extends JFrame {
         int prestige = Math.max(0, p.getPrestigeLevel());
 
         Long pid = repository.getPlotId(u);
-
         int placed = repository.getPlotItemsPlaced(u);
 
         int baseCap = safeGetDefaultItemCap();
@@ -606,7 +660,6 @@ public class MatterWorksGUI extends JFrame {
         int maxCap = safeGetMaxItemCap();
         int effectiveCap = computeEffectiveCap(baseCap, step, maxCap, prestige);
 
-        // Plot area string (se disponibile)
         String plotAreaStr = null;
         try {
             GridManager.PlotAreaInfo info = gridManager.getPlotAreaInfo(u);
@@ -663,7 +716,6 @@ public class MatterWorksGUI extends JFrame {
 
         statusBar.setPlotResizeEnabled(isAdmin);
 
-        // tooltip generale sulla status bar (non richiede cambiare StatusBarPanel)
         String tip = "Item cap: base " + Math.max(1, baseCap)
                 + " + prestige(" + prestige + ")×" + Math.max(0, step)
                 + (maxCap != Integer.MAX_VALUE ? (" (max " + maxCap + ")") : "")
@@ -704,13 +756,11 @@ public class MatterWorksGUI extends JFrame {
     }
 
     private int safeGetItemCapStep() {
-        // NEW in repo: server_gamestate.itemcap_increase_step
         int step = invokeRepoInt("getItemCapIncreaseStep", 0);
         return Math.max(0, step);
     }
 
     private int safeGetMaxItemCap() {
-        // NEW in repo: server_gamestate.max_item_placed_on_plot
         int max = invokeRepoInt("getMaxItemPlacedOnPlotCap", Integer.MAX_VALUE);
         if (max <= 0) return Integer.MAX_VALUE;
         return max;
@@ -733,8 +783,7 @@ public class MatterWorksGUI extends JFrame {
             Method m = repository.getClass().getMethod(methodName);
             Object v = m.invoke(repository);
             if (v instanceof Integer i) return i;
-        } catch (Throwable ignored) {
-        }
+        } catch (Throwable ignored) {}
         return fallback;
     }
 }

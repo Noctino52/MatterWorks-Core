@@ -20,7 +20,9 @@ public final class TopBarPanel extends JPanel {
     private final JLabel voidCoinsLabel = UiKit.label("VOID: ---", new Color(190, 0, 220), 14);
     private final JLabel prestigeLabel = UiKit.label("PRESTIGE: ---", new Color(0, 200, 255), 14);
 
-    private final JButton btnPrestige; // ✅ NEW
+    // System buttons
+    private final JButton btnPrestigeClassic;
+    private final JButton btnPrestigeInstant;
 
     private final JSpinner layerSpinner;
     private volatile boolean suppressLayerEvents = false;
@@ -29,6 +31,10 @@ public final class TopBarPanel extends JPanel {
     private static final int SECTION_LABEL_H = 14;
     private static final int ROW_GAP_H = 2;
 
+    /**
+     * ✅ Compatibilità: costruttore originale (usato da MatterWorksGUI).
+     * In questa variante INSTANT è presente ma non fa nulla (handler no-op).
+     */
     public TopBarPanel(
             Consumer<String> onSelectTool,
             BiConsumer<String, Integer> onBuyToolRightClick,
@@ -37,7 +43,36 @@ public final class TopBarPanel extends JPanel {
             Runnable onSOS,
             Runnable onSave,
             Runnable onReset,
-            Runnable onPrestigeDummy, // ✅ NEW
+            Runnable onPrestigeClassic, // classic prestige
+            Runnable onDelete
+    ) {
+        this(
+                onSelectTool,
+                onBuyToolRightClick,
+                onLayerDelta,
+                onSelectStructureNativeId,
+                onSOS,
+                onSave,
+                onReset,
+                onPrestigeClassic,
+                () -> {},                 // INSTANT no-op (finché non aggiorni MatterWorksGUI)
+                onDelete
+        );
+    }
+
+    /**
+     * ✅ Nuovo: supporto completo anche a Instant Prestige.
+     */
+    public TopBarPanel(
+            Consumer<String> onSelectTool,
+            BiConsumer<String, Integer> onBuyToolRightClick,
+            Consumer<Integer> onLayerDelta,
+            Consumer<String> onSelectStructureNativeId,
+            Runnable onSOS,
+            Runnable onSave,
+            Runnable onReset,
+            Runnable onPrestigeClassic,
+            Runnable onPrestigeInstant,
             Runnable onDelete
     ) {
         super(new BorderLayout());
@@ -64,6 +99,7 @@ public final class TopBarPanel extends JPanel {
         JPanel leftOuter = new JPanel(new BorderLayout(10, 0));
         leftOuter.setOpaque(false);
 
+        // ===== MACHINES (2 ROWS) =====
         JPanel machines2Rows = new JPanel();
         machines2Rows.setOpaque(false);
         machines2Rows.setLayout(new BoxLayout(machines2Rows, BoxLayout.Y_AXIS));
@@ -98,7 +134,7 @@ public final class TopBarPanel extends JPanel {
         row1.add(toolButton("⬇ Drop", "dropper", onSelectTool, onBuyToolRightClick));
         row1.add(vSep());
 
-        // ✅ Nexus selezionabile, buy disattivato (right click)
+        // Nexus: selezionabile, buy disattivato (right click null)
         row1.add(toolButton("🌌 Nexus", "nexus_core", onSelectTool, null));
 
         row2.add(toolButton("🎨 Chroma", "chromator", onSelectTool, onBuyToolRightClick));
@@ -119,6 +155,7 @@ public final class TopBarPanel extends JPanel {
         machines2Rows.add(rowHeader2);
         machines2Rows.add(row2);
 
+        // ===== CONTROLS (Structure + Y Layer) =====
         JPanel controls = new JPanel();
         controls.setOpaque(false);
         controls.setLayout(new BoxLayout(controls, BoxLayout.Y_AXIS));
@@ -176,7 +213,9 @@ public final class TopBarPanel extends JPanel {
         leftOuter.add(machines2Rows, BorderLayout.CENTER);
         leftOuter.add(controls, BorderLayout.EAST);
 
-        // ========== RIGHT SYSTEM BUTTONS (con Prestige sotto Reset) ==========
+        // ===== RIGHT SYSTEM BUTTONS =====
+        // Riga 0: SOS, SAVE, RESET, DELETE
+        // Riga 1: INSTANT sotto RESET (di lato), PRESTIGE sotto DELETE (come richiesto)
         JPanel rightSystem = new JPanel(new GridBagLayout());
         rightSystem.setOpaque(false);
 
@@ -189,16 +228,23 @@ public final class TopBarPanel extends JPanel {
         JButton btnReset = UiKit.button("♻ RESET", e -> onReset.run());
         btnReset.setBackground(new Color(180, 0, 0));
 
-        // ✅ dummy (per ora non fa niente)
-        btnPrestige = UiKit.button("🟣 PRESTIGE", e -> onPrestigeDummy.run()); // (puoi rinominare il parametro, ma non serve)
-        btnPrestige.setBackground(new Color(150, 0, 200));
-        btnPrestige.setEnabled(false);
-        btnPrestige.setToolTipText("Finish the Tech Tree to unlock Prestige.");
-
         JButton btnDelete = UiKit.button("🗑 DELETE", e -> onDelete.run());
         btnDelete.setBackground(Color.BLACK);
         btnDelete.setForeground(Color.RED);
         btnDelete.setBorder(BorderFactory.createLineBorder(Color.RED, 1));
+
+        // Classic prestige (tech tree unlocked)
+        btnPrestigeClassic = UiKit.button("🟣 PRESTIGE", e -> onPrestigeClassic.run());
+        btnPrestigeClassic.setBackground(new Color(150, 0, 200));
+        btnPrestigeClassic.setEnabled(false);
+        btnPrestigeClassic.setToolTipText("Finish the Tech Tree to unlock Prestige.");
+
+        // Instant prestige (premium item)
+        btnPrestigeInstant = UiKit.button("✨ INSTANT", e -> onPrestigeInstant.run());
+        btnPrestigeInstant.setBackground(new Color(120, 40, 180));
+        btnPrestigeInstant.setEnabled(false);
+        btnPrestigeInstant.setToolTipText("Requires: instant_prestige (Void Shop).");
+        btnPrestigeInstant.setVisible(true);
 
         GridBagConstraints c = new GridBagConstraints();
         c.gridy = 0;
@@ -211,9 +257,15 @@ public final class TopBarPanel extends JPanel {
         c.gridx = 3; rightSystem.add(btnDelete, c);
 
         c.gridy = 1;
-        c.gridx = 2;
         c.insets = new Insets(4, 6, 0, 6);
-        rightSystem.add(btnPrestige, c);
+
+        // INSTANT sotto RESET (di lato)
+        c.gridx = 2;
+        rightSystem.add(btnPrestigeInstant, c);
+
+        // PRESTIGE sotto DELETE (come richiesto)
+        c.gridx = 3;
+        rightSystem.add(btnPrestigeClassic, c);
 
         toolbar.add(leftOuter, BorderLayout.CENTER);
         toolbar.add(rightSystem, BorderLayout.EAST);
@@ -222,17 +274,35 @@ public final class TopBarPanel extends JPanel {
         add(toolbar, BorderLayout.CENTER);
     }
 
+    // ===== GETTERS usati da MatterWorksGUI =====
     public JComboBox<Object> getPlayerSelector() { return playerSelector; }
     public JLabel getMoneyLabel() { return moneyLabel; }
     public JLabel getRoleLabel() { return roleLabel; }
     public JLabel getVoidCoinsLabel() { return voidCoinsLabel; }
     public JLabel getPrestigeLabel() { return prestigeLabel; }
 
-    // ✅ NEW: abilita/disabilita bottone prestige
+    // ===== Prestige buttons control =====
     public void setPrestigeButtonEnabled(boolean enabled) {
-        btnPrestige.setEnabled(enabled);
+        btnPrestigeClassic.setEnabled(enabled);
     }
 
+    public void setPrestigeButtonToolTip(String tooltip) {
+        btnPrestigeClassic.setToolTipText(tooltip);
+    }
+
+    public void setInstantPrestigeButtonEnabled(boolean enabled) {
+        btnPrestigeInstant.setEnabled(enabled);
+    }
+
+    public void setInstantPrestigeButtonVisible(boolean visible) {
+        btnPrestigeInstant.setVisible(visible);
+    }
+
+    public void setInstantPrestigeButtonToolTip(String tooltip) {
+        btnPrestigeInstant.setToolTipText(tooltip);
+    }
+
+    // ===== Layer control =====
     public void setLayerValue(int y) {
         int val = Math.max(0, Math.min(255, y));
         if (val == lastLayerValue) return;
@@ -246,6 +316,7 @@ public final class TopBarPanel extends JPanel {
         }
     }
 
+    // ===== UI helpers =====
     private JLabel sectionLabel(String text) {
         JLabel l = UiKit.label(text, new Color(180, 180, 180), 11);
         l.setFont(new Font("SansSerif", Font.BOLD, 11));
@@ -259,15 +330,15 @@ public final class TopBarPanel extends JPanel {
         return sep;
     }
 
-    private JButton toolButton(String text,
-                               String itemId,
-                               Consumer<String> onSelectTool,
-                               BiConsumer<String, Integer> onBuyToolRightClick) {
-
+    private JButton toolButton(
+            String text,
+            String itemId,
+            Consumer<String> onSelectTool,
+            BiConsumer<String, Integer> onBuyToolRightClick
+    ) {
         JButton btn = UiKit.button(text, e -> onSelectTool.accept(itemId));
         btn.addMouseListener(new MouseAdapter() {
             @Override public void mousePressed(MouseEvent e) {
-                // ✅ null-safe
                 if (SwingUtilities.isRightMouseButton(e) && onBuyToolRightClick != null) {
                     onBuyToolRightClick.accept(itemId, 1);
                 }
