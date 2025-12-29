@@ -3,7 +3,7 @@ package com.matterworks.core.ui.swing.panels;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.domain.shop.VoidShopItem;
 import com.matterworks.core.managers.GridManager;
-import com.matterworks.core.ports.IRepository;
+import com.matterworks.core.ui.MariaDBAdapter;
 
 import javax.swing.*;
 import javax.swing.Timer;
@@ -14,7 +14,7 @@ import java.util.concurrent.*;
 
 public class VoidShopPanel extends JPanel {
 
-    private final IRepository repository; // compat con gli altri pannelli
+    private final MariaDBAdapter repository;
     private final UUID playerUuid;
     private final GridManager gridManager;
     private final Runnable onEconomyMaybeChanged;
@@ -44,8 +44,6 @@ public class VoidShopPanel extends JPanel {
         final JButton btnBuy;
 
         volatile int lastOwned = Integer.MIN_VALUE;
-        volatile int lastVoid = Integer.MIN_VALUE;
-        volatile boolean lastAdmin = false;
 
         Row(String itemId, JLabel lblTitle, JLabel lblDetail, JLabel lblOwned, JButton btnBuy) {
             this.itemId = itemId;
@@ -56,7 +54,7 @@ public class VoidShopPanel extends JPanel {
         }
     }
 
-    public VoidShopPanel(IRepository repository, UUID playerUuid, GridManager gm, Runnable onEconomyMaybeChanged) {
+    public VoidShopPanel(MariaDBAdapter repository, UUID playerUuid, GridManager gm, Runnable onEconomyMaybeChanged) {
         this.repository = repository;
         this.playerUuid = playerUuid;
         this.gridManager = gm;
@@ -228,6 +226,9 @@ public class VoidShopPanel extends JPanel {
         int voidCoins = p.getVoidCoins();
         boolean admin = p.isAdmin();
 
+        List<VoidShopItem> catalog = Collections.emptyList();
+        try { catalog = gridManager.getVoidShopCatalog(); } catch (Throwable ignored) {}
+
         for (Row r : rows.values()) {
             int owned = 0;
             try { owned = repository.getInventoryItemCount(playerUuid, r.itemId); }
@@ -238,17 +239,19 @@ public class VoidShopPanel extends JPanel {
                 r.lblOwned.setText("Owned: " + owned);
             }
 
-            // enable buy only if you can pay (or admin)
             VoidShopItem def = null;
-            try { def = gridManager.getVoidShopCatalog().stream().filter(x -> x.itemId().equals(r.itemId)).findFirst().orElse(null); }
-            catch (Throwable ignored) {}
+            try {
+                if (catalog != null) {
+                    for (VoidShopItem x : catalog) {
+                        if (x != null && r.itemId.equals(x.itemId())) { def = x; break; }
+                    }
+                }
+            } catch (Throwable ignored) {}
 
             int price = (def != null ? Math.max(0, def.voidPrice()) : Integer.MAX_VALUE);
 
             boolean canBuy = admin || voidCoins >= price;
             r.btnBuy.setEnabled(canBuy);
-
-            // piccola UI feedback
             r.btnBuy.setBackground(canBuy ? new Color(120, 40, 180) : new Color(90, 90, 40));
         }
     }

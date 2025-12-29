@@ -3,7 +3,7 @@ package com.matterworks.core.ui.swing.app;
 import com.matterworks.core.domain.machines.registry.BlockRegistry;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.managers.GridManager;
-import com.matterworks.core.ports.IRepository;
+import com.matterworks.core.ui.MariaDBAdapter;
 import com.matterworks.core.ui.ServerConfig;
 import com.matterworks.core.ui.swing.factory.FactoryPanel;
 import com.matterworks.core.ui.swing.panels.InventoryDebugPanel;
@@ -28,7 +28,7 @@ public class MatterWorksGUI extends JFrame {
 
     private final GridManager gridManager;
     private final BlockRegistry registry;
-    private final IRepository repository;
+    private final MariaDBAdapter repository;
     private final Runnable onSave;
 
     private final FactoryPanel factoryPanel;
@@ -72,7 +72,7 @@ public class MatterWorksGUI extends JFrame {
                           BlockRegistry reg,
                           UUID initialUuid,
                           Runnable onSave,
-                          IRepository repo) {
+                          MariaDBAdapter repo) {
 
         this.gridManager = gm;
         this.registry = reg;

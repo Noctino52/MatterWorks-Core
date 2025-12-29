@@ -3,7 +3,7 @@ package com.matterworks.core.ui.swing.panels;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.managers.GridManager;
 import com.matterworks.core.managers.TechManager;
-import com.matterworks.core.ports.IRepository;
+import com.matterworks.core.ui.MariaDBAdapter;
 
 import javax.swing.*;
 import java.awt.*;
@@ -11,12 +11,12 @@ import java.util.UUID;
 
 public class TechTreePanel extends JPanel {
 
-    private final IRepository repository; // compat
+    private final MariaDBAdapter repository; // compat
     private final UUID playerUuid;
     private final GridManager gridManager;
     private final Timer refreshTimer;
 
-    public TechTreePanel(IRepository repository, UUID playerUuid, GridManager gm) {
+    public TechTreePanel(MariaDBAdapter repository, UUID playerUuid, GridManager gm) {
         this.repository = repository;
         this.playerUuid = playerUuid;
         this.gridManager = gm;

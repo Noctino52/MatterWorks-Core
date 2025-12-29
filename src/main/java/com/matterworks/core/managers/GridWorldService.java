@@ -1,4 +1,3 @@
-// FILE: src/main/java/com/matterworks/core/managers/GridWorldService.java
 package com.matterworks.core.managers;
 
 import com.matterworks.core.common.Direction;
@@ -13,7 +12,6 @@ import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.model.PlotObject;
 import com.matterworks.core.model.PlotUnlockState;
-import com.matterworks.core.ports.IRepository;
 import com.matterworks.core.ports.IWorldAccess;
 import com.matterworks.core.ui.MariaDBAdapter;
 import com.matterworks.core.ui.ServerConfig;
@@ -32,7 +30,7 @@ import java.util.stream.Collectors;
 final class GridWorldService {
 
     private final GridManager gridManager;
-    private final IRepository repository;
+    private final MariaDBAdapter repository;
     private final IWorldAccess worldAdapter;
     private final BlockRegistry blockRegistry;
     private final TechManager techManager;
@@ -41,7 +39,7 @@ final class GridWorldService {
 
     GridWorldService(
             GridManager gridManager,
-            IRepository repository,
+            MariaDBAdapter repository,
             IWorldAccess worldAdapter,
             BlockRegistry blockRegistry,
             TechManager techManager,
@@ -257,13 +255,11 @@ final class GridWorldService {
                 state.plotUnlockCache.put(ownerId, PlotUnlockState.zero());
             }
 
-            if (repository instanceof MariaDBAdapter db) {
-                Long pid = db.getPlotId(ownerId);
-                if (pid != null) {
-                    Map<GridPosition, MatterColor> res = db.loadResources(pid);
-                    if (res.isEmpty()) generateDefaultResources(ownerId, db, pid, res);
-                    state.playerResources.put(ownerId, res);
-                }
+            Long pid = repository.getPlotId(ownerId);
+            if (pid != null) {
+                Map<GridPosition, MatterColor> res = repository.loadResources(pid);
+                if (res.isEmpty()) generateDefaultResources(ownerId, repository, pid, res);
+                state.playerResources.put(ownerId, res);
             }
 
             List<PlotObject> dtos = repository.loadPlotMachines(ownerId);

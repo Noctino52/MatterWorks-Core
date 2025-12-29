@@ -1,4 +1,3 @@
-// FILE: src/main/java/com/matterworks/core/managers/GridRuntimeState.java
 package com.matterworks.core.managers;
 
 import com.matterworks.core.common.GridPosition;
@@ -6,22 +5,15 @@ import com.matterworks.core.domain.machines.base.PlacedMachine;
 import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.model.PlotUnlockState;
-import com.matterworks.core.ports.IRepository;
 import com.matterworks.core.ui.MariaDBAdapter;
 import com.matterworks.core.ui.ServerConfig;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Set;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 final class GridRuntimeState {
 
-    final IRepository repository;
+    final MariaDBAdapter repository;
 
     volatile ServerConfig serverConfig;
 
@@ -41,7 +33,7 @@ final class GridRuntimeState {
     // --- MAINTENANCE ---
     long lastSweepTick = 0;
 
-    GridRuntimeState(IRepository repository) {
+    GridRuntimeState(MariaDBAdapter repository) {
         this.repository = repository;
         this.serverConfig = repository.loadServerConfig();
         reloadMinutesToInactive();
@@ -64,11 +56,7 @@ final class GridRuntimeState {
     // CONFIG: MinutesToInactive
     // ==========================================================
     void reloadMinutesToInactive() {
-        if (repository instanceof MariaDBAdapter a) {
-            this.minutesToInactive = Math.max(1, a.loadMinutesToInactive());
-        } else {
-            this.minutesToInactive = 5;
-        }
+        this.minutesToInactive = Math.max(1, repository.loadMinutesToInactive());
     }
 
     // ==========================================================
@@ -83,7 +71,7 @@ final class GridRuntimeState {
             Map<GridPosition, PlacedMachine> grid = playerGrids.get(ownerId);
             if (grid != null && !grid.isEmpty()) {
                 synchronized (tickingMachines) {
-                    for (PlacedMachine pm : new java.util.HashSet<>(grid.values())) {
+                    for (PlacedMachine pm : new HashSet<>(grid.values())) {
                         if (pm == null) continue;
                         if (!tickingMachines.contains(pm)) tickingMachines.add(pm);
                     }
@@ -108,9 +96,7 @@ final class GridRuntimeState {
                 synchronized (tickingMachines) {
                     tickingMachines.removeIf(m -> m != null && ownerId.equals(m.getOwnerId()));
                 }
-                if (repository instanceof MariaDBAdapter a) {
-                    a.closePlayerSession(ownerId);
-                }
+                repository.closePlayerSession(ownerId);
             }
         }
     }
@@ -124,7 +110,7 @@ final class GridRuntimeState {
     }
 
     // ==========================================================
-    // CAPS (logica identica)
+    // CAPS - SHOP GUARD (identico a prima)
     // ==========================================================
     boolean checkItemCap(UUID playerId, String itemId, int incomingAmount) {
         int inInventory = repository.getInventoryItemCount(playerId, itemId);
@@ -140,9 +126,9 @@ final class GridRuntimeState {
 
         long total = inInventory + placedCount + incomingAmount;
 
-        if (itemId.equals("nexus_core") && total > 1) return false;
+        if ("nexus_core".equals(itemId) && total > 1) return false;
 
-        if (itemId.equals("drill_mk1")) {
+        if ("drill_mk1".equals(itemId)) {
             Map<GridPosition, MatterColor> veins = playerResources.get(playerId);
             if (total > (veins != null ? veins.size() : 0)) return false;
         }

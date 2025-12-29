@@ -5,15 +5,14 @@ import com.matterworks.core.database.dao.MachineDefinitionDAO;
 import com.matterworks.core.database.dao.PlayerDAO;
 import com.matterworks.core.domain.machines.registry.BlockRegistry;
 import com.matterworks.core.domain.player.PlayerProfile;
-import com.matterworks.core.ui.CoreConfig;
-import com.matterworks.core.ui.MariaDBAdapter;
-import com.matterworks.core.ui.swing.app.MatterWorksGUI;
 import com.matterworks.core.managers.GridManager;
 import com.matterworks.core.managers.WorldIntegrityValidator;
-import com.matterworks.core.ports.IRepository;
 import com.matterworks.core.ports.IWorldAccess;
 import com.matterworks.core.synchronization.FactoryLoop;
 import com.matterworks.core.synchronization.GridSaverService;
+import com.matterworks.core.ui.CoreConfig;
+import com.matterworks.core.ui.MariaDBAdapter;
+import com.matterworks.core.ui.swing.app.MatterWorksGUI;
 
 import javax.swing.SwingUtilities;
 import java.awt.GraphicsEnvironment;
@@ -40,8 +39,13 @@ public class Main {
             System.err.println("🚨 ATTENZIONE: Il mondo contiene collisioni!");
         }
 
-        IRepository repository = new MariaDBAdapter(dbManager);
+        // ✅ MariaDB-only (niente IRepository)
+        MariaDBAdapter repository = new MariaDBAdapter(dbManager);
+
+        // ✅ GridManager ora lavora direttamente con MariaDBAdapter
         GridManager gridManager = new GridManager(repository, world, blockRegistry);
+
+        // ✅ GridSaverService nel tuo refactor deve accettare MariaDBAdapter (o comunque non IRepository)
         GridSaverService saverService = new GridSaverService(gridManager, repository);
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
@@ -65,9 +69,9 @@ public class Main {
             try {
                 UUID id = p.getPlayerId();
 
-                // Se manca il plot per qualche player, lo creiamo (solo se repository è MariaDBAdapter)
-                if (repository.getPlotId(id) == null && repository instanceof MariaDBAdapter db) {
-                    db.createPlot(id, 1, 0, 0);
+                // se manca il plot per qualche player, lo creiamo
+                if (repository.getPlotId(id) == null) {
+                    repository.createPlot(id, 1, 0, 0);
                 }
 
                 gridManager.preloadPlotFromDB(id);
@@ -79,8 +83,8 @@ public class Main {
 
         // assicura che anche il dev user venga richiesto comunque
         try {
-            if (repository.getPlotId(playerUuid) == null && repository instanceof MariaDBAdapter db) {
-                db.createPlot(playerUuid, 1, 0, 0);
+            if (repository.getPlotId(playerUuid) == null) {
+                repository.createPlot(playerUuid, 1, 0, 0);
             }
             gridManager.loadPlotFromDB(playerUuid);
         } catch (Exception e) {
@@ -128,6 +132,8 @@ public class Main {
         @Override public void setBlock(com.matterworks.core.common.GridPosition pos, String id) {}
         @Override public boolean isBlockSolid(com.matterworks.core.common.GridPosition pos) { return true; }
         @Override public void createVisuals(com.matterworks.core.common.GridPosition pos, String id) {}
-        @Override public com.matterworks.core.common.Vector3Int fetchExternalBlockDimensions(String id) { return com.matterworks.core.common.Vector3Int.one(); }
+        @Override public com.matterworks.core.common.Vector3Int fetchExternalBlockDimensions(String id) {
+            return com.matterworks.core.common.Vector3Int.one();
+        }
     }
 }

@@ -4,7 +4,7 @@ import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.domain.machines.base.PlacedMachine;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.managers.GridManager;
-import com.matterworks.core.ports.IRepository;
+import com.matterworks.core.ui.MariaDBAdapter;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -14,9 +14,9 @@ import java.util.UUID;
 public class GridSaverService {
 
     private final GridManager gridManager;
-    private final IRepository repository;
+    private final MariaDBAdapter repository;
 
-    public GridSaverService(GridManager gridManager, IRepository repository) {
+    public GridSaverService(GridManager gridManager, MariaDBAdapter repository) {
         this.gridManager = gridManager;
         this.repository = repository;
     }

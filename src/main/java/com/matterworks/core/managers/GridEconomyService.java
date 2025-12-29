@@ -1,11 +1,9 @@
-// FILE: src/main/java/com/matterworks/core/managers/GridEconomyService.java
 package com.matterworks.core.managers;
 
 import com.matterworks.core.domain.machines.registry.BlockRegistry;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.domain.shop.VoidShopItem;
 import com.matterworks.core.model.PlotUnlockState;
-import com.matterworks.core.ports.IRepository;
 import com.matterworks.core.ui.MariaDBAdapter;
 import com.matterworks.core.ui.ServerConfig;
 
@@ -16,7 +14,7 @@ import java.util.concurrent.ExecutorService;
 final class GridEconomyService {
 
     private final GridManager gridManager;
-    private final IRepository repository;
+    private final MariaDBAdapter repository;
     private final BlockRegistry blockRegistry;
     private final TechManager techManager;
     private final ExecutorService ioExecutor;
@@ -25,7 +23,7 @@ final class GridEconomyService {
 
     GridEconomyService(
             GridManager gridManager,
-            IRepository repository,
+            MariaDBAdapter repository,
             BlockRegistry blockRegistry,
             TechManager techManager,
             ExecutorService ioExecutor,
@@ -61,44 +59,18 @@ final class GridEconomyService {
 
         int unit = Math.max(0, def.voidPrice());
 
-        // ✅ path atomico per MariaDB (niente più coin persi se inventario fallisce)
-        if (repository instanceof MariaDBAdapter db) {
-            boolean ok = db.purchaseVoidShopItemAtomic(playerId, premiumItemId, unit, amount, p.isAdmin());
-            if (!ok) return false;
+        // ✅ sempre path atomico (MariaDB-only)
+        boolean ok = repository.purchaseVoidShopItemAtomic(playerId, premiumItemId, unit, amount, p.isAdmin());
+        if (!ok) return false;
 
-            // ricarica profilo per aggiornare void coins in cache/UI
-            PlayerProfile fresh = repository.loadPlayerProfile(playerId);
-            if (fresh != null) state.activeProfileCache.put(playerId, fresh);
-
-            if (!p.isAdmin()) {
-                repository.logTransaction(fresh != null ? fresh : p, "VOID_SHOP_BUY", "VOID_COINS", (double) unit * amount, premiumItemId);
-            } else {
-                repository.logTransaction(fresh != null ? fresh : p, "VOID_SHOP_BUY_ADMIN", "VOID_COINS", 0, premiumItemId);
-            }
-            return true;
-        }
-
-        // fallback
-        long totalL = (long) unit * (long) amount;
-        if (totalL > Integer.MAX_VALUE) totalL = Integer.MAX_VALUE;
-        int total = (int) totalL;
-
-        if (!p.isAdmin() && p.getVoidCoins() < total) return false;
-
-        try {
-            repository.modifyInventoryItem(playerId, premiumItemId, amount);
-        } catch (Throwable t) {
-            t.printStackTrace();
-            return false;
-        }
+        // ricarica profilo per aggiornare void coins in cache/UI
+        PlayerProfile fresh = repository.loadPlayerProfile(playerId);
+        if (fresh != null) state.activeProfileCache.put(playerId, fresh);
 
         if (!p.isAdmin()) {
-            p.modifyVoidCoins(-total);
-            repository.savePlayerProfile(p);
-            state.activeProfileCache.put(playerId, p);
-            repository.logTransaction(p, "VOID_SHOP_BUY", "VOID_COINS", total, premiumItemId);
+            repository.logTransaction(fresh != null ? fresh : p, "VOID_SHOP_BUY", "VOID_COINS", (double) unit * amount, premiumItemId);
         } else {
-            repository.logTransaction(p, "VOID_SHOP_BUY_ADMIN", "VOID_COINS", 0, premiumItemId);
+            repository.logTransaction(fresh != null ? fresh : p, "VOID_SHOP_BUY_ADMIN", "VOID_COINS", 0, premiumItemId);
         }
 
         return true;
@@ -379,9 +351,7 @@ final class GridEconomyService {
         repository.modifyInventoryItem(newUuid, "nexus_core", 1);
         repository.modifyInventoryItem(newUuid, "conveyor_belt", 10);
 
-        if (repository instanceof MariaDBAdapter db) {
-            db.createPlot(newUuid, 1, 0, 0);
-        }
+        repository.createPlot(newUuid, 1, 0, 0);
 
         world.preloadPlotFromDB(newUuid);
         return p;
@@ -390,7 +360,7 @@ final class GridEconomyService {
     void deletePlayer(UUID uuid) {
         if (uuid == null) return;
 
-        if (repository instanceof MariaDBAdapter a) a.closePlayerSession(uuid);
+        repository.closePlayerSession(uuid);
 
         synchronized (state.tickingMachines) {
             world.saveAndUnloadSpecific(uuid);

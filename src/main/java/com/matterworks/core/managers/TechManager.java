@@ -2,7 +2,7 @@ package com.matterworks.core.managers;
 
 import com.matterworks.core.database.dao.TechDefinitionDAO;
 import com.matterworks.core.domain.player.PlayerProfile;
-import com.matterworks.core.ports.IRepository;
+import com.matterworks.core.ui.MariaDBAdapter;
 
 import java.util.*;
 import java.util.stream.Collectors;
@@ -12,7 +12,7 @@ public class TechManager {
     // ✅ Ultimo nodo sintetico che sblocca il bottone prestige
     public static final String PRESTIGE_UNLOCK_TECH = "prestige_unlock";
 
-    private final IRepository repository;
+    private final MariaDBAdapter repository;
     private final TechDefinitionDAO dao;
 
     public record TechNode(
@@ -46,10 +46,10 @@ public class TechManager {
 
     private final Map<String, TechNode> nodes = new LinkedHashMap<>();
 
-    // item “free” sempre acquistabili (indipendenti dal tech tree)
+    // item “free” sempre acquistabili
     private final Set<String> baseItems = Set.of("drill_mk1", "conveyor_belt", "nexus_core");
 
-    public TechManager(IRepository repository, TechDefinitionDAO dao) {
+    public TechManager(MariaDBAdapter repository, TechDefinitionDAO dao) {
         this.repository = repository;
         this.dao = dao;
         loadFromDatabase();
@@ -65,24 +65,12 @@ public class TechManager {
             nodes.put(node.id(), node);
         }
 
-        // ✅ nodo prestige in fondo
         addSyntheticPrestigeNode();
     }
 
-    // -------------------------
-    // “Orphan prereq” handling
-    // -------------------------
-
-    /**
-     * ✅ Regola chiave:
-     * - parentId null/blank => ignorato
-     * - parentId NON presente nel tech tree (nodo cancellato dal DB) => ignorato (considerato soddisfatto)
-     * - altrimenti => deve essere presente in unlocked tech del player
-     */
     public boolean isPrerequisiteSatisfied(PlayerProfile p, String parentId) {
         if (parentId == null || parentId.isBlank()) return true;
 
-        // Se il nodo prerequisito non esiste più nel DB/tree, non deve bloccare nulla
         if (!nodes.containsKey(parentId) && !PRESTIGE_UNLOCK_TECH.equals(parentId)) return true;
 
         if (p == null) return false;
@@ -99,10 +87,6 @@ public class TechManager {
         return true;
     }
 
-    // -------------------------
-    // Public API
-    // -------------------------
-
     public boolean isPrestigeUnlockTech(String techId) {
         return PRESTIGE_UNLOCK_TECH.equals(techId);
     }
@@ -115,7 +99,6 @@ public class TechManager {
         if (p == null) return false;
         if (p.isAdmin()) return true;
 
-        // ✅ drill/belt/nexus sempre disponibili subito
         if (baseItems.contains(itemId)) return true;
 
         for (TechNode node : nodes.values()) {
@@ -140,7 +123,6 @@ public class TechManager {
 
         if (p.hasTech(nodeId)) return false;
 
-        // ✅ prerequisiti: orfani ignorati
         if (!areParentsSatisfied(p, node)) return false;
 
         double effectiveCost = node.effectiveCost(p);
@@ -156,8 +138,6 @@ public class TechManager {
     }
 
     public Collection<TechNode> getAllNodes() {
-        // ✅ non nascondo nulla qui: se basic_mining non esiste, non appare.
-        // Se vuoi nascondere altri nodi “speciali”, lo fai qui.
         return nodes.values().stream()
                 .filter(Objects::nonNull)
                 .collect(Collectors.toList());
@@ -166,10 +146,6 @@ public class TechManager {
     public TechNode getNode(String id) {
         return nodes.get(id);
     }
-
-    // -------------------------
-    // Synthetic prestige node
-    // -------------------------
 
     private void addSyntheticPrestigeNode() {
         List<String> allParents = nodes.keySet().stream()
@@ -186,7 +162,6 @@ public class TechManager {
                 List.of()
         );
 
-        nodes.remove(PRESTIGE_UNLOCK_TECH);
         nodes.put(PRESTIGE_UNLOCK_TECH, prestige);
     }
 }

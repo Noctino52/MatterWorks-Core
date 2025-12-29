@@ -2,7 +2,7 @@ package com.matterworks.core.ui.swing.panels;
 
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.managers.GridManager;
-import com.matterworks.core.ports.IRepository;
+import com.matterworks.core.ui.MariaDBAdapter;
 
 import javax.swing.*;
 import javax.swing.Timer;
@@ -38,7 +38,7 @@ public class InventoryDebugPanel extends JPanel {
     private static final Color CANT_AFFORD_RED = new Color(220, 90, 90);
     private static final Color PENDING_GRAY = new Color(140, 140, 140);
 
-    private final IRepository repository;
+    private final MariaDBAdapter repository;
     private final UUID playerUuid;
     private final GridManager gridManager;
     private final Runnable onEconomyMaybeChanged;
@@ -94,7 +94,7 @@ public class InventoryDebugPanel extends JPanel {
         }
     }
 
-    public InventoryDebugPanel(IRepository repository, UUID playerUuid, GridManager gm, Runnable onEconomyMaybeChanged) {
+    public InventoryDebugPanel(MariaDBAdapter repository, UUID playerUuid, GridManager gm, Runnable onEconomyMaybeChanged) {
         this.repository = repository;
         this.playerUuid = playerUuid;
         this.gridManager = gm;
@@ -239,7 +239,6 @@ public class InventoryDebugPanel extends JPanel {
         b.setForeground(Color.WHITE);
         b.setBackground(bg);
     }
-
 
     private void runActionAsync(JButton btn, Runnable action) {
         if (disposed) return;

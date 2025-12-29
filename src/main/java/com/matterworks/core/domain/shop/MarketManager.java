@@ -5,7 +5,7 @@ import com.matterworks.core.domain.matter.MatterPayload;
 import com.matterworks.core.domain.matter.MatterShape;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.managers.GridManager;
-import com.matterworks.core.ports.IRepository;
+import com.matterworks.core.ui.MariaDBAdapter;
 import com.matterworks.core.ui.ServerConfig;
 
 import java.util.HashMap;
@@ -16,10 +16,10 @@ import java.util.stream.Collectors;
 public class MarketManager {
 
     private final GridManager gridManager;
-    private final IRepository repository;
+    private final MariaDBAdapter repository;
     private final Map<MatterColor, Double> basePrices;
 
-    public MarketManager(GridManager gridManager, IRepository repository) {
+    public MarketManager(GridManager gridManager, MariaDBAdapter repository) {
         this.gridManager = gridManager;
         this.repository = repository;
         this.basePrices = new HashMap<>();
