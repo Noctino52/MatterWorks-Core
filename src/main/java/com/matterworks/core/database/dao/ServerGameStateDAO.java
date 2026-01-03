@@ -50,16 +50,29 @@ public class ServerGameStateDAO {
      * If the column does not exist (older DB), returns 0.
      */
     public int getVoidItemCapIncreaseStep() {
-        String sql = "SELECT void_itemcap_increase_step FROM server_gamestate WHERE id = 1";
+        // Preferred column name (current DB): itemcap_void_increase_step
+        String sql = "SELECT itemcap_void_increase_step FROM server_gamestate WHERE id = 1";
         try (Connection conn = db.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql);
              ResultSet rs = ps.executeQuery()) {
 
-            if (rs.next()) return Math.max(0, rs.getInt("void_itemcap_increase_step"));
+            if (rs.next()) return Math.max(0, rs.getInt("itemcap_void_increase_step"));
         } catch (SQLException e) {
-            // Backward compatible: if column doesn't exist yet, just behave as "disabled"
+            // Backward compat: older / different naming
             if (!SqlCompat.isUnknownColumn(e)) e.printStackTrace();
         }
+
+        // Fallback attempt: older naming (if someone used it)
+        String sql2 = "SELECT void_itemcap_increase_step FROM server_gamestate WHERE id = 1";
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql2);
+             ResultSet rs = ps.executeQuery()) {
+
+            if (rs.next()) return Math.max(0, rs.getInt("void_itemcap_increase_step"));
+        } catch (SQLException e) {
+            if (!SqlCompat.isUnknownColumn(e)) e.printStackTrace();
+        }
+
         return 0;
     }
 

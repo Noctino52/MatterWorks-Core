@@ -27,7 +27,6 @@ public class MariaDBAdapter {
     private final TransactionDAO transactionDAO;
     private final VoidShopDAO voidShopDAO;
 
-    // NEW: DAO specializzati
     private final ServerGameStateDAO serverGameStateDAO;
     private final PlayerSessionDAO playerSessionDAO;
     private final PlotMaintenanceDAO plotMaintenanceDAO;
@@ -55,32 +54,22 @@ public class MariaDBAdapter {
         return plotDAO.createPlot(ownerId, x, z, worldId);
     }
 
-    public DatabaseManager getDbManager() {
-        return dbManager;
-    }
+    public DatabaseManager getDbManager() { return dbManager; }
 
-    public TechDefinitionDAO getTechDefinitionDAO() {
-        return techDefinitionDAO;
-    }
+    public TechDefinitionDAO getTechDefinitionDAO() { return techDefinitionDAO; }
 
     // ==========================================================
     // VOID SHOP
     // ==========================================================
     public List<VoidShopItem> loadVoidShopCatalog() {
-        try {
-            return voidShopDAO.loadAll();
-        } catch (Throwable t) {
-            return List.of();
-        }
+        try { return voidShopDAO.loadAll(); }
+        catch (Throwable t) { return List.of(); }
     }
 
     public VoidShopItem loadVoidShopItem(String itemId) {
         if (itemId == null || itemId.isBlank()) return null;
-        try {
-            return voidShopDAO.loadById(itemId);
-        } catch (Throwable t) {
-            return null;
-        }
+        try { return voidShopDAO.loadById(itemId); }
+        catch (Throwable t) { return null; }
     }
 
     public boolean purchaseVoidShopItemAtomic(UUID playerId, String itemId, int unitPrice, int amount, boolean isAdmin) {
@@ -102,17 +91,26 @@ public class MariaDBAdapter {
         return serverGameStateDAO.getItemCapIncreaseStep();
     }
 
-    // ✅ NEW: void/admin step (db: server_gamestate.void_itemcap_increase_step)
-    public int getVoidItemCapIncreaseStep() {
-        return serverGameStateDAO.getVoidItemCapIncreaseStep();
-    }
-
     public int getMaxItemPlacedOnPlotCap() {
         return serverGameStateDAO.getMaxItemPlacedOnPlotCap();
     }
 
     public void updateMaxItemPlacedOnPlotCap(int newCap) {
         serverGameStateDAO.updateMaxItemPlacedOnPlotCap(newCap);
+    }
+
+    // ✅ NEW: reads server_gamestate.itemcap_void_increase_step (compat fallback handled in DAO)
+    public int getVoidItemCapIncreaseStep() {
+        return serverGameStateDAO.getVoidItemCapIncreaseStep();
+    }
+
+    // ✅ NEW: persisted per-plot bonus on plots.void_itemcap_extra
+    public int getPlotVoidItemCapExtra(UUID ownerId) {
+        return plotDAO.getVoidItemCapExtra(ownerId);
+    }
+
+    public int addPlotVoidItemCapExtra(UUID ownerId, int delta) {
+        return plotDAO.addVoidItemCapExtra(ownerId, delta);
     }
 
     // ==========================================================
@@ -136,35 +134,19 @@ public class MariaDBAdapter {
     // ==========================================================
     // Player Sessions
     // ==========================================================
-    public void openPlayerSession(UUID playerUuid) {
-        playerSessionDAO.openPlayerSession(playerUuid);
-    }
-
-    public void closePlayerSession(UUID playerUuid) {
-        playerSessionDAO.closePlayerSession(playerUuid);
-    }
+    public void openPlayerSession(UUID playerUuid) { playerSessionDAO.openPlayerSession(playerUuid); }
+    public void closePlayerSession(UUID playerUuid) { playerSessionDAO.closePlayerSession(playerUuid); }
 
     // ==========================================================
     // PLAYER & PROFILE
     // ==========================================================
-    public PlayerProfile loadPlayerProfile(UUID uuid) {
-        return playerDAO.load(uuid);
-    }
-
-    public void savePlayerProfile(PlayerProfile profile) {
-        playerDAO.save(profile);
-    }
-
-    public List<PlayerProfile> getAllPlayers() {
-        return playerDAO.loadAll();
-    }
-
-    public void deletePlayerFull(UUID uuid) {
-        plotMaintenanceDAO.deletePlayerFull(uuid);
-    }
+    public PlayerProfile loadPlayerProfile(UUID uuid) { return playerDAO.load(uuid); }
+    public void savePlayerProfile(PlayerProfile profile) { playerDAO.save(profile); }
+    public List<PlayerProfile> getAllPlayers() { return playerDAO.loadAll(); }
+    public void deletePlayerFull(UUID uuid) { plotMaintenanceDAO.deletePlayerFull(uuid); }
 
     // ==========================================================
-    // INVENTARIO
+    // INVENTORY
     // ==========================================================
     public int getInventoryItemCount(UUID ownerId, String itemId) {
         return inventoryDAO.getItemCount(ownerId, itemId);
@@ -191,24 +173,18 @@ public class MariaDBAdapter {
         );
     }
 
-    public void deleteMachine(Long dbId) {
-        plotDAO.removeMachine(dbId);
-    }
+    public void deleteMachine(Long dbId) { plotDAO.removeMachine(dbId); }
 
     public void updateMachinesMetadata(List<PlacedMachine> machines) {
         plotMaintenanceDAO.updateMachinesMetadata(machines);
     }
 
-    public void clearPlotData(UUID ownerId) {
-        plotMaintenanceDAO.clearPlotData(ownerId);
-    }
+    public void clearPlotData(UUID ownerId) { plotMaintenanceDAO.clearPlotData(ownerId); }
 
-    public Long getPlotId(UUID ownerId) {
-        return plotDAO.findPlotIdByOwner(ownerId);
-    }
+    public Long getPlotId(UUID ownerId) { return plotDAO.findPlotIdByOwner(ownerId); }
 
     // ==========================================================
-    // RISORSE
+    // RESOURCES
     // ==========================================================
     public void saveResource(Long plotId, int x, int z, MatterColor type) {
         resourceDAO.addResource(plotId, x, z, type);
@@ -221,11 +197,6 @@ public class MariaDBAdapter {
     // ==========================================================
     // PLOT UNLOCK
     // ==========================================================
-    public PlotUnlockState loadPlotUnlockState(UUID ownerId) {
-        return plotDAO.loadPlotUnlockState(ownerId);
-    }
-
-    public boolean updatePlotUnlockState(UUID ownerId, PlotUnlockState state) {
-        return plotDAO.updatePlotUnlockState(ownerId, state);
-    }
+    public PlotUnlockState loadPlotUnlockState(UUID ownerId) { return plotDAO.loadPlotUnlockState(ownerId); }
+    public boolean updatePlotUnlockState(UUID ownerId, PlotUnlockState state) { return plotDAO.updatePlotUnlockState(ownerId, state); }
 }

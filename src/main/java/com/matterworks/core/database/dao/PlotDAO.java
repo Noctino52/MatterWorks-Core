@@ -5,6 +5,7 @@ import com.google.gson.JsonParser;
 import com.matterworks.core.database.DatabaseManager;
 import com.matterworks.core.database.UuidUtils;
 import com.matterworks.core.model.PlotObject;
+import com.matterworks.core.model.PlotUnlockState;
 
 import java.sql.*;
 import java.util.ArrayList;
@@ -33,10 +34,11 @@ public class PlotDAO {
         return null;
     }
 
-    // (compat) non obbligo item_placed nella INSERT: userà DEFAULT 0
+    // (compat) do not require item_placed in INSERT: DB uses DEFAULT 0
     public Long createPlot(UUID ownerId, int x, int z, int worldId) {
-        String sql = "INSERT INTO plots (owner_id, x, z, world_id, allocation_index, world_x, world_z, expansion_tier, is_active) " +
-                "VALUES (?, ?, ?, ?, 0, 0, 0, 0, 1)";
+        String sql =
+                "INSERT INTO plots (owner_id, x, z, world_id, allocation_index, world_x, world_z, expansion_tier, is_active) " +
+                        "VALUES (?, ?, ?, ?, 0, 0, 0, 0, 1)";
         try (Connection conn = dbManager.getConnection();
              PreparedStatement stmt = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
 
@@ -50,7 +52,7 @@ public class PlotDAO {
                 try (ResultSet generatedKeys = stmt.getGeneratedKeys()) {
                     if (generatedKeys.next()) {
                         Long id = generatedKeys.getLong(1);
-                        System.out.println("✅ Plot creato con ID: " + id + " per " + ownerId);
+                        System.out.println("✅ Plot created with ID: " + id + " for " + ownerId);
                         return id;
                     }
                 }
@@ -64,7 +66,7 @@ public class PlotDAO {
     public Long insertMachine(UUID ownerId, String typeId, int x, int y, int z, String metadataJson) {
         Long plotId = findPlotIdByOwner(ownerId);
         if (plotId == null) {
-            System.err.println("❌ Nessun plot trovato per salvare la macchina!");
+            System.err.println("❌ No plot found to save machine!");
             return null;
         }
 
@@ -93,7 +95,6 @@ public class PlotDAO {
                     if (rs.next()) machineId = rs.getLong(1);
                 }
 
-                // increment item_placed
                 try (PreparedStatement inc = conn.prepareStatement(incSql)) {
                     inc.setLong(1, plotId);
                     inc.executeUpdate();
@@ -116,8 +117,10 @@ public class PlotDAO {
 
     public List<PlotObject> loadMachines(UUID ownerId) {
         List<PlotObject> machines = new ArrayList<>();
-        String sql = "SELECT pm.id, pm.plot_id, pm.type_id, pm.x, pm.y, pm.z, pm.metadata " +
-                "FROM plot_machines pm JOIN plots p ON pm.plot_id = p.id WHERE p.owner_id = ?";
+        String sql =
+                "SELECT pm.id, pm.plot_id, pm.type_id, pm.x, pm.y, pm.z, pm.metadata " +
+                        "FROM plot_machines pm JOIN plots p ON pm.plot_id = p.id WHERE p.owner_id = ?";
+
         try (Connection conn = dbManager.getConnection();
              PreparedStatement stmt = conn.prepareStatement(sql)) {
 
@@ -127,13 +130,19 @@ public class PlotDAO {
                     String metaStr = rs.getString("metadata");
                     JsonObject metaJson = new JsonObject();
                     if (metaStr != null && !metaStr.isBlank()) {
-                        try { metaJson = JsonParser.parseString(metaStr).getAsJsonObject(); }
-                        catch (Exception ignored) {}
+                        try {
+                            metaJson = JsonParser.parseString(metaStr).getAsJsonObject();
+                        } catch (Exception ignored) {}
                     }
+
                     machines.add(new PlotObject(
-                            rs.getLong("id"), rs.getLong("plot_id"),
-                            rs.getInt("x"), rs.getInt("y"), rs.getInt("z"),
-                            rs.getString("type_id"), metaJson
+                            rs.getLong("id"),
+                            rs.getLong("plot_id"),
+                            rs.getInt("x"),
+                            rs.getInt("y"),
+                            rs.getInt("z"),
+                            rs.getString("type_id"),
+                            metaJson
                     ));
                 }
             }
@@ -204,29 +213,31 @@ public class PlotDAO {
         return 0;
     }
 
-    public com.matterworks.core.model.PlotUnlockState loadPlotUnlockState(UUID ownerId) {
+    public PlotUnlockState loadPlotUnlockState(UUID ownerId) {
         String sql = "SELECT unlocked_extra_x, unlocked_extra_y FROM plots WHERE owner_id = ?";
-        try (Connection conn = dbManager.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-
-            ps.setBytes(1, UuidUtils.asBytes(ownerId));
-            try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    return new com.matterworks.core.model.PlotUnlockState(
-                            rs.getInt("unlocked_extra_x"),
-                            rs.getInt("unlocked_extra_y")
-                    );
+        // NOTE: in your original code it's unlocked_extra_y. Keeping safe fallback below.
+        try (Connection conn = dbManager.getConnection()) {
+            // Try correct columns first
+            String sqlA = "SELECT unlocked_extra_x, unlocked_extra_y FROM plots WHERE owner_id = ?";
+            try (PreparedStatement ps = conn.prepareStatement(sqlA)) {
+                ps.setBytes(1, UuidUtils.asBytes(ownerId));
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) {
+                        return new PlotUnlockState(
+                                rs.getInt("unlocked_extra_x"),
+                                rs.getInt("unlocked_extra_y")
+                        );
+                    }
                 }
             }
         } catch (SQLException e) {
-            // backward compat: se la colonna non esiste ancora
             String msg = (e.getMessage() != null) ? e.getMessage().toLowerCase() : "";
             if (!msg.contains("unknown column")) e.printStackTrace();
         }
-        return com.matterworks.core.model.PlotUnlockState.zero();
+        return PlotUnlockState.zero();
     }
 
-    public boolean updatePlotUnlockState(UUID ownerId, com.matterworks.core.model.PlotUnlockState state) {
+    public boolean updatePlotUnlockState(UUID ownerId, PlotUnlockState state) {
         String sql = "UPDATE plots SET unlocked_extra_x = ?, unlocked_extra_y = ? WHERE owner_id = ?";
         try (Connection conn = dbManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -243,4 +254,60 @@ public class PlotDAO {
         }
     }
 
+    // ==========================================================
+    // ✅ PERSISTED VOID ITEM CAP EXTRA (plots.void_itemcap_extra)
+    // ==========================================================
+
+    public int getVoidItemCapExtra(UUID ownerId) {
+        String sql = "SELECT void_itemcap_extra FROM plots WHERE owner_id = ?";
+        try (Connection conn = dbManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+
+            ps.setBytes(1, UuidUtils.asBytes(ownerId));
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return Math.max(0, rs.getInt("void_itemcap_extra"));
+            }
+        } catch (SQLException e) {
+            // backward compat: column might not exist
+            if (!SqlCompat.isUnknownColumn(e)) e.printStackTrace();
+        }
+        return 0;
+    }
+
+    /**
+     * Adds delta to plots.void_itemcap_extra and returns the NEW stored value.
+     */
+    public int addVoidItemCapExtra(UUID ownerId, int delta) {
+        if (ownerId == null || delta <= 0) return getVoidItemCapExtra(ownerId);
+
+        String upd =
+                "UPDATE plots SET void_itemcap_extra = GREATEST(0, void_itemcap_extra + ?) " +
+                        "WHERE owner_id = ?";
+        String sel = "SELECT void_itemcap_extra FROM plots WHERE owner_id = ?";
+
+        try (Connection conn = dbManager.getConnection()) {
+            conn.setAutoCommit(false);
+
+            try (PreparedStatement up = conn.prepareStatement(upd)) {
+                up.setInt(1, delta);
+                up.setBytes(2, UuidUtils.asBytes(ownerId));
+                up.executeUpdate();
+            }
+
+            int newVal = 0;
+            try (PreparedStatement ps = conn.prepareStatement(sel)) {
+                ps.setBytes(1, UuidUtils.asBytes(ownerId));
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) newVal = Math.max(0, rs.getInt("void_itemcap_extra"));
+                }
+            }
+
+            conn.commit();
+            return newVal;
+
+        } catch (SQLException e) {
+            e.printStackTrace();
+            return getVoidItemCapExtra(ownerId);
+        }
+    }
 }
