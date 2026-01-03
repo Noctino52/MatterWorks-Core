@@ -45,6 +45,24 @@ public class ServerGameStateDAO {
         return 0;
     }
 
+    /**
+     * Extra additive step for the item cap, used by the "void/admin" button mechanic.
+     * If the column does not exist (older DB), returns 0.
+     */
+    public int getVoidItemCapIncreaseStep() {
+        String sql = "SELECT void_itemcap_increase_step FROM server_gamestate WHERE id = 1";
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+
+            if (rs.next()) return Math.max(0, rs.getInt("void_itemcap_increase_step"));
+        } catch (SQLException e) {
+            // Backward compatible: if column doesn't exist yet, just behave as "disabled"
+            if (!SqlCompat.isUnknownColumn(e)) e.printStackTrace();
+        }
+        return 0;
+    }
+
     public int getMaxItemPlacedOnPlotCap() {
         String sql = "SELECT max_item_placed_on_plot FROM server_gamestate WHERE id = 1";
         try (Connection conn = db.getConnection();

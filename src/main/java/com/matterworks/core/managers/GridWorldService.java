@@ -336,9 +336,15 @@ final class GridWorldService {
         if (!isAreaClear(ownerId, pos, effDim)) return false;
 
         if (!(p.isAdmin())) {
-            if (repository.getInventoryItemCount(ownerId, typeId) <= 0) return false;
+            int inv = repository.getInventoryItemCount(ownerId, typeId);
+            if (inv <= 0) {
+                System.out.println("⚠️ PLACE_MACHINE FAILED: inventory empty for type=" + typeId
+                        + " owner=" + ownerId + " (cap is OK now)");
+                return false;
+            }
             repository.modifyInventoryItem(ownerId, typeId, -1);
         }
+
 
         PlotObject dto = new PlotObject(null, null, pos.x(), pos.y(), pos.z(), typeId, null);
         PlacedMachine m = MachineFactory.createFromModel(dto, ownerId);

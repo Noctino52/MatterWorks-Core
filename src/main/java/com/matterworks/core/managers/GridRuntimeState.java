@@ -33,6 +33,9 @@ final class GridRuntimeState {
     // --- MAINTENANCE ---
     long lastSweepTick = 0;
 
+    // ✅ NEW: runtime-only additive bonus for item cap (per-player)
+    final Map<UUID, Integer> voidItemCapBonusByPlayer = new ConcurrentHashMap<>();
+
     GridRuntimeState(MariaDBAdapter repository) {
         this.repository = repository;
         this.serverConfig = repository.loadServerConfig();
@@ -110,7 +113,57 @@ final class GridRuntimeState {
     }
 
     // ==========================================================
-    // CAPS - SHOP GUARD (identico a prima)
+    // PLACED COUNT (includes structures)
+    // ==========================================================
+    /**
+     * Counts all placed "items" in the plot.
+     * This includes machines AND structures (e.g. StructuralBlock / STRUCTURE_GENERIC),
+     * as long as they are part of the runtime grid snapshot.
+     *
+     * The runtime grid stores the same instance for all occupied cells,
+     * so we must use DISTINCT() to count each placed object once.
+     */
+    int getPlacedItemCount(UUID ownerId) {
+        if (ownerId == null) return 0;
+
+        Map<GridPosition, PlacedMachine> grid = playerGrids.get(ownerId);
+        if (grid != null && !grid.isEmpty()) {
+            return (int) grid.values().stream()
+                    .filter(Objects::nonNull)
+                    .distinct()
+                    .count();
+        }
+
+        // Fallback when plot not loaded
+        return repository.getPlotItemsPlaced(ownerId);
+    }
+
+    // ==========================================================
+    // VOID ITEM CAP BONUS (runtime)
+    // ==========================================================
+    int getVoidItemCapBonus(UUID ownerId) {
+        if (ownerId == null) return 0;
+        return Math.max(0, voidItemCapBonusByPlayer.getOrDefault(ownerId, 0));
+    }
+
+    int addVoidItemCapBonus(UUID ownerId, int delta) {
+        if (ownerId == null || delta <= 0) return getVoidItemCapBonus(ownerId);
+
+        return voidItemCapBonusByPlayer.compute(ownerId, (k, old) -> {
+            int prev = (old == null) ? 0 : Math.max(0, old);
+            long next = (long) prev + (long) delta;
+            if (next >= Integer.MAX_VALUE) return Integer.MAX_VALUE;
+            return (int) next;
+        });
+    }
+
+    void clearVoidItemCapBonus(UUID ownerId) {
+        if (ownerId == null) return;
+        voidItemCapBonusByPlayer.remove(ownerId);
+    }
+
+    // ==========================================================
+    // CAPS - SHOP GUARD
     // ==========================================================
     boolean checkItemCap(UUID playerId, String itemId, int incomingAmount) {
         int inInventory = repository.getInventoryItemCount(playerId, itemId);
@@ -141,11 +194,13 @@ final class GridRuntimeState {
         if (p != null && p.isAdmin()) return true;
 
         int cap = getEffectiveItemPlacedOnPlotCap(ownerId);
-        int placed = repository.getPlotItemsPlaced(ownerId);
+
+        // ✅ IMPORTANT: placed count includes structures now
+        int placed = getPlacedItemCount(ownerId);
 
         if (placed >= cap) {
             System.out.println("⚠️ CAP RAGGIUNTO: plot owner=" + ownerId
-                    + " item_placed=" + placed + " cap=" + cap
+                    + " placed=" + placed + " cap=" + cap
                     + " -> non puoi piazzare altri item, rimuovi qualcosa!");
             return false;
         }
@@ -164,7 +219,10 @@ final class GridRuntimeState {
         PlayerProfile p = getCachedProfile(ownerId);
         if (p != null) prestige = Math.max(0, p.getPrestigeLevel());
 
-        long raw = (long) base + (long) prestige * (long) step;
+        // ✅ NEW: runtime additive bonus increased by the "+" button
+        int voidBonus = getVoidItemCapBonus(ownerId);
+
+        long raw = (long) base + (long) prestige * (long) step + (long) voidBonus;
         int cap = raw > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) raw;
 
         cap = Math.min(cap, max);

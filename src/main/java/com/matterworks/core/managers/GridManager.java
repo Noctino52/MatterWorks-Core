@@ -115,6 +115,39 @@ public class GridManager {
 
     public int getEffectiveItemPlacedOnPlotCap(UUID ownerId) { return state.getEffectiveItemPlacedOnPlotCap(ownerId); }
 
+    // ✅ exposed for UI/debug
+    public int getPlacedItemCount(UUID ownerId) { return state.getPlacedItemCount(ownerId); }
+    public int getVoidItemCapBonus(UUID ownerId) { return state.getVoidItemCapBonus(ownerId); }
+
+    /**
+     * ✅ THIS is the button mechanic:
+     * Increase the EFFECTIVE cap by adding a runtime bonus.
+     * Bonus step comes from server_gamestate.void_itemcap_increase_step.
+     *
+     * No admin gate (as requested for testing).
+     */
+    public boolean increaseMaxItemPlacedOnPlotCap(UUID requesterId) {
+        if (requesterId == null) return false;
+
+        state.touchPlayer(requesterId);
+
+        int step;
+        try {
+            step = repository.getVoidItemCapIncreaseStep();
+        } catch (Throwable t) {
+            return false;
+        }
+
+        step = Math.max(0, step);
+        if (step <= 0) return false;
+
+        int before = state.getEffectiveItemPlacedOnPlotCap(requesterId);
+        state.addVoidItemCapBonus(requesterId, step);
+        int after = state.getEffectiveItemPlacedOnPlotCap(requesterId);
+
+        return after > before;
+    }
+
     Map<UUID, Map<GridPosition, PlacedMachine>> _unsafeGridsViewForInternal() { return state.playerGrids; }
     Map<UUID, PlotUnlockState> _unsafeUnlockViewForInternal() { return state.plotUnlockCache; }
     Map<UUID, Map<GridPosition, MatterColor>> _unsafeResourcesViewForInternal() { return state.playerResources; }

@@ -102,6 +102,11 @@ public class MariaDBAdapter {
         return serverGameStateDAO.getItemCapIncreaseStep();
     }
 
+    // ✅ NEW: void/admin step (db: server_gamestate.void_itemcap_increase_step)
+    public int getVoidItemCapIncreaseStep() {
+        return serverGameStateDAO.getVoidItemCapIncreaseStep();
+    }
+
     public int getMaxItemPlacedOnPlotCap() {
         return serverGameStateDAO.getMaxItemPlacedOnPlotCap();
     }

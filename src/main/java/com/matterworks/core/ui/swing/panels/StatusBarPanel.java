@@ -12,6 +12,7 @@ public final class StatusBarPanel extends JPanel {
     private final JLabel lblLayer = UiKit.label("LAYER: 0", Color.CYAN, 12);
 
     private final JLabel lblPlotItems = UiKit.label("ITEMS: ---/---", Color.LIGHT_GRAY, 12);
+    private final JButton btnItemCapPlus = tinyButton("+");
     private final JLabel lblPlotArea = UiKit.label("PLOT: ---", Color.LIGHT_GRAY, 12);
     private final JLabel lblPlotId = UiKit.label("PLOT ID: #---", Color.LIGHT_GRAY, 12);
 
@@ -32,6 +33,7 @@ public final class StatusBarPanel extends JPanel {
         right.setOpaque(false);
 
         right.add(lblPlotItems);
+        right.add(btnItemCapPlus);
         right.add(lblPlotArea);
         right.add(btnPlotMinus);
         right.add(btnPlotPlus);
@@ -40,8 +42,8 @@ public final class StatusBarPanel extends JPanel {
         add(left, BorderLayout.WEST);
         add(right, BorderLayout.EAST);
 
-        // default: disabled finché non sappiamo admin
         setPlotResizeEnabled(false);
+        setItemCapIncreaseEnabled(true); // NOW enabled by default (testing)
     }
 
     private static JButton tinyButton(String text) {
@@ -75,12 +77,9 @@ public final class StatusBarPanel extends JPanel {
         }
 
         lblPlotItems.setText("ITEMS: " + placed + "/" + cap);
-
-        // 🔴 rosso quando cap raggiunto o superato
         lblPlotItems.setForeground(placed >= cap ? Color.RED : Color.LIGHT_GRAY);
     }
 
-    // ✅ NEW: versione con tooltip (dettaglio calcolo cap)
     public void setPlotItems(int placed, int cap, String tooltip) {
         setPlotItems(placed, cap);
         lblPlotItems.setToolTipText(tooltip);
@@ -92,7 +91,6 @@ public final class StatusBarPanel extends JPanel {
         lblPlotArea.setForeground(Color.LIGHT_GRAY);
     }
 
-    /** Passaci una stringa già formattata (così non duplico logica qui). */
     public void setPlotAreaText(String areaText) {
         lblPlotArea.setText("PLOT: " + (areaText != null ? areaText : "---"));
         lblPlotArea.setForeground(Color.LIGHT_GRAY);
@@ -102,6 +100,16 @@ public final class StatusBarPanel extends JPanel {
     public void setPlotResizeEnabled(boolean enabled) {
         btnPlotMinus.setEnabled(enabled);
         btnPlotPlus.setEnabled(enabled);
+    }
+
+    // ---- item cap increase button ----
+    public void setItemCapIncreaseEnabled(boolean enabled) {
+        btnItemCapPlus.setEnabled(enabled);
+    }
+
+    public void setItemCapIncreaseAction(Runnable onPlus) {
+        for (var al : btnItemCapPlus.getActionListeners()) btnItemCapPlus.removeActionListener(al);
+        if (onPlus != null) btnItemCapPlus.addActionListener(e -> onPlus.run());
     }
 
     public void setPlotResizeActions(Runnable onMinus, Runnable onPlus) {

@@ -1,5 +1,7 @@
 package com.matterworks.core.ui.swing.app;
 
+import com.matterworks.core.common.GridPosition;
+import com.matterworks.core.domain.machines.base.PlacedMachine;
 import com.matterworks.core.domain.machines.registry.BlockRegistry;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.managers.GridManager;
@@ -67,7 +69,9 @@ public class MatterWorksGUI extends JFrame {
     private volatile String lastPlotAreaShown = null;
     private volatile boolean lastPlotResizeEnabled = false;
 
-    // NEW: per instant button refresh (non serve cache separata: ricalcoliamo sempre)
+    // NEW: cache per enable del bottone item cap "+"
+    private volatile boolean lastItemCapPlusEnabled = false;
+
     public MatterWorksGUI(GridManager gm,
                           BlockRegistry reg,
                           UUID initialUuid,
@@ -107,7 +111,7 @@ public class MatterWorksGUI extends JFrame {
         glassPane.addMouseMotionListener(new java.awt.event.MouseAdapter() {});
         setGlassPane(glassPane);
 
-        // ✅ usa il costruttore a 10 parametri: classic + instant
+        // usa il costruttore a 10 parametri: classic + instant
         this.topBar = new TopBarPanel(
                 this::selectTool,
                 this::buyToolRightClick,
@@ -126,6 +130,9 @@ public class MatterWorksGUI extends JFrame {
                 () -> handlePlotResize(-1),
                 () -> handlePlotResize(+1)
         );
+
+        // NEW: item cap "+" button action (NO admin gate in UI)
+        statusBar.setItemCapIncreaseAction(this::handleItemCapIncrease);
 
         refreshPlayerList(true);
 
@@ -298,7 +305,7 @@ public class MatterWorksGUI extends JFrame {
         updateEconomyLabelsForce();
     }
 
-    // ✅ NEW: Instant Prestige (premium, NO reset)
+    // NEW: Instant Prestige (premium, NO reset)
     private void handleInstantPrestige() {
         UUID u = currentPlayerUuid;
         if (u == null) return;
@@ -377,6 +384,52 @@ public class MatterWorksGUI extends JFrame {
         factoryPanel.forceRefreshNow();
         updateEconomyLabelsForce();
     }
+
+    // NEW: Item cap "+" (NO admin gate). Core decide se applicare o meno.
+    private void handleItemCapIncrease() {
+        UUID u = currentPlayerUuid;
+        if (u == null) return;
+
+        runOffEdt(() -> {
+            gridManager.touchPlayer(u);
+
+            final int step = safeGetVoidItemCapStep();
+            final int beforeCap = gridManager.getEffectiveItemPlacedOnPlotCap(u);
+
+            boolean okTmp;
+            try {
+                okTmp = gridManager.increaseMaxItemPlacedOnPlotCap(u);
+            } catch (Throwable t) {
+                t.printStackTrace();
+                okTmp = false;
+            }
+
+            final boolean ok = okTmp;
+            final int afterCap = gridManager.getEffectiveItemPlacedOnPlotCap(u);
+            final int maxCap = safeGetMaxItemCap();
+
+            SwingUtilities.invokeLater(() -> {
+                // Refresh UI always
+                updateEconomyLabelsForce();
+
+                // Always show debug info (for now)
+                JOptionPane.showMessageDialog(
+                        this,
+                        "ItemCap '+' pressed\n\n" +
+                                "voidStep (DB) = " + step + "\n" +
+                                "max_item_placed_on_plot (DB) = " + (maxCap == Integer.MAX_VALUE ? "UNLIMITED(0)" : maxCap) + "\n" +
+                                "cap before = " + beforeCap + "\n" +
+                                "cap after  = " + afterCap + "\n" +
+                                "ok = " + ok + "\n\n" +
+                                "If step is 0 => add the column + set a value in DB.\n" +
+                                "If max is low => you are clamped by max.",
+                        "Item Cap Debug",
+                        ok ? JOptionPane.INFORMATION_MESSAGE : JOptionPane.WARNING_MESSAGE
+                );
+            });
+        });
+    }
+
 
     private void requestEconomyRefresh() {
         SwingUtilities.invokeLater(this::updateEconomyLabelsForce);
@@ -612,6 +665,8 @@ public class MatterWorksGUI extends JFrame {
 
         lastPlotAreaShown = null;
         lastPlotResizeEnabled = false;
+
+        lastItemCapPlusEnabled = false;
     }
 
     private void updateEconomyLabelsForce() {
@@ -629,10 +684,12 @@ public class MatterWorksGUI extends JFrame {
             topBar.getRoleLabel().setText("[---]");
             topBar.getVoidCoinsLabel().setText("VOID: ---");
             topBar.getPrestigeLabel().setText("PRESTIGE: ---");
+
             statusBar.setPlotId("PLOT ID: ---");
             statusBar.setPlotItemsUnknown();
             statusBar.setPlotAreaUnknown();
             statusBar.setPlotResizeEnabled(false);
+            statusBar.setItemCapIncreaseEnabled(false);
             statusBar.setToolTipText(null);
             return;
         }
@@ -643,7 +700,7 @@ public class MatterWorksGUI extends JFrame {
         boolean prestigeBtnEnabled = gridManager.getTechManager().isPrestigeUnlocked(p);
         topBar.setPrestigeButtonEnabled(prestigeBtnEnabled);
 
-        // ✅ NEW: instant enabled if item present (or admin)
+        // instant enabled if item present (or admin)
         topBar.setInstantPrestigeButtonEnabled(gridManager.canInstantPrestige(u));
 
         double money = p.getMoney();
@@ -653,12 +710,25 @@ public class MatterWorksGUI extends JFrame {
         int prestige = Math.max(0, p.getPrestigeLevel());
 
         Long pid = repository.getPlotId(u);
-        int placed = repository.getPlotItemsPlaced(u);
 
-        int baseCap = safeGetDefaultItemCap();
-        int step = safeGetItemCapStep();
-        int maxCap = safeGetMaxItemCap();
-        int effectiveCap = computeEffectiveCap(baseCap, step, maxCap, prestige);
+        // IMPORTANT: placed count includes structures (STRUCTURE_GENERIC) via runtime snapshot.
+        int placed = computePlacedItemsIncludingStructures(u);
+
+        // IMPORTANT: cap read from core to avoid UI/core mismatch
+        int effectiveCap;
+        try {
+            effectiveCap = gridManager.getEffectiveItemPlacedOnPlotCap(u);
+        } catch (Throwable t) {
+            // fallback to old formula if core method isn't present for any reason
+            int baseCap = safeGetDefaultItemCap();
+            int step = safeGetItemCapStep();
+            int maxCap = safeGetMaxItemCap();
+            effectiveCap = computeEffectiveCap(baseCap, step, maxCap, prestige);
+        }
+
+        // enable item cap "+" for everyone if step > 0 (no admin gate)
+        int voidStep = safeGetVoidItemCapStep();
+        boolean itemCapPlusEnabled = (voidStep > 0);
 
         String plotAreaStr = null;
         try {
@@ -681,7 +751,8 @@ public class MatterWorksGUI extends JFrame {
                         (placed != lastPlotItemsShown) ||
                         (effectiveCap != lastPlotCapShown) ||
                         !Objects.equals(plotAreaStr, lastPlotAreaShown) ||
-                        (lastPlotResizeEnabled != isAdmin);
+                        (lastPlotResizeEnabled != isAdmin) ||
+                        (itemCapPlusEnabled != lastItemCapPlusEnabled);
 
         if (!changed) return;
 
@@ -698,6 +769,8 @@ public class MatterWorksGUI extends JFrame {
         lastPlotAreaShown = plotAreaStr;
         lastPlotResizeEnabled = isAdmin;
 
+        lastItemCapPlusEnabled = itemCapPlusEnabled;
+
         topBar.getMoneyLabel().setText(String.format("MONEY: $%,.2f", money));
         topBar.getRoleLabel().setText("[" + rank + "]");
         topBar.getVoidCoinsLabel().setText("VOID: " + voidCoins);
@@ -709,18 +782,44 @@ public class MatterWorksGUI extends JFrame {
         topBar.getPrestigeLabel().setForeground(new Color(0, 200, 255));
 
         statusBar.setPlotId("PLOT ID: #" + (pid != null ? pid : "ERR"));
-        statusBar.setPlotItems(placed, effectiveCap);
+
+        // tooltip explains that placed includes structures (runtime count)
+        int dbPlaced = repository.getPlotItemsPlaced(u);
+        String itemsTooltip =
+                "Placed items are counted from the runtime grid snapshot (machines + structures).\n" +
+                        "Runtime placed=" + placed + " | DB placed=" + dbPlaced + "\n" +
+                        "Cap is read from core. Void step=" + voidStep;
+
+        statusBar.setPlotItems(placed, effectiveCap, itemsTooltip);
 
         if (plotAreaStr != null) statusBar.setPlotAreaText(plotAreaStr);
         else statusBar.setPlotAreaUnknown();
 
+        // plot resize stays admin only
         statusBar.setPlotResizeEnabled(isAdmin);
 
-        String tip = "Item cap: base " + Math.max(1, baseCap)
-                + " + prestige(" + prestige + ")×" + Math.max(0, step)
-                + (maxCap != Integer.MAX_VALUE ? (" (max " + maxCap + ")") : "")
-                + " -> " + effectiveCap;
+        // item cap "+" now for everyone (only needs voidStep>0)
+        statusBar.setItemCapIncreaseEnabled(itemCapPlusEnabled);
+        statusBar.setItemCapIncreaseEnabled(true);
+
+        // status bar tooltip for cap formula (best-effort)
+        String tip = "Item cap: (core computed) | void_step=" + voidStep;
         statusBar.setToolTipText(tip);
+    }
+
+    private int computePlacedItemsIncludingStructures(UUID ownerId) {
+        try {
+            // Snapshot contains both machines and StructuralBlock (typeId=STRUCTURE_GENERIC).
+            var snap = gridManager.getSnapshot(ownerId);
+            if (snap != null && !snap.isEmpty()) {
+                return (int) snap.values().stream()
+                        .filter(Objects::nonNull)
+                        .distinct()
+                        .count();
+            }
+        } catch (Throwable ignored) {}
+        // fallback: DB (may not include structures depending on your persistence rules)
+        return repository.getPlotItemsPlaced(ownerId);
     }
 
     private void updateLabels() {
@@ -757,6 +856,12 @@ public class MatterWorksGUI extends JFrame {
 
     private int safeGetItemCapStep() {
         int step = invokeRepoInt("getItemCapIncreaseStep", 0);
+        return Math.max(0, step);
+    }
+
+    // NEW: reads servergamestate.void_itemcap_increase_step if repository exposes it
+    private int safeGetVoidItemCapStep() {
+        int step = invokeRepoInt("getVoidItemCapIncreaseStep", 0);
         return Math.max(0, step);
     }
 
