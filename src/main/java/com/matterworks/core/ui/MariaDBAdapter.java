@@ -194,6 +194,14 @@ public class MariaDBAdapter {
         return resourceDAO.loadResources(plotId);
     }
 
+    public int getVoidPlotItemBreakerIncreased() {
+        return serverGameStateDAO.getVoidPlotItemBreakerIncreased();
+    }
+
+    public int addVoidPlotItemBreakerIncreased(int delta) {
+        return serverGameStateDAO.addVoidPlotItemBreakerIncreased(delta);
+    }
+
     // ==========================================================
     // PLOT UNLOCK
     // ==========================================================

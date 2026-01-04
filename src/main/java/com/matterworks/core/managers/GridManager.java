@@ -23,6 +23,7 @@ import java.util.concurrent.Executors;
 public class GridManager {
 
     public static final String ITEM_INSTANT_PRESTIGE = "instant_prestige";
+    public static final String ITEM_PLOT_SIZE_BREAKER = "plot_size_breaker";
 
     private final MariaDBAdapter repository;
     private final IWorldAccess worldAdapter;
@@ -81,8 +82,45 @@ public class GridManager {
     }
 
     public PlotAreaInfo getPlotAreaInfo(UUID ownerId) { return world.getPlotAreaInfo(ownerId); }
-    public boolean increasePlotUnlockedArea(UUID ownerId) { return world.increasePlotUnlockedArea(ownerId); }
+
+    public boolean increasePlotUnlockedArea(UUID ownerId) {
+        // Keep this signature for backwards compatibility (admin-only path)
+        state.touchPlayer(ownerId);
+
+        PlayerProfile p = state.getCachedProfile(ownerId);
+        if (p == null || !p.isAdmin()) return false;
+
+        return increasePlotUnlockedAreaInternal(ownerId);
+    }
+
+    boolean increasePlotUnlockedAreaUnchecked(UUID ownerId) {
+        // New: same logic as admin increase, but without admin check
+        state.touchPlayer(ownerId);
+        return increasePlotUnlockedAreaInternal(ownerId);
+    }
+
+    private boolean increasePlotUnlockedAreaInternal(UUID ownerId) {
+        GridManager.PlotAreaInfo info = getPlotAreaInfo(ownerId);
+        PlotUnlockState cur = state.plotUnlockCache.getOrDefault(ownerId, PlotUnlockState.zero());
+
+        int newExtraX = cur.extraX() + info.increaseX();
+        int newExtraY = cur.extraY() + info.increaseY();
+
+        int unlockedX = Math.min(info.maxX(), info.startingX() + newExtraX);
+        int unlockedY = Math.min(info.maxY(), info.startingY() + newExtraY);
+
+        PlotUnlockState next = new PlotUnlockState(
+                Math.max(0, unlockedX - info.startingX()),
+                Math.max(0, unlockedY - info.startingY())
+        );
+
+        if (!repository.updatePlotUnlockState(ownerId, next)) return false;
+        state.plotUnlockCache.put(ownerId, next);
+        return true;
+    }
+
     public boolean decreasePlotUnlockedArea(UUID ownerId) { return world.decreasePlotUnlockedArea(ownerId); }
+
 
     public void reloadMinutesToInactive() { state.reloadMinutesToInactive(); }
     public void touchPlayer(UUID ownerId) { state.touchPlayer(ownerId); }
@@ -179,6 +217,8 @@ public class GridManager {
 
         return increased;
     }
+
+
 
 
     // (optional debug)

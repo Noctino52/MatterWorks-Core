@@ -217,4 +217,46 @@ public class ServerGameStateDAO {
                 prestigeSellK
         );
     }
+
+    public int getVoidPlotItemBreakerIncreased() {
+        String sql = "SELECT void_plotitembreaker_increased FROM server_gamestate LIMIT 1";
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            if (rs.next()) return Math.max(0, rs.getInt(1));
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+        return 0;
+    }
+
+    public int addVoidPlotItemBreakerIncreased(int delta) {
+        delta = Math.max(0, delta);
+        if (delta <= 0) return getVoidPlotItemBreakerIncreased();
+
+        String up = "UPDATE server_gamestate SET void_plotitembreaker_increased = GREATEST(0, void_plotitembreaker_increased + ?)";
+        String sel = "SELECT void_plotitembreaker_increased FROM server_gamestate LIMIT 1";
+
+        try (Connection conn = db.getConnection()) {
+            conn.setAutoCommit(false);
+
+            try (PreparedStatement ps = conn.prepareStatement(up)) {
+                ps.setInt(1, delta);
+                ps.executeUpdate();
+            }
+
+            int out = 0;
+            try (PreparedStatement ps = conn.prepareStatement(sel);
+                 ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) out = Math.max(0, rs.getInt(1));
+            }
+
+            conn.commit();
+            return out;
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+        return getVoidPlotItemBreakerIncreased();
+    }
+
 }

@@ -27,6 +27,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.stream.Collectors;
 
+import static com.matterworks.core.managers.GridManager.ITEM_PLOT_SIZE_BREAKER;
+
 final class GridWorldService {
 
     private final GridManager gridManager;
@@ -136,30 +138,8 @@ final class GridWorldService {
         return true;
     }
 
-    boolean increasePlotUnlockedArea(UUID ownerId) {
-        state.touchPlayer(ownerId);
 
-        PlayerProfile p = state.getCachedProfile(ownerId);
-        if (p == null || !p.isAdmin()) return false;
 
-        GridManager.PlotAreaInfo info = getPlotAreaInfo(ownerId);
-        PlotUnlockState cur = state.plotUnlockCache.getOrDefault(ownerId, PlotUnlockState.zero());
-
-        int newExtraX = cur.extraX() + info.increaseX();
-        int newExtraY = cur.extraY() + info.increaseY();
-
-        int unlockedX = Math.min(info.maxX(), info.startingX() + newExtraX);
-        int unlockedY = Math.min(info.maxY(), info.startingY() + newExtraY);
-
-        PlotUnlockState next = new PlotUnlockState(
-                Math.max(0, unlockedX - info.startingX()),
-                Math.max(0, unlockedY - info.startingY())
-        );
-
-        if (!repository.updatePlotUnlockState(ownerId, next)) return false;
-        state.plotUnlockCache.put(ownerId, next);
-        return true;
-    }
 
     boolean decreasePlotUnlockedArea(UUID ownerId) {
         state.touchPlayer(ownerId);
@@ -653,4 +633,28 @@ final class GridWorldService {
             }
         }
     }
+    boolean increasePlotUnlockedAreaUnchecked(UUID ownerId) {
+        state.touchPlayer(ownerId);
+
+        GridManager.PlotAreaInfo info = getPlotAreaInfo(ownerId);
+        PlotUnlockState cur = state.plotUnlockCache.getOrDefault(ownerId, PlotUnlockState.zero());
+
+        int newExtraX = cur.extraX() + info.increaseX();
+        int newExtraY = cur.extraY() + info.increaseY();
+
+        int unlockedX = Math.min(info.maxX(), info.startingX() + newExtraX);
+        int unlockedY = Math.min(info.maxY(), info.startingY() + newExtraY);
+
+        PlotUnlockState next = new PlotUnlockState(
+                Math.max(0, unlockedX - info.startingX()),
+                Math.max(0, unlockedY - info.startingY())
+        );
+
+        if (!repository.updatePlotUnlockState(ownerId, next)) return false;
+        state.plotUnlockCache.put(ownerId, next);
+        return true;
+    }
+
+
+
 }
