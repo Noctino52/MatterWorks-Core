@@ -125,9 +125,22 @@ public class GridManager {
         state.touchPlayer(requesterId);
 
         PlayerProfile p = state.getCachedProfile(requesterId);
-        if (p == null || !p.isAdmin()) {
-            System.out.println("⚠️ VOID ITEM CAP INCREASE denied (not admin): " + requesterId);
-            return false;
+        if (p == null) return false;
+
+        final String BREAKER_ITEM_ID = "block_cap_breaker";
+        final boolean isAdmin = p.isAdmin();
+
+        // Player rule: allow only if they own at least 1 breaker item.
+        if (!isAdmin) {
+            int owned = 0;
+            try {
+                owned = repository.getInventoryItemCount(requesterId, BREAKER_ITEM_ID);
+            } catch (Throwable ignored) {}
+
+            if (owned <= 0) {
+                System.out.println("⚠️ VOID ITEM CAP INCREASE denied (missing " + BREAKER_ITEM_ID + "): " + requesterId);
+                return false;
+            }
         }
 
         int step;
@@ -146,8 +159,27 @@ public class GridManager {
         state.setPersistedVoidItemCapExtra(requesterId, newStored);
 
         int after = state.getEffectiveItemPlacedOnPlotCap(requesterId);
-        return after > before;
+        boolean increased = after > before;
+
+        // Consume item only for non-admins and only if we actually increased.
+        if (increased && !isAdmin) {
+            try {
+                repository.modifyInventoryItem(requesterId, BREAKER_ITEM_ID, -1);
+
+                // Optional: track consumption as a transaction (same style as Instant Prestige).
+                PlayerProfile fresh = null;
+                try { fresh = repository.loadPlayerProfile(requesterId); } catch (Throwable ignored) {}
+                if (fresh == null) fresh = p;
+
+                repository.logTransaction(fresh, "ITEMCAP_BREAKER_USED", "ITEM", 1, BREAKER_ITEM_ID);
+            } catch (Throwable t) {
+                t.printStackTrace();
+            }
+        }
+
+        return increased;
     }
+
 
     // (optional debug)
     public int getPlacedItemCount(UUID ownerId) { return state.getPlacedItemCount(ownerId); }

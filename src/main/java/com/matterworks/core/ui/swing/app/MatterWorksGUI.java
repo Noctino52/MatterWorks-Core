@@ -726,9 +726,19 @@ public class MatterWorksGUI extends JFrame {
             effectiveCap = computeEffectiveCap(baseCap, step, maxCap, prestige);
         }
 
+
+
         // enable item cap "+" for everyone if step > 0 (no admin gate)
         int voidStep = safeGetVoidItemCapStep();
-        boolean itemCapPlusEnabled = isAdmin && (voidStep > 0);
+
+        final String BREAKER_ITEM_ID = "block_cap_breaker";
+
+        int breakerOwned = 0;
+        if (!isAdmin && voidStep > 0) {
+            try { breakerOwned = repository.getInventoryItemCount(u, BREAKER_ITEM_ID); }
+            catch (Throwable ignored) {}
+        }
+        boolean itemCapPlusEnabled = (voidStep > 0) && (isAdmin || breakerOwned > 0);
 
         String plotAreaStr = null;
         try {
