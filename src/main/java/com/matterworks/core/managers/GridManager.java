@@ -84,14 +84,56 @@ public class GridManager {
     public PlotAreaInfo getPlotAreaInfo(UUID ownerId) { return world.getPlotAreaInfo(ownerId); }
 
     public boolean increasePlotUnlockedArea(UUID ownerId) {
-        // Keep this signature for backwards compatibility (admin-only path)
+        if (ownerId == null) return false;
+
         state.touchPlayer(ownerId);
 
         PlayerProfile p = state.getCachedProfile(ownerId);
-        if (p == null || !p.isAdmin()) return false;
+        if (p == null) return false;
 
-        return increasePlotUnlockedAreaInternal(ownerId);
+        final boolean isAdmin = p.isAdmin();
+
+        // Player rule: allow only if they own at least 1 breaker item.
+        if (!isAdmin) {
+            int owned = 0;
+            try {
+                owned = repository.getInventoryItemCount(ownerId, ITEM_PLOT_SIZE_BREAKER);
+            } catch (Throwable ignored) {}
+
+            if (owned <= 0) {
+                System.out.println("⚠️ PLOT SIZE INCREASE denied (missing " + ITEM_PLOT_SIZE_BREAKER + "): " + ownerId);
+                return false;
+            }
+        }
+
+        // Apply expansion
+        final boolean ok = isAdmin
+                ? world.increasePlotUnlockedArea(ownerId)           // admin-only path
+                : world.increasePlotUnlockedAreaUnchecked(ownerId); // player path
+
+        if (!ok) return false;
+
+        // Consume item only for non-admins and only if expansion succeeded.
+        if (!isAdmin) {
+            try {
+                repository.modifyInventoryItem(ownerId, ITEM_PLOT_SIZE_BREAKER, -1);
+
+                PlayerProfile fresh = null;
+                try { fresh = repository.loadPlayerProfile(ownerId); } catch (Throwable ignored) {}
+                if (fresh == null) fresh = p;
+
+                repository.logTransaction(fresh, "PLOT_SIZE_BREAKER_USED", "ITEM", 1, ITEM_PLOT_SIZE_BREAKER);
+
+                // Se hai già aggiunto i metodi DB/DAO per la statistica globale, scommenta:
+                // repository.addVoidPlotItemBreakerIncreased(1);
+            } catch (Throwable t) {
+                t.printStackTrace();
+            }
+        }
+
+        return true;
     }
+
 
     boolean increasePlotUnlockedAreaUnchecked(UUID ownerId) {
         // New: same logic as admin increase, but without admin check

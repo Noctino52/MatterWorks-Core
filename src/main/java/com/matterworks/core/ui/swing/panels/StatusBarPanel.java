@@ -13,6 +13,7 @@ public final class StatusBarPanel extends JPanel {
 
     private final JLabel lblPlotItems = UiKit.label("ITEMS: ---/---", Color.LIGHT_GRAY, 12);
     private final JButton btnItemCapPlus = tinyButton("+");
+
     private final JLabel lblPlotArea = UiKit.label("PLOT: ---", Color.LIGHT_GRAY, 12);
     private final JLabel lblPlotId = UiKit.label("PLOT ID: #---", Color.LIGHT_GRAY, 12);
 
@@ -42,8 +43,9 @@ public final class StatusBarPanel extends JPanel {
         add(left, BorderLayout.WEST);
         add(right, BorderLayout.EAST);
 
-        setPlotResizeEnabled(false);
-        setItemCapIncreaseEnabled(true); // NOW enabled by default (testing)
+        setPlotMinusEnabled(false);
+        setPlotPlusEnabled(false);
+        setItemCapIncreaseEnabled(false);
     }
 
     private static JButton tinyButton(String text) {
@@ -75,7 +77,6 @@ public final class StatusBarPanel extends JPanel {
             lblPlotItems.setForeground(Color.LIGHT_GRAY);
             return;
         }
-
         lblPlotItems.setText("ITEMS: " + placed + "/" + cap);
         lblPlotItems.setForeground(placed >= cap ? Color.RED : Color.LIGHT_GRAY);
     }
@@ -96,10 +97,14 @@ public final class StatusBarPanel extends JPanel {
         lblPlotArea.setForeground(Color.LIGHT_GRAY);
     }
 
-    // ---- resize buttons ----
+    // ---- plot resize buttons ----
+    public void setPlotMinusEnabled(boolean enabled) { btnPlotMinus.setEnabled(enabled); }
+    public void setPlotPlusEnabled(boolean enabled) { btnPlotPlus.setEnabled(enabled); }
+
+    // Backwards compatibility (if other code calls it)
     public void setPlotResizeEnabled(boolean enabled) {
-        btnPlotMinus.setEnabled(enabled);
-        btnPlotPlus.setEnabled(enabled);
+        setPlotMinusEnabled(enabled);
+        setPlotPlusEnabled(enabled);
     }
 
     // ---- item cap increase button ----

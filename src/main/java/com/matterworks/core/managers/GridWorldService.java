@@ -633,11 +633,30 @@ final class GridWorldService {
             }
         }
     }
-    boolean increasePlotUnlockedAreaUnchecked(UUID ownerId) {
+
+    boolean increasePlotUnlockedArea(UUID ownerId) {
         state.touchPlayer(ownerId);
 
+        PlayerProfile p = state.getCachedProfile(ownerId);
+        if (p == null || !p.isAdmin()) return false;
+
+        return increasePlotUnlockedAreaInternal(ownerId);
+    }
+
+    boolean increasePlotUnlockedAreaUnchecked(UUID ownerId) {
+        state.touchPlayer(ownerId);
+        return increasePlotUnlockedAreaInternal(ownerId);
+    }
+
+    private boolean increasePlotUnlockedAreaInternal(UUID ownerId) {
         GridManager.PlotAreaInfo info = getPlotAreaInfo(ownerId);
-        PlotUnlockState cur = state.plotUnlockCache.getOrDefault(ownerId, PlotUnlockState.zero());
+
+        PlotUnlockState raw = state.plotUnlockCache.getOrDefault(ownerId, PlotUnlockState.zero());
+
+        // Clamp current extras to avoid weird values
+        int curExtraX = Math.max(0, Math.min(raw.extraX(), info.maxX() - info.startingX()));
+        int curExtraY = Math.max(0, Math.min(raw.extraY(), info.maxY() - info.startingY()));
+        PlotUnlockState cur = new PlotUnlockState(curExtraX, curExtraY);
 
         int newExtraX = cur.extraX() + info.increaseX();
         int newExtraY = cur.extraY() + info.increaseY();
@@ -650,11 +669,13 @@ final class GridWorldService {
                 Math.max(0, unlockedY - info.startingY())
         );
 
+        // Already at max (no actual increase)
+        if (next.extraX() == cur.extraX() && next.extraY() == cur.extraY()) return false;
+
         if (!repository.updatePlotUnlockState(ownerId, next)) return false;
         state.plotUnlockCache.put(ownerId, next);
         return true;
     }
-
 
 
 }

@@ -67,10 +67,12 @@ public class MatterWorksGUI extends JFrame {
     private volatile int lastPlotCapShown = Integer.MIN_VALUE;
 
     private volatile String lastPlotAreaShown = null;
-    private volatile boolean lastPlotResizeEnabled = false;
+    private volatile boolean lastPlotPlusEnabled = false;
+    private volatile boolean lastPlotMinusEnabled = false;
 
     // NEW: cache per enable del bottone item cap "+"
     private volatile boolean lastItemCapPlusEnabled = false;
+
 
     public MatterWorksGUI(GridManager gm,
                           BlockRegistry reg,
@@ -367,16 +369,25 @@ public class MatterWorksGUI extends JFrame {
         if (u == null) return;
 
         PlayerProfile p = gridManager.getCachedProfile(u);
-        if (p == null || !p.isAdmin()) return;
+        if (p == null) return;
+
+        boolean isAdmin = p.isAdmin();
+
+        // '-' admin only
+        if (dir < 0 && !isAdmin) return;
 
         boolean ok;
-        if (dir > 0) ok = gridManager.increasePlotUnlockedArea(u);
-        else ok = gridManager.decreasePlotUnlockedArea(u);
+        if (dir > 0) {
+            // CORE must handle: admin path OR consume plot_size_breaker for players
+            ok = gridManager.increasePlotUnlockedArea(u);
+        } else {
+            ok = gridManager.decreasePlotUnlockedArea(u);
+        }
 
         if (!ok) {
             String msg = (dir > 0)
-                    ? "Impossibile espandere: già al MAX o non consentito."
-                    : "Impossibile ridurre: ci sono macchine fuori dalla nuova area o sei già allo START.";
+                    ? "Impossibile espandere: gi\u00e0 al MAX o non consentito."
+                    : "Impossibile ridurre: ci sono macchine fuori dalla nuova area o sei gi\u00e0 allo START.";
             JOptionPane.showMessageDialog(this, msg, "Plot Resize", JOptionPane.WARNING_MESSAGE);
             return;
         }
@@ -384,6 +395,7 @@ public class MatterWorksGUI extends JFrame {
         factoryPanel.forceRefreshNow();
         updateEconomyLabelsForce();
     }
+
 
     // NEW: Item cap "+" (NO admin gate). Core decide se applicare o meno.
     private void handleItemCapIncrease() {
@@ -664,7 +676,9 @@ public class MatterWorksGUI extends JFrame {
         lastPlotCapShown = Integer.MIN_VALUE;
 
         lastPlotAreaShown = null;
-        lastPlotResizeEnabled = false;
+        lastPlotPlusEnabled = false;
+        lastPlotMinusEnabled = false;
+
 
         lastItemCapPlusEnabled = false;
     }
@@ -688,8 +702,10 @@ public class MatterWorksGUI extends JFrame {
             statusBar.setPlotId("PLOT ID: ---");
             statusBar.setPlotItemsUnknown();
             statusBar.setPlotAreaUnknown();
-            statusBar.setPlotResizeEnabled(false);
+            statusBar.setPlotMinusEnabled(false);
+            statusBar.setPlotPlusEnabled(false);
             statusBar.setItemCapIncreaseEnabled(false);
+
             statusBar.setToolTipText(null);
             return;
         }
@@ -740,6 +756,18 @@ public class MatterWorksGUI extends JFrame {
         }
         boolean itemCapPlusEnabled = (voidStep > 0) && (isAdmin || breakerOwned > 0);
 
+        final String PLOT_BREAKER_ITEM_ID = "plot_size_breaker";
+
+        int plotBreakerOwned = 0;
+        if (!isAdmin) {
+            try { plotBreakerOwned = repository.getInventoryItemCount(u, PLOT_BREAKER_ITEM_ID); }
+            catch (Throwable ignored) {}
+        }
+
+        boolean plotPlusEnabled = isAdmin || plotBreakerOwned > 0;
+        boolean plotMinusEnabled = isAdmin; // '-' resta admin-only
+
+
         String plotAreaStr = null;
         try {
             GridManager.PlotAreaInfo info = gridManager.getPlotAreaInfo(u);
@@ -761,8 +789,10 @@ public class MatterWorksGUI extends JFrame {
                         (placed != lastPlotItemsShown) ||
                         (effectiveCap != lastPlotCapShown) ||
                         !Objects.equals(plotAreaStr, lastPlotAreaShown) ||
-                        (lastPlotResizeEnabled != isAdmin) ||
+                        (plotPlusEnabled != lastPlotPlusEnabled) ||
+                        (plotMinusEnabled != lastPlotMinusEnabled) ||
                         (itemCapPlusEnabled != lastItemCapPlusEnabled);
+
 
         if (!changed) return;
 
@@ -777,9 +807,11 @@ public class MatterWorksGUI extends JFrame {
         lastPlotCapShown = effectiveCap;
 
         lastPlotAreaShown = plotAreaStr;
-        lastPlotResizeEnabled = isAdmin;
+        lastPlotPlusEnabled = plotPlusEnabled;
+        lastPlotMinusEnabled = plotMinusEnabled;
 
         lastItemCapPlusEnabled = itemCapPlusEnabled;
+
 
         topBar.getMoneyLabel().setText(String.format("MONEY: $%,.2f", money));
         topBar.getRoleLabel().setText("[" + rank + "]");
@@ -805,14 +837,12 @@ public class MatterWorksGUI extends JFrame {
         if (plotAreaStr != null) statusBar.setPlotAreaText(plotAreaStr);
         else statusBar.setPlotAreaUnknown();
 
-        // plot resize stays admin only
-// AFTER
-        statusBar.setPlotResizeEnabled(isAdmin);
+        statusBar.setPlotMinusEnabled(plotMinusEnabled);
+        statusBar.setPlotPlusEnabled(plotPlusEnabled);
 
-// item cap "+" admin only (UI disables for non-admin; core also enforces)
         statusBar.setItemCapIncreaseEnabled(itemCapPlusEnabled);
 
-// status bar tooltip for cap formula (best-effort)
+        // status bar tooltip for cap formula (best-effort)
         String tip = "Item cap: (core computed) | void_step=" + voidStep;
         statusBar.setToolTipText(tip);
 
