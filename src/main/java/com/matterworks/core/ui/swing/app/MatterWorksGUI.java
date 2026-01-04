@@ -728,7 +728,7 @@ public class MatterWorksGUI extends JFrame {
 
         // enable item cap "+" for everyone if step > 0 (no admin gate)
         int voidStep = safeGetVoidItemCapStep();
-        boolean itemCapPlusEnabled = (voidStep > 0);
+        boolean itemCapPlusEnabled = isAdmin && (voidStep > 0);
 
         String plotAreaStr = null;
         try {
@@ -796,15 +796,16 @@ public class MatterWorksGUI extends JFrame {
         else statusBar.setPlotAreaUnknown();
 
         // plot resize stays admin only
+// AFTER
         statusBar.setPlotResizeEnabled(isAdmin);
 
-        // item cap "+" now for everyone (only needs voidStep>0)
+// item cap "+" admin only (UI disables for non-admin; core also enforces)
         statusBar.setItemCapIncreaseEnabled(itemCapPlusEnabled);
-        statusBar.setItemCapIncreaseEnabled(true);
 
-        // status bar tooltip for cap formula (best-effort)
+// status bar tooltip for cap formula (best-effort)
         String tip = "Item cap: (core computed) | void_step=" + voidStep;
         statusBar.setToolTipText(tip);
+
     }
 
     private int computePlacedItemsIncludingStructures(UUID ownerId) {

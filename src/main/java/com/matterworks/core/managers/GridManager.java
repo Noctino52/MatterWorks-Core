@@ -124,6 +124,12 @@ public class GridManager {
 
         state.touchPlayer(requesterId);
 
+        PlayerProfile p = state.getCachedProfile(requesterId);
+        if (p == null || !p.isAdmin()) {
+            System.out.println("⚠️ VOID ITEM CAP INCREASE denied (not admin): " + requesterId);
+            return false;
+        }
+
         int step;
         try {
             step = repository.getVoidItemCapIncreaseStep();
