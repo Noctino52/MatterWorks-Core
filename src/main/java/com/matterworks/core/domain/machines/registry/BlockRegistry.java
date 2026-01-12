@@ -34,7 +34,8 @@ public class BlockRegistry {
                     + " price=$" + s.basePrice()
                     + " pm=" + s.prestigeCostMult()
                     + " cat=" + s.category()
-                    + " model=" + s.modelId());
+                    + " model=" + s.modelId()
+                    + " speed=" + s.speed());
         }
     }
 
@@ -85,13 +86,11 @@ public class BlockRegistry {
         return (s != null ? s.prestigeCostMult() : 0.0);
     }
 
-    public String getModelId(String blockId) {
-        if (blockId == null) return "model_missing";
+    public double getSpeed(String blockId) {
+        if (blockId == null) return 1.0;
         MachineStats s = statsCache.get(blockId);
-        return (s != null && s.modelId() != null ? s.modelId() : "model_missing");
-    }
-
-    public IWorldAccess getWorldAdapter() {
-        return worldAdapter;
+        double out = (s != null ? s.speed() : 1.0);
+        if (Double.isNaN(out) || Double.isInfinite(out) || out <= 0.0) return 1.0;
+        return out;
     }
 }

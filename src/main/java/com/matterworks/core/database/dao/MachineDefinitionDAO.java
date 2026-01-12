@@ -22,6 +22,7 @@ public class MachineDefinitionDAO {
         try (Connection conn = db.getConnection()) {
 
             boolean hasPrestigeMult = columnExists(conn, "item_definitions", "prestigecostmultiplier");
+            boolean hasSpeed = columnExists(conn, "machine_definitions", "speed");
 
             String sql = """
                 SELECT
@@ -33,10 +34,14 @@ public class MachineDefinitionDAO {
                     i.model_id,
                     m.width,
                     m.height,
-                    m.depth
+                    m.depth,
+                    %s AS speed
                 FROM item_definitions i
                 JOIN machine_definitions m ON i.id = m.type_id
-            """.formatted(hasPrestigeMult ? "i.prestigecostmultiplier" : "0.0");
+            """.formatted(
+                    hasPrestigeMult ? "i.prestigecostmultiplier" : "0.0",
+                    hasSpeed ? "m.speed" : "1.0"
+            );
 
             try (PreparedStatement ps = conn.prepareStatement(sql);
                  ResultSet rs = ps.executeQuery()) {
@@ -55,7 +60,10 @@ public class MachineDefinitionDAO {
                             rs.getInt("depth")
                     );
 
-                    statsMap.put(id, new MachineStats(id, dim, price, prestigeCostMult, tier, modelId, category));
+                    double speed = rs.getDouble("speed");
+                    if (Double.isNaN(speed) || Double.isInfinite(speed) || speed <= 0.0) speed = 1.0;
+
+                    statsMap.put(id, new MachineStats(id, dim, price, prestigeCostMult, tier, modelId, category, speed));
                 }
             }
 

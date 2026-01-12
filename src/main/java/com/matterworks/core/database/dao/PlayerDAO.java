@@ -16,15 +16,21 @@ public class PlayerDAO {
     private final Gson gson = new Gson();
 
     private static final String UPSERT_SQL = """
-        INSERT INTO players (uuid, username, money, void_coins, prestige_level, rank, tech_unlocks)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO players (
+            uuid, username, money, void_coins, prestige_level, rank, tech_unlocks,
+            overclock_start_playtime_seconds, overclock_duration_seconds, overclock_multiplier
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
             username = VALUES(username),
             money = VALUES(money),
             void_coins = VALUES(void_coins),
             prestige_level = VALUES(prestige_level),
             rank = VALUES(rank),
-            tech_unlocks = VALUES(tech_unlocks)
+            tech_unlocks = VALUES(tech_unlocks),
+            overclock_start_playtime_seconds = VALUES(overclock_start_playtime_seconds),
+            overclock_duration_seconds = VALUES(overclock_duration_seconds),
+            overclock_multiplier = VALUES(overclock_multiplier)
     """;
 
     private static final String SELECT_SQL = "SELECT * FROM players WHERE uuid = ?";
@@ -47,11 +53,70 @@ public class PlayerDAO {
             String techJson = gson.toJson(p.getUnlockedTechs() != null ? p.getUnlockedTechs() : Set.of());
             ps.setString(7, techJson);
 
+            ps.setLong(8, p.getOverclockStartPlaytimeSeconds());
+            ps.setLong(9, p.getOverclockDurationSeconds());
+            ps.setDouble(10, p.getOverclockMultiplier());
+
             ps.executeUpdate();
+
         } catch (SQLException e) {
             e.printStackTrace();
         }
     }
+
+    public java.util.List<PlayerProfile> loadAll() {
+        String sql = "SELECT * FROM players";
+        java.util.List<PlayerProfile> out = new java.util.ArrayList<>();
+
+        try (java.sql.Connection conn = db.getConnection();
+             java.sql.PreparedStatement ps = conn.prepareStatement(sql);
+             java.sql.ResultSet rs = ps.executeQuery()) {
+
+            while (rs.next()) {
+                java.util.UUID uuid = com.matterworks.core.database.UuidUtils.asUuid(rs.getBytes("uuid"));
+                if (uuid == null) continue;
+
+                PlayerProfile p = new PlayerProfile(uuid);
+                p.setUsername(rs.getString("username"));
+                p.setMoney(rs.getDouble("money"));
+                p.setVoidCoins(rs.getInt("void_coins"));
+                p.setPrestigeLevel(rs.getInt("prestige_level"));
+
+                String rankStr = rs.getString("rank");
+                if (rankStr != null) {
+                    try { p.setRank(PlayerProfile.PlayerRank.valueOf(rankStr)); }
+                    catch (Exception ignored) { p.setRank(PlayerProfile.PlayerRank.PLAYER); }
+                }
+
+                String techJson = rs.getString("tech_unlocks");
+                if (techJson != null && !techJson.isBlank()) {
+                    try {
+                        java.lang.reflect.Type setType =
+                                new com.google.gson.reflect.TypeToken<java.util.HashSet<String>>() {}.getType();
+                        java.util.Set<String> unlocks = gson.fromJson(techJson, setType);
+                        if (unlocks != null) unlocks.forEach(p::addTech);
+                    } catch (Exception ex) {
+                        System.err.println("Warning: tech_unlocks invalid for " + uuid + " -> using empty set.");
+                    }
+                }
+
+                // Overclock columns (ignore if older schema)
+                try {
+                    p.setOverclockStartPlaytimeSeconds(rs.getLong("overclock_start_playtime_seconds"));
+                    p.setOverclockDurationSeconds(rs.getLong("overclock_duration_seconds"));
+                    p.setOverclockMultiplier(rs.getDouble("overclock_multiplier"));
+                } catch (java.sql.SQLException ignored) { }
+
+                out.add(p);
+            }
+
+        } catch (java.sql.SQLException e) {
+            e.printStackTrace();
+        }
+
+        return out;
+    }
+
 
     public PlayerProfile load(UUID uuid) {
         try (Connection conn = db.getConnection();
@@ -71,8 +136,6 @@ public class PlayerDAO {
                 if (rankStr != null) {
                     try { p.setRank(PlayerProfile.PlayerRank.valueOf(rankStr)); }
                     catch (Exception ignored) { p.setRank(PlayerProfile.PlayerRank.PLAYER); }
-                } else {
-                    p.setRank(PlayerProfile.PlayerRank.PLAYER);
                 }
 
                 String techJson = rs.getString("tech_unlocks");
@@ -82,123 +145,73 @@ public class PlayerDAO {
                         Set<String> unlocks = gson.fromJson(techJson, setType);
                         if (unlocks != null) unlocks.forEach(p::addTech);
                     } catch (Exception ex) {
-                        System.err.println("⚠️ Warning: tech_unlocks invalid for " + uuid + " -> using empty set.");
+                        System.err.println("Warning: tech_unlocks invalid for " + uuid + " -> using empty set.");
                     }
+                }
+
+                // Overclock (schema may not have columns on older DB)
+                try {
+                    p.setOverclockStartPlaytimeSeconds(rs.getLong("overclock_start_playtime_seconds"));
+                    p.setOverclockDurationSeconds(rs.getLong("overclock_duration_seconds"));
+                    p.setOverclockMultiplier(rs.getDouble("overclock_multiplier"));
+                } catch (SQLException ignored) {
+                    // ignore older schema
                 }
 
                 return p;
             }
+
         } catch (SQLException e) {
             e.printStackTrace();
         }
         return null;
     }
 
-    public List<PlayerProfile> loadAll() {
-        List<PlayerProfile> players = new ArrayList<>();
-        String sql = "SELECT uuid FROM players";
-        try (Connection conn = db.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql);
-             ResultSet rs = ps.executeQuery()) {
-
-            while (rs.next()) {
-                UUID id = UuidUtils.asUuid(rs.getBytes("uuid"));
-                PlayerProfile p = load(id);
-                if (p != null) players.add(p);
-            }
-        } catch (SQLException e) {
-            e.printStackTrace();
-        }
-        return players;
-    }
-
     // ==========================================================
-    // SESSIONS (player_sessions)
+    // PLAYTIME (seconds) from player_sessions (includes open session)
     // ==========================================================
+    // inside PlayerDAO
 
-    public void openSession(UUID uuid) {
-        if (uuid == null) return;
+    private static final java.util.concurrent.atomic.AtomicBoolean warnedMissingPlayerSessionTable =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
 
-        try (Connection conn = db.getConnection()) {
-            conn.setAutoCommit(false);
-            try {
-                try (PreparedStatement closeOld = conn.prepareStatement(
-                        "UPDATE player_sessions SET logout_at = CURRENT_TIMESTAMP WHERE player_uuid = ? AND logout_at IS NULL")) {
-                    closeOld.setBytes(1, UuidUtils.asBytes(uuid));
-                    closeOld.executeUpdate();
-                }
+    public long getTotalPlaytimeSeconds(UUID uuid) {
+        if (uuid == null) return 0L;
 
-                try (PreparedStatement ins = conn.prepareStatement(
-                        "INSERT INTO player_sessions (player_uuid, login_at, logout_at) VALUES (?, CURRENT_TIMESTAMP, NULL)")) {
-                    ins.setBytes(1, UuidUtils.asBytes(uuid));
-                    ins.executeUpdate();
-                }
+        // NOTE: table name in your schema is `player_session` (singular)
+        // We prefer `session_seconds` if present, otherwise compute from login/logout.
+        String sql = """
+        SELECT COALESCE(SUM(
+            COALESCE(session_seconds,
+                     TIMESTAMPDIFF(SECOND, login_at, COALESCE(logout_at, CURRENT_TIMESTAMP)))
+        ), 0) AS total_seconds
+        FROM player_session
+        WHERE player_uuid = ?
+    """;
 
-                try (PreparedStatement upd = conn.prepareStatement(
-                        "UPDATE players SET last_login = CURRENT_TIMESTAMP WHERE uuid = ?")) {
-                    upd.setBytes(1, UuidUtils.asBytes(uuid));
-                    upd.executeUpdate();
-                }
-
-                conn.commit();
-            } catch (SQLException ex) {
-                conn.rollback();
-                ex.printStackTrace();
-            } finally {
-                conn.setAutoCommit(true);
-            }
-        } catch (SQLException e) {
-            e.printStackTrace();
-        }
-    }
-
-    public void closeSession(UUID uuid) {
-        if (uuid == null) return;
-
-        try (Connection conn = db.getConnection();
-             PreparedStatement ps = conn.prepareStatement(
-                     "UPDATE player_sessions SET logout_at = CURRENT_TIMESTAMP WHERE player_uuid = ? AND logout_at IS NULL")) {
-
-            ps.setBytes(1, UuidUtils.asBytes(uuid));
-            ps.executeUpdate();
-        } catch (SQLException e) {
-            e.printStackTrace();
-        }
-    }
-
-    public boolean hasOpenSession(UUID uuid) {
-        if (uuid == null) return false;
-
-        String sql = "SELECT 1 FROM player_sessions WHERE player_uuid = ? AND logout_at IS NULL LIMIT 1";
         try (Connection conn = db.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
 
             ps.setBytes(1, UuidUtils.asBytes(uuid));
             try (ResultSet rs = ps.executeQuery()) {
-                return rs.next();
+                if (!rs.next()) return 0L;
+                long v = rs.getLong("total_seconds");
+                return Math.max(0L, v);
             }
+
         } catch (SQLException e) {
+            // If someone runs an older schema without player_session, don't spam every tick
+            // Error: 1146 (table doesn't exist)
+            if ("42S02".equalsIgnoreCase(e.getSQLState()) || e.getMessage().contains("1146")) {
+                if (warnedMissingPlayerSessionTable.compareAndSet(false, true)) {
+                    System.err.println("[Overclock] Warning: table `player_session` not found. Playtime will be 0 until DB schema is updated.");
+                }
+                return 0L;
+            }
+
             e.printStackTrace();
+            return 0L;
         }
-        return false;
     }
 
-    public Long getLastLogoutMillis(UUID uuid) {
-        if (uuid == null) return null;
-
-        String sql = "SELECT MAX(logout_at) AS last_out FROM player_sessions WHERE player_uuid = ? AND logout_at IS NOT NULL";
-        try (Connection conn = db.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-
-            ps.setBytes(1, UuidUtils.asBytes(uuid));
-            try (ResultSet rs = ps.executeQuery()) {
-                if (!rs.next()) return null;
-                Timestamp ts = rs.getTimestamp("last_out");
-                return ts != null ? ts.getTime() : null;
-            }
-        } catch (SQLException e) {
-            e.printStackTrace();
-        }
-        return null;
-    }
 }

@@ -9,9 +9,10 @@ public record MachineStats(
         double prestigeCostMult,
         int tier,
         String modelId,
-        String category
+        String category,
+        double speed
 ) {
     public static MachineStats fallback(String id) {
-        return new MachineStats(id, Vector3Int.one(), 0.0, 0.0, 1, "model_missing", "UNKNOWN");
+        return new MachineStats(id, Vector3Int.one(), 0.0, 0.0, 1, "model_missing", "UNKNOWN", 1.0);
     }
 }

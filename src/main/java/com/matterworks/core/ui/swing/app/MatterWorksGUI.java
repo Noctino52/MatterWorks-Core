@@ -13,16 +13,17 @@ import com.matterworks.core.ui.swing.panels.StatusBarPanel;
 import com.matterworks.core.ui.swing.panels.TechTreePanel;
 import com.matterworks.core.ui.swing.panels.TopBarPanel;
 import com.matterworks.core.ui.swing.panels.VoidShopPanel;
+import com.matterworks.core.domain.player.BoosterStatus;
+
 
 import javax.swing.*;
+import javax.swing.Timer;
 import java.awt.*;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.lang.reflect.Method;
-import java.util.ArrayList;
+import java.util.*;
 import java.util.List;
-import java.util.Objects;
-import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -72,6 +73,7 @@ public class MatterWorksGUI extends JFrame {
 
     // NEW: cache per enable del bottone item cap "+"
     private volatile boolean lastItemCapPlusEnabled = false;
+
 
 
     public MatterWorksGUI(GridManager gm,
@@ -124,8 +126,11 @@ public class MatterWorksGUI extends JFrame {
                 this::handleReset,
                 this::handlePrestige,
                 this::handleInstantPrestige,
+                this::handleBooster,       // ✅ NEW
                 this::handleDeletePlayer
         );
+
+
 
         // plot resize buttons (admin only; dominio fa i controlli)
         statusBar.setPlotResizeActions(
@@ -184,6 +189,51 @@ public class MatterWorksGUI extends JFrame {
             });
         }
     }
+
+    private void handleBooster() {
+        UUID u = currentPlayerUuid;
+        if (u == null) return;
+
+        var boosters = gridManager.getActiveBoosters(u);
+
+        if (boosters == null || boosters.isEmpty()) {
+            JOptionPane.showMessageDialog(
+                    this,
+                    "No active boosters.",
+                    "Boosters",
+                    JOptionPane.INFORMATION_MESSAGE
+            );
+            return;
+        }
+
+        StringBuilder sb = new StringBuilder();
+        for (BoosterStatus b : boosters) {
+            sb.append("- ")
+                    .append(b.displayName())
+                    .append(" | x")
+                    .append(String.format(Locale.US, "%.2f", b.multiplier()))
+                    .append(" | remaining: ")
+                    .append(formatRemainingSeconds(b.remainingSeconds()))
+                    .append("\n");
+        }
+
+        JOptionPane.showMessageDialog(
+                this,
+                sb.toString(),
+                "Active Boosters",
+                JOptionPane.INFORMATION_MESSAGE
+        );
+    }
+
+    private String formatRemainingSeconds(long seconds) {
+        if (seconds < 0) return "LIFETIME";
+        long s = Math.max(0, seconds);
+        long h = s / 3600;
+        long m = (s % 3600) / 60;
+        long sec = s % 60;
+        return String.format(Locale.US, "%02dh %02dm %02ds", h, m, sec);
+    }
+
 
     // ===== TopBar actions =====
 

@@ -72,6 +72,8 @@ public class MariaDBAdapter {
         catch (Throwable t) { return null; }
     }
 
+
+
     public boolean purchaseVoidShopItemAtomic(UUID playerId, String itemId, int unitPrice, int amount, boolean isAdmin) {
         return voidShopPurchaseDAO.purchaseVoidShopItemAtomic(playerId, itemId, unitPrice, amount, isAdmin);
     }
@@ -200,6 +202,11 @@ public class MariaDBAdapter {
 
     public int addVoidPlotItemBreakerIncreased(int delta) {
         return serverGameStateDAO.addVoidPlotItemBreakerIncreased(delta);
+    }
+
+
+    public long getTotalPlaytimeSeconds(UUID playerUuid) {
+        return playerDAO.getTotalPlaytimeSeconds(playerUuid);
     }
 
     // ==========================================================

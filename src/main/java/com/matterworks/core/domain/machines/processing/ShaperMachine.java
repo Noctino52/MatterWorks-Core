@@ -36,7 +36,7 @@ public class ShaperMachine extends ProcessorMachine {
     }
 
     private GridPosition getInputPortPosition() {
-        Vector3Int f = orientation.toVector();
+        Vector3Int f = orientationToVector();
         Vector3Int back = new Vector3Int(-f.x(), -f.y(), -f.z());
         GridPosition start = new GridPosition(pos.x() + back.x(), pos.y() + back.y(), pos.z() + back.z());
         return stepOutOfSelf(start, back);
@@ -44,7 +44,7 @@ public class ShaperMachine extends ProcessorMachine {
 
     @Override
     protected GridPosition getOutputPosition() {
-        Vector3Int f = orientation.toVector();
+        Vector3Int f = orientationToVector();
         GridPosition start = new GridPosition(pos.x() + f.x(), pos.y() + f.y(), pos.z() + f.z());
         return stepOutOfSelf(start, f);
     }
@@ -75,7 +75,9 @@ public class ShaperMachine extends ProcessorMachine {
 
         MatterPayload out = new MatterPayload(MatterShape.SPHERE, in.color(), in.effects());
         this.currentRecipe = new Recipe("smoothing_cube_to_sphere", List.of(in), out, 2.0f, 0);
-        this.finishTick = currentTick + PROCESS_TICKS;
+
+        // OLD: finishTick = currentTick + PROCESS_TICKS;
+        this.finishTick = scheduleAfter(currentTick, PROCESS_TICKS, "PROCESS_START");
 
         saveState();
     }

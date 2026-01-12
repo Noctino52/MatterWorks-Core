@@ -10,6 +10,7 @@ import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.matter.MatterPayload;
 import com.matterworks.core.domain.matter.MatterShape;
 
+import java.util.Locale;
 import java.util.UUID;
 
 public class DrillMachine extends PlacedMachine {
@@ -35,7 +36,6 @@ public class DrillMachine extends PlacedMachine {
         this.dimensions = Vector3Int.one();
         this.tierLevel = tierLevel;
 
-        // output = 1 cella (come da esempio: trivella max 64 “totale”)
         this.outputBuffer = new MachineInventory(1, maxStackPerSlot);
 
         if (this.metadata.has("items")) {
@@ -62,14 +62,18 @@ public class DrillMachine extends PlacedMachine {
 
     @Override
     public void tick(long currentTick) {
+        long baseInterval = (long) (20 / productionSpeed);
+        if (baseInterval < 1) baseInterval = 1;
+
         if (nextSpawnTick == -1) {
-            nextSpawnTick = currentTick + (long) (20 / productionSpeed);
+            nextSpawnTick = scheduleAfter(currentTick, baseInterval, "PROD_SPAWN");
         }
 
         if (currentTick >= nextSpawnTick) {
             produceItem();
-            nextSpawnTick = currentTick + (long) (20 / productionSpeed);
+            nextSpawnTick = scheduleAfter(currentTick, baseInterval, "PROD_SPAWN");
         }
+
         tryEjectItem(currentTick);
     }
 
@@ -77,7 +81,6 @@ public class DrillMachine extends PlacedMachine {
         MatterShape shape = (this.resourceToMine == MatterColor.RAW) ? MatterShape.CUBE : null;
         MatterPayload newItem = new MatterPayload(shape, this.resourceToMine);
 
-        // se pieno (slot unico arrivato a maxStackPerSlot) -> insert fallisce
         if (outputBuffer.insert(newItem)) {
             saveInternalState();
         }
@@ -86,7 +89,7 @@ public class DrillMachine extends PlacedMachine {
     private void tryEjectItem(long currentTick) {
         if (outputBuffer.isEmpty()) return;
 
-        Vector3Int dir = orientation.toVector();
+        Vector3Int dir = orientationToVector();
         GridPosition targetPos = new GridPosition(pos.x() + dir.x(), pos.y() + dir.y(), pos.z() + dir.z());
 
         PlacedMachine neighbor = getNeighborAt(targetPos);

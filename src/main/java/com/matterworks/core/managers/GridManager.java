@@ -11,12 +11,9 @@ import com.matterworks.core.domain.shop.VoidShopItem;
 import com.matterworks.core.model.PlotUnlockState;
 import com.matterworks.core.ports.IWorldAccess;
 import com.matterworks.core.ui.MariaDBAdapter;
+import com.matterworks.core.domain.player.BoosterStatus;
 
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -259,6 +256,95 @@ public class GridManager {
 
         return increased;
     }
+
+    // Add into GridManager public methods:
+
+    public boolean canUseOverclock(java.util.UUID playerId, String itemId) {
+        return economy.canUseOverclock(playerId, itemId);
+    }
+
+    public boolean useOverclock(java.util.UUID playerId, String itemId) {
+        return economy.useOverclock(playerId, itemId);
+    }
+
+    public List<BoosterStatus> getActiveBoosters(UUID ownerId) {
+        List<BoosterStatus> out = new ArrayList<>();
+        if (ownerId == null) return out;
+
+        var p = state.getCachedProfile(ownerId);
+        if (p == null) return out;
+
+        long playtime = state.getPlaytimeSecondsCached(ownerId);
+
+        long remaining = p.getOverclockRemainingSeconds(playtime);
+        if (remaining != 0L && p.getOverclockMultiplier() > 1.0) {
+            String id = inferOverclockBoosterId(p.getOverclockDurationSeconds());
+            String name = inferOverclockDisplayName(p.getOverclockDurationSeconds());
+
+            out.add(new BoosterStatus(
+                    id,
+                    name,
+                    p.getOverclockMultiplier(),
+                    remaining,
+                    p.getOverclockDurationSeconds()
+            ));
+        }
+
+        return out;
+    }
+
+    private String inferOverclockBoosterId(long durationSeconds) {
+        if (durationSeconds == -1) return "overclock_life";
+        if (durationSeconds == 2L * 3600L) return "overclock_2h";
+        if (durationSeconds == 12L * 3600L) return "overclock_12h";
+        if (durationSeconds == 24L * 3600L) return "overclock_24h";
+        return "overclock_custom";
+    }
+
+    private String inferOverclockDisplayName(long durationSeconds) {
+        if (durationSeconds == -1) return "Overclock (Lifetime)";
+        if (durationSeconds == 2L * 3600L) return "Overclock (2h)";
+        if (durationSeconds == 12L * 3600L) return "Overclock (12h)";
+        if (durationSeconds == 24L * 3600L) return "Overclock (24h)";
+        return "Overclock";
+    }
+
+    public double getEffectiveMachineSpeedMultiplier(java.util.UUID ownerId, String machineTypeId) {
+        double machineSpeed = 1.0;
+        try {
+            machineSpeed = blockRegistry.getSpeed(machineTypeId);
+        } catch (Throwable ignored) {}
+
+        if (Double.isNaN(machineSpeed) || Double.isInfinite(machineSpeed) || machineSpeed <= 0.0) {
+            machineSpeed = 1.0;
+        }
+
+        if (ownerId == null) return machineSpeed;
+
+        var p = state.getCachedProfile(ownerId);
+        if (p == null) return machineSpeed;
+
+        long playtime = state.getPlaytimeSecondsCached(ownerId);
+        double oc = p.getActiveOverclockMultiplier(playtime);
+
+        double out = machineSpeed * oc;
+        if (Double.isNaN(out) || Double.isInfinite(out) || out <= 0.0) return 1.0;
+
+        if (oc > 1.0) {
+            System.out.println("[OVERCLOCK] speed multiplier active for owner=" + ownerId
+                    + " machine=" + machineTypeId
+                    + " machineSpeed=" + machineSpeed
+                    + " overclock=" + oc
+                    + " effective=" + out
+                    + " playtime=" + playtime);
+        }
+
+        return out;
+    }
+
+
+
+
 
 
 

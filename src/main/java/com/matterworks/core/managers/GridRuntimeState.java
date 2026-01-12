@@ -33,6 +33,13 @@ final class GridRuntimeState {
     // --- MAINTENANCE ---
     long lastSweepTick = 0;
 
+    static final class PlaytimeCacheEntry {
+        volatile long seconds;
+        volatile long lastFetchMs;
+    }
+
+    final Map<UUID, PlaytimeCacheEntry> playtimeCache = new ConcurrentHashMap<>();
+
     // ✅ Cache of persisted bonus (plots.void_itemcap_extra)
     final Map<UUID, Integer> voidItemCapExtraCache = new ConcurrentHashMap<>();
 
@@ -50,6 +57,26 @@ final class GridRuntimeState {
         }
         return cfg;
     }
+
+// Add inside GridRuntimeState:
+    long getPlaytimeSecondsCached(java.util.UUID ownerId) {
+        if (ownerId == null) return 0L;
+
+        PlaytimeCacheEntry e = playtimeCache.computeIfAbsent(ownerId, k -> new PlaytimeCacheEntry());
+        long now = System.currentTimeMillis();
+
+        // refresh every 5 seconds
+        if (now - e.lastFetchMs > 5000L) {
+            long v = repository.getTotalPlaytimeSeconds(ownerId);
+            e.seconds = Math.max(0L, v);
+            e.lastFetchMs = now;
+        }
+
+        return e.seconds;
+    }
+
+
+
 
     void reloadServerConfig() {
         this.serverConfig = repository.loadServerConfig();

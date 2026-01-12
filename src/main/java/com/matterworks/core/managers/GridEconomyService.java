@@ -21,6 +21,11 @@ final class GridEconomyService {
     private final GridRuntimeState state;
     private final GridWorldService world;
 
+    private static final String ITEM_OVERCLOCK_2H = "overclock_2h";
+    private static final String ITEM_OVERCLOCK_12H = "overclock_12h";
+    private static final String ITEM_OVERCLOCK_24H = "overclock_24h";
+    private static final String ITEM_OVERCLOCK_LIFE = "overclock_life";
+
     GridEconomyService(
             GridManager gridManager,
             MariaDBAdapter repository,
@@ -45,6 +50,73 @@ final class GridEconomyService {
     List<VoidShopItem> getVoidShopCatalog() {
         return repository.loadVoidShopCatalog();
     }
+
+    boolean canUseOverclock(java.util.UUID ownerId, String itemId) {
+        if (ownerId == null || itemId == null || itemId.isBlank()) return false;
+
+        var p = state.getCachedProfile(ownerId);
+        if (p != null && p.isAdmin()) return true;
+
+        int have = repository.getInventoryItemCount(ownerId, itemId);
+        return have > 0;
+    }
+
+    boolean useOverclock(java.util.UUID ownerId, String itemId) {
+        if (ownerId == null || itemId == null || itemId.isBlank()) return false;
+
+        state.touchPlayer(ownerId);
+
+        var cached = state.getCachedProfile(ownerId);
+        if (cached == null) return false;
+
+        boolean admin = cached.isAdmin();
+
+        if (!admin) {
+            int have = repository.getInventoryItemCount(ownerId, itemId);
+            if (have <= 0) return false;
+        }
+
+        long durationSeconds = switch (itemId) {
+            case ITEM_OVERCLOCK_2H -> 2L * 3600L;
+            case ITEM_OVERCLOCK_12H -> 12L * 3600L;
+            case ITEM_OVERCLOCK_24H -> 24L * 3600L;
+            case ITEM_OVERCLOCK_LIFE -> -1L;
+            default -> 0L;
+        };
+
+        if (durationSeconds == 0L) return false;
+
+        long playtimeNow = state.getPlaytimeSecondsCached(ownerId);
+
+        // load fresh from DB to avoid cache desync
+        var p = repository.loadPlayerProfile(ownerId);
+        if (p == null) return false;
+
+        p.setOverclockStartPlaytimeSeconds(playtimeNow);
+        p.setOverclockDurationSeconds(durationSeconds);
+        p.setOverclockMultiplier(2.0);
+
+        repository.savePlayerProfile(p);
+
+        // refresh caches
+        state.activeProfileCache.put(ownerId, p);
+
+        if (!admin) {
+            repository.modifyInventoryItem(ownerId, itemId, -1);
+            repository.logTransaction(p, "VOID_SHOP_USE", "OVERCLOCK", 1.0, itemId);
+        } else {
+            repository.logTransaction(p, "VOID_SHOP_USE_ADMIN", "OVERCLOCK", 0.0, itemId);
+        }
+
+        System.out.println("[OVERCLOCK] Applied item=" + itemId
+                + " owner=" + ownerId
+                + " startPlaytime=" + playtimeNow
+                + " durationSeconds=" + durationSeconds
+                + " multiplier=2.0");
+
+        return true;
+    }
+
 
     boolean buyVoidShopItem(UUID playerId, String premiumItemId, int amount) {
         state.touchPlayer(playerId);

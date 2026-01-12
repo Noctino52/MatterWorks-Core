@@ -8,6 +8,7 @@ import com.matterworks.core.ui.MariaDBAdapter;
 import javax.swing.*;
 import javax.swing.Timer;
 import java.awt.*;
+import java.lang.reflect.Method;
 import java.util.*;
 import java.util.List;
 import java.util.concurrent.*;
@@ -42,15 +43,17 @@ public class VoidShopPanel extends JPanel {
         final JLabel lblDetail;
         final JLabel lblOwned;
         final JButton btnBuy;
+        final JButton btnUse;
 
         volatile int lastOwned = Integer.MIN_VALUE;
 
-        Row(String itemId, JLabel lblTitle, JLabel lblDetail, JLabel lblOwned, JButton btnBuy) {
+        Row(String itemId, JLabel lblTitle, JLabel lblDetail, JLabel lblOwned, JButton btnBuy, JButton btnUse) {
             this.itemId = itemId;
             this.lblTitle = lblTitle;
             this.lblDetail = lblDetail;
             this.lblOwned = lblOwned;
             this.btnBuy = btnBuy;
+            this.btnUse = btnUse;
         }
     }
 
@@ -147,8 +150,8 @@ public class VoidShopPanel extends JPanel {
         JPanel card = new JPanel(new BorderLayout(10, 5));
         card.setBackground(CARD);
         card.setBorder(BorderFactory.createLineBorder(Color.DARK_GRAY, 1));
-        card.setMaximumSize(new Dimension(330, 78));
-        card.setPreferredSize(new Dimension(330, 78));
+        card.setMaximumSize(new Dimension(360, 92));
+        card.setPreferredSize(new Dimension(360, 92));
 
         JPanel info = new JPanel(new GridLayout(3, 1));
         info.setOpaque(false);
@@ -174,7 +177,6 @@ public class VoidShopPanel extends JPanel {
         info.add(lblOwned);
 
         JButton btnBuy = new JButton("BUY");
-        btnBuy.setPreferredSize(new Dimension(90, 44));
         btnBuy.setFont(new Font("SansSerif", Font.BOLD, 11));
         btnBuy.setFocusable(false);
         btnBuy.setBackground(new Color(120, 40, 180));
@@ -182,10 +184,33 @@ public class VoidShopPanel extends JPanel {
         btnBuy.setToolTipText("Buy 1x for " + it.voidPrice() + " VOID coins");
         btnBuy.addActionListener(e -> buyAsync(id));
 
-        card.add(info, BorderLayout.CENTER);
-        card.add(btnBuy, BorderLayout.EAST);
+        JButton btnUse = new JButton("USE");
+        btnUse.setFont(new Font("SansSerif", Font.BOLD, 11));
+        btnUse.setFocusable(false);
+        btnUse.setBackground(new Color(60, 120, 80));
+        btnUse.setForeground(Color.WHITE);
+        btnUse.setToolTipText("Use 1x from your inventory (if supported)");
+        btnUse.addActionListener(e -> useAsync(id));
 
-        Row row = new Row(id, lblTitle, lblDetail, lblOwned, btnBuy);
+        JPanel right = new JPanel();
+        right.setOpaque(false);
+        right.setLayout(new BoxLayout(right, BoxLayout.Y_AXIS));
+        right.setBorder(BorderFactory.createEmptyBorder(6, 0, 6, 10));
+
+        Dimension btnSize = new Dimension(90, 28);
+        btnBuy.setPreferredSize(btnSize);
+        btnBuy.setMaximumSize(btnSize);
+        btnUse.setPreferredSize(btnSize);
+        btnUse.setMaximumSize(btnSize);
+
+        right.add(btnBuy);
+        right.add(Box.createVerticalStrut(6));
+        right.add(btnUse);
+
+        card.add(info, BorderLayout.CENTER);
+        card.add(right, BorderLayout.EAST);
+
+        Row row = new Row(id, lblTitle, lblDetail, lblOwned, btnBuy, btnUse);
         rows.put(id, row);
 
         return card;
@@ -210,6 +235,58 @@ public class VoidShopPanel extends JPanel {
                     if (onEconomyMaybeChanged != null) onEconomyMaybeChanged.run();
                     refreshStates();
                 });
+            } catch (Throwable t) {
+                t.printStackTrace();
+            }
+        });
+    }
+
+    private void useAsync(String itemId) {
+        if (disposed) return;
+        if (playerUuid == null) return;
+
+        exec.submit(() -> {
+            try {
+                if (!isOverclockItem(itemId)) {
+                    SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(
+                            this,
+                            "This item cannot be used from here yet.",
+                            "Void Shop",
+                            JOptionPane.INFORMATION_MESSAGE
+                    ));
+                    return;
+                }
+
+                boolean ok = false;
+
+                // Prefer direct call if present
+                try {
+                    ok = gridManager.useOverclock(playerUuid, itemId);
+                } catch (Throwable ignored) {
+                    ok = false;
+                }
+
+                final boolean fOk = ok;
+                SwingUtilities.invokeLater(() -> {
+                    if (!fOk) {
+                        JOptionPane.showMessageDialog(
+                                this,
+                                "Use failed: missing item (or not allowed).",
+                                "Void Shop",
+                                JOptionPane.WARNING_MESSAGE
+                        );
+                    } else {
+                        JOptionPane.showMessageDialog(
+                                this,
+                                "Overclock activated!",
+                                "Void Shop",
+                                JOptionPane.INFORMATION_MESSAGE
+                        );
+                    }
+                    if (onEconomyMaybeChanged != null) onEconomyMaybeChanged.run();
+                    refreshStates();
+                });
+
             } catch (Throwable t) {
                 t.printStackTrace();
             }
@@ -253,6 +330,42 @@ public class VoidShopPanel extends JPanel {
             boolean canBuy = admin || voidCoins >= price;
             r.btnBuy.setEnabled(canBuy);
             r.btnBuy.setBackground(canBuy ? new Color(120, 40, 180) : new Color(90, 90, 40));
+
+            // USE button rules
+            boolean usable = isOverclockItem(r.itemId);
+
+            boolean canUse;
+            if (!usable) {
+                canUse = false;
+            } else {
+                // If GridManager has canUseOverclock, use it; otherwise fallback to (admin || owned>0)
+                Boolean canUseFromCore = tryCallBoolean(gridManager, "canUseOverclock",
+                        new Class<?>[]{UUID.class, String.class},
+                        new Object[]{playerUuid, r.itemId});
+                canUse = (canUseFromCore != null) ? canUseFromCore : (admin || owned > 0);
+            }
+
+            r.btnUse.setEnabled(canUse);
+            r.btnUse.setBackground(canUse ? new Color(60, 120, 80) : new Color(70, 70, 70));
+        }
+    }
+
+    private boolean isOverclockItem(String itemId) {
+        if (itemId == null) return false;
+        return itemId.equals("overclock_2h")
+                || itemId.equals("overclock_12h")
+                || itemId.equals("overclock_24h")
+                || itemId.equals("overclock_life");
+    }
+
+    private static Boolean tryCallBoolean(Object target, String methodName, Class<?>[] argTypes, Object[] args) {
+        try {
+            Method m = target.getClass().getMethod(methodName, argTypes);
+            Object r = m.invoke(target, args);
+            if (r instanceof Boolean b) return b;
+            return null;
+        } catch (Throwable ignored) {
+            return null;
         }
     }
 }

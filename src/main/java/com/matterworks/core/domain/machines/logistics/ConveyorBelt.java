@@ -30,7 +30,10 @@ public class ConveyorBelt extends PlacedMachine {
     @Override
     public void tick(long currentTick) {
         if (currentItem == null) return;
-        if (arrivalTick == -1) arrivalTick = currentTick + TRANSPORT_TIME;
+
+        if (arrivalTick == -1) {
+            arrivalTick = scheduleAfter(currentTick, TRANSPORT_TIME, "BELT_MOVE");
+        }
 
         if (currentTick >= arrivalTick) {
             pushToNeighbor(currentTick);
@@ -40,7 +43,10 @@ public class ConveyorBelt extends PlacedMachine {
     public boolean insertItem(MatterPayload item, long currentTick) {
         if (this.currentItem != null) return false;
         this.currentItem = item;
-        this.arrivalTick = currentTick + TRANSPORT_TIME;
+
+        // OLD: arrivalTick = currentTick + TRANSPORT_TIME;
+        this.arrivalTick = scheduleAfter(currentTick, TRANSPORT_TIME, "BELT_MOVE");
+
         this.metadata.add("currentItem", item.serialize());
         markDirty();
         return true;
@@ -49,7 +55,7 @@ public class ConveyorBelt extends PlacedMachine {
     private void pushToNeighbor(long currentTick) {
         if (gridManager == null) return;
 
-        Vector3Int dirVec = orientation.toVector();
+        Vector3Int dirVec = orientationToVector();
         GridPosition targetPos = new GridPosition(
                 pos.x() + dirVec.x(),
                 pos.y() + dirVec.y(),
@@ -59,7 +65,7 @@ public class ConveyorBelt extends PlacedMachine {
         PlacedMachine neighbor = getNeighborAt(targetPos);
         if (neighbor == null) return;
 
-        boolean moved = false;
+        boolean moved;
 
         if (neighbor instanceof ConveyorBelt nextBelt) moved = nextBelt.insertItem(currentItem, currentTick);
         else if (neighbor instanceof NexusMachine nexus) moved = nexus.insertItem(currentItem, this.pos);
@@ -68,7 +74,7 @@ public class ConveyorBelt extends PlacedMachine {
         else if (neighbor instanceof Merger merger) moved = merger.insertItem(currentItem, this.pos);
         else if (neighbor instanceof LiftMachine lift) moved = lift.insertItem(currentItem, this.pos);
         else if (neighbor instanceof DropperMachine dropper) moved = dropper.insertItem(currentItem, this.pos);
-        else moved = tryGenericInsert(neighbor, currentItem, this.pos); // ✅ fallback
+        else moved = tryGenericInsert(neighbor, currentItem, this.pos);
 
         if (moved) {
             this.currentItem = null;

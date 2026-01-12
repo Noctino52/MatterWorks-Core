@@ -32,8 +32,8 @@ public final class TopBarPanel extends JPanel {
     private static final int ROW_GAP_H = 2;
 
     /**
-     * ✅ Compatibilità: costruttore originale (usato da MatterWorksGUI).
-     * In questa variante INSTANT è presente ma non fa nulla (handler no-op).
+     * ✅ Backward compatibility: original constructor (used by older MatterWorksGUI versions).
+     * Instant + Booster are present but no-op.
      */
     public TopBarPanel(
             Consumer<String> onSelectTool,
@@ -43,7 +43,7 @@ public final class TopBarPanel extends JPanel {
             Runnable onSOS,
             Runnable onSave,
             Runnable onReset,
-            Runnable onPrestigeClassic, // classic prestige
+            Runnable onPrestigeClassic,
             Runnable onDelete
     ) {
         this(
@@ -55,13 +55,14 @@ public final class TopBarPanel extends JPanel {
                 onSave,
                 onReset,
                 onPrestigeClassic,
-                () -> {},                 // INSTANT no-op (finché non aggiorni MatterWorksGUI)
+                () -> {},     // instant prestige no-op
+                () -> {},     // booster no-op
                 onDelete
         );
     }
 
     /**
-     * ✅ Nuovo: supporto completo anche a Instant Prestige.
+     * ✅ Compatibility: Instant supported, Booster no-op.
      */
     public TopBarPanel(
             Consumer<String> onSelectTool,
@@ -73,6 +74,37 @@ public final class TopBarPanel extends JPanel {
             Runnable onReset,
             Runnable onPrestigeClassic,
             Runnable onPrestigeInstant,
+            Runnable onDelete
+    ) {
+        this(
+                onSelectTool,
+                onBuyToolRightClick,
+                onLayerDelta,
+                onSelectStructureNativeId,
+                onSOS,
+                onSave,
+                onReset,
+                onPrestigeClassic,
+                onPrestigeInstant,
+                () -> {},     // booster no-op
+                onDelete
+        );
+    }
+
+    /**
+     * ✅ Full constructor: Classic + Instant + Booster.
+     */
+    public TopBarPanel(
+            Consumer<String> onSelectTool,
+            BiConsumer<String, Integer> onBuyToolRightClick,
+            Consumer<Integer> onLayerDelta,
+            Consumer<String> onSelectStructureNativeId,
+            Runnable onSOS,
+            Runnable onSave,
+            Runnable onReset,
+            Runnable onPrestigeClassic,
+            Runnable onPrestigeInstant,
+            Runnable onBooster,
             Runnable onDelete
     ) {
         super(new BorderLayout());
@@ -134,7 +166,7 @@ public final class TopBarPanel extends JPanel {
         row1.add(toolButton("⬇ Drop", "dropper", onSelectTool, onBuyToolRightClick));
         row1.add(vSep());
 
-        // Nexus: selezionabile, buy disattivato (right click null)
+        // Nexus: selectable, buy disabled (right click null)
         row1.add(toolButton("🌌 Nexus", "nexus_core", onSelectTool, null));
 
         row2.add(toolButton("🎨 Chroma", "chromator", onSelectTool, onBuyToolRightClick));
@@ -155,7 +187,7 @@ public final class TopBarPanel extends JPanel {
         machines2Rows.add(rowHeader2);
         machines2Rows.add(row2);
 
-        // ===== CONTROLS (Structure + Y Layer) =====
+        // ===== CONTROLS (Structure + Booster + Y Layer) =====
         JPanel controls = new JPanel();
         controls.setOpaque(false);
         controls.setLayout(new BoxLayout(controls, BoxLayout.Y_AXIS));
@@ -172,8 +204,14 @@ public final class TopBarPanel extends JPanel {
         });
         btnStructure.setBackground(new Color(100, 100, 100));
         btnStructure.setAlignmentX(Component.LEFT_ALIGNMENT);
-
         controls.add(btnStructure);
+
+        // ✅ NEW: Booster button (next to Structure area)
+        controls.add(Box.createVerticalStrut(6));
+        JButton btnBooster = UiKit.button("🚀 Booster", e -> onBooster.run());
+        btnBooster.setBackground(new Color(0, 120, 90));
+        btnBooster.setAlignmentX(Component.LEFT_ALIGNMENT);
+        controls.add(btnBooster);
 
         controls.add(Box.createVerticalStrut(ROW_GAP_H + SECTION_LABEL_H));
 
@@ -214,8 +252,6 @@ public final class TopBarPanel extends JPanel {
         leftOuter.add(controls, BorderLayout.EAST);
 
         // ===== RIGHT SYSTEM BUTTONS =====
-        // Riga 0: SOS, SAVE, RESET, DELETE
-        // Riga 1: INSTANT sotto RESET (di lato), PRESTIGE sotto DELETE (come richiesto)
         JPanel rightSystem = new JPanel(new GridBagLayout());
         rightSystem.setOpaque(false);
 
@@ -233,13 +269,13 @@ public final class TopBarPanel extends JPanel {
         btnDelete.setForeground(Color.RED);
         btnDelete.setBorder(BorderFactory.createLineBorder(Color.RED, 1));
 
-        // Classic prestige (tech tree unlocked)
+        // Classic prestige
         btnPrestigeClassic = UiKit.button("🟣 PRESTIGE", e -> onPrestigeClassic.run());
         btnPrestigeClassic.setBackground(new Color(150, 0, 200));
         btnPrestigeClassic.setEnabled(false);
         btnPrestigeClassic.setToolTipText("Finish the Tech Tree to unlock Prestige.");
 
-        // Instant prestige (premium item)
+        // Instant prestige
         btnPrestigeInstant = UiKit.button("✨ INSTANT", e -> onPrestigeInstant.run());
         btnPrestigeInstant.setBackground(new Color(120, 40, 180));
         btnPrestigeInstant.setEnabled(false);
@@ -259,11 +295,9 @@ public final class TopBarPanel extends JPanel {
         c.gridy = 1;
         c.insets = new Insets(4, 6, 0, 6);
 
-        // INSTANT sotto RESET (di lato)
         c.gridx = 2;
         rightSystem.add(btnPrestigeInstant, c);
 
-        // PRESTIGE sotto DELETE (come richiesto)
         c.gridx = 3;
         rightSystem.add(btnPrestigeClassic, c);
 
@@ -274,7 +308,7 @@ public final class TopBarPanel extends JPanel {
         add(toolbar, BorderLayout.CENTER);
     }
 
-    // ===== GETTERS usati da MatterWorksGUI =====
+    // ===== GETTERS used by MatterWorksGUI =====
     public JComboBox<Object> getPlayerSelector() { return playerSelector; }
     public JLabel getMoneyLabel() { return moneyLabel; }
     public JLabel getRoleLabel() { return roleLabel; }

@@ -4,10 +4,11 @@ import com.google.gson.JsonObject;
 import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.domain.inventory.MachineInventory;
-import com.matterworks.core.domain.machines.production.NexusMachine;
 import com.matterworks.core.domain.machines.base.PlacedMachine;
 import com.matterworks.core.domain.machines.base.ProcessorMachine;
+import com.matterworks.core.domain.machines.production.NexusMachine;
 import com.matterworks.core.domain.matter.MatterPayload;
+
 import java.util.UUID;
 
 public class DropperMachine extends PlacedMachine {
@@ -33,77 +34,61 @@ public class DropperMachine extends PlacedMachine {
             return;
         }
 
-        if (!buffer.isEmpty() && buffer.getItemInSlot(0) != null) {
-            MatterPayload payload = buffer.getItemInSlot(0);
+        if (buffer.isEmpty()) return;
 
-            // Output: Livello Y=0 (Base), spostato nella direzione dell'orientamento
-            GridPosition outPos = this.pos.add(this.orientation.toVector());
-            PlacedMachine neighbor = getNeighborAt(outPos);
+        MatterPayload payload = buffer.getItemInSlot(0);
+        if (payload == null) return;
 
-            if (neighbor == null) return;
+        Vector3Int f = orientationToVector();
+        GridPosition outPos = new GridPosition(pos.x() + f.x(), pos.y() + f.y(), pos.z() + f.z());
 
-            boolean moved = false;
+        PlacedMachine neighbor = getNeighborAt(outPos);
+        if (neighbor == null) return;
 
-            // Logica instanceof per i vicini
-            if (neighbor instanceof ConveyorBelt belt) {
-                moved = belt.insertItem(payload, currentTick);
-            }
-            else if (neighbor instanceof NexusMachine nexus) {
-                moved = nexus.insertItem(payload, this.pos);
-            }
-            else if (neighbor instanceof ProcessorMachine proc) {
-                moved = proc.insertItem(payload, this.pos);
-            }
-            else if (neighbor instanceof Splitter split) {
-                moved = split.insertItem(payload, this.pos);
-            }
-            else if (neighbor instanceof Merger merger) {
-                moved = merger.insertItem(payload, this.pos);
-            }
-            else if (neighbor instanceof LiftMachine lift) {
-                moved = lift.insertItem(payload, this.pos);
-            }
-            else if (neighbor instanceof DropperMachine dropper) {
-                moved = dropper.insertItem(payload, this.pos);
-            }
+        boolean moved = false;
 
-            if (moved) {
-                buffer.extractFirst();
-                cooldown = TRANSPORT_TIME;
-                updateMetadata();
-            }
+        if (neighbor instanceof ConveyorBelt belt) {
+            moved = belt.insertItem(payload, currentTick);
+        } else if (neighbor instanceof NexusMachine nexus) {
+            moved = nexus.insertItem(payload, this.pos);
+        } else if (neighbor instanceof ProcessorMachine proc) {
+            moved = proc.insertItem(payload, this.pos);
+        } else if (neighbor instanceof Splitter split) {
+            moved = split.insertItem(payload, this.pos);
+        } else if (neighbor instanceof Merger merger) {
+            moved = merger.insertItem(payload, this.pos);
+        } else if (neighbor instanceof LiftMachine lift) {
+            moved = lift.insertItem(payload, this.pos);
+        } else if (neighbor instanceof DropperMachine dropper) {
+            moved = dropper.insertItem(payload, this.pos);
+        }
+
+        if (moved) {
+            buffer.extractFirst();
+            cooldown = (int) computeAcceleratedTicks(TRANSPORT_TIME);
+            updateMetadata();
         }
     }
 
-    // Rimossa @Override
     public boolean insertItem(MatterPayload item, GridPosition fromPos) {
-        if (fromPos == null) return false;
+        if (fromPos == null || item == null) return false;
 
-        // Controllo 1: L'input deve essere al livello superiore (y+1)
-        if (fromPos.y() != this.pos.y() + 1) {
-            return false;
-        }
+        // input comes from above
+        if (fromPos.y() != this.pos.y() + 1) return false;
+        if (!buffer.isEmpty()) return false;
 
-        // Controllo 2: Buffer pieno
-        if (!buffer.isEmpty()) {
-            return false;
-        }
-
-        // Controllo 3: ACCETTA SOLO ConveyorBelt
         PlacedMachine sender = getNeighborAt(fromPos);
-        if (!(sender instanceof ConveyorBelt)) {
-            return false;
-        }
+        if (!(sender instanceof ConveyorBelt)) return false;
 
         boolean success = buffer.insertIntoSlot(0, item);
-        if (success) {
-            updateMetadata();
-        }
+        if (success) updateMetadata();
         return success;
     }
 
     private void updateMetadata() {
-        this.metadata = buffer.serialize();
+        JsonObject inv = buffer.serialize();
+        this.metadata.add("items", inv.get("items"));
+        this.metadata.add("capacity", inv.get("capacity"));
         this.metadata.addProperty("orientation", this.orientation.name());
         markDirty();
     }

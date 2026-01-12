@@ -7,7 +7,9 @@ import com.matterworks.core.domain.machines.base.ProcessorMachine;
 import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.matter.MatterPayload;
 import com.matterworks.core.domain.matter.MatterShape;
+import com.matterworks.core.domain.matter.Recipe;
 
+import java.util.List;
 import java.util.UUID;
 
 public class ColorMixer extends ProcessorMachine {
@@ -24,7 +26,6 @@ public class ColorMixer extends ProcessorMachine {
     @Override
     public boolean insertItem(MatterPayload item, GridPosition fromPos) {
         if (fromPos == null || item == null) return false;
-
         if (item.color() == MatterColor.RAW) return false;
 
         int targetSlot = getSlotForPosition(fromPos);
@@ -96,16 +97,9 @@ public class ColorMixer extends ProcessorMachine {
             if (mixed == MatterColor.RAW) mixed = MatterColor.WHITE;
 
             MatterPayload result = new MatterPayload(MatterShape.SPHERE, mixed);
+            this.currentRecipe = new Recipe("mix_" + mixed.name(), List.of(c1, c2), result, 1.5f, 0);
 
-            this.currentRecipe = new com.matterworks.core.domain.matter.Recipe(
-                    "mix_" + mixed.name(),
-                    java.util.List.of(c1, c2),
-                    result,
-                    1.5f,
-                    0
-            );
-
-            this.finishTick = currentTick + 30;
+            this.finishTick = scheduleAfter(currentTick, 30, "PROCESS_START");
             saveState();
         }
     }

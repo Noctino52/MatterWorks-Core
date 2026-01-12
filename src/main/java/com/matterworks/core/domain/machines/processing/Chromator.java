@@ -1,6 +1,7 @@
 package com.matterworks.core.domain.machines.processing;
 
 import com.google.gson.JsonObject;
+import com.matterworks.core.common.Direction;
 import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.domain.machines.base.ProcessorMachine;
@@ -39,11 +40,12 @@ public class Chromator extends ProcessorMachine {
     @Override
     protected GridPosition getOutputPosition() {
         int x = pos.x(); int y = pos.y(); int z = pos.z();
+
         return switch (orientation) {
             case NORTH -> new GridPosition(x, y, z - 1);
             case SOUTH -> new GridPosition(x + 1, y, z + 1);
-            case EAST -> new GridPosition(x + 1, y, z);
-            case WEST -> new GridPosition(x - 1, y, z + 1);
+            case EAST  -> new GridPosition(x + 1, y, z);
+            case WEST  -> new GridPosition(x - 1, y, z + 1);
             default -> pos;
         };
     }
@@ -51,6 +53,7 @@ public class Chromator extends ProcessorMachine {
     private int getSlotForPosition(GridPosition senderPos) {
         int x = pos.x(); int y = pos.y(); int z = pos.z();
         GridPosition s0, s1;
+
         switch (orientation) {
             case NORTH -> { s0 = new GridPosition(x, y, z + 1); s1 = new GridPosition(x + 1, y, z + 1); }
             case SOUTH -> { s0 = new GridPosition(x + 1, y, z - 1); s1 = new GridPosition(x, y, z - 1); }
@@ -58,6 +61,7 @@ public class Chromator extends ProcessorMachine {
             case WEST  -> { s0 = new GridPosition(x + 1, y, z + 1); s1 = new GridPosition(x + 1, y, z); }
             default -> { return -1; }
         }
+
         if (senderPos.equals(s0)) return 0;
         if (senderPos.equals(s1)) return 1;
         return -1;
@@ -72,7 +76,6 @@ public class Chromator extends ProcessorMachine {
             return;
         }
 
-        // output pieno -> non parte
         if (outputBuffer.getCount() >= outputBuffer.getMaxStackSize()) return;
 
         if (inputBuffer.getCountInSlot(0) > 0 && inputBuffer.getCountInSlot(1) > 0) {
@@ -86,8 +89,8 @@ public class Chromator extends ProcessorMachine {
 
             MatterPayload result = new MatterPayload(cube.shape(), dye.color());
             this.currentRecipe = new Recipe("chroma_working", List.of(cube, dye), result, 1.5f, 0);
-            this.finishTick = currentTick + 30;
 
+            this.finishTick = scheduleAfter(currentTick, 30, "PROCESS_START");
             saveState();
         }
     }

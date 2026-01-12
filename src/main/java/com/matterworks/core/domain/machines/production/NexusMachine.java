@@ -29,29 +29,25 @@ public class NexusMachine extends PlacedMachine {
     @Override
     public void tick(long currentTick) {
         if (storage.isEmpty()) return;
-        if (nextSaleTick == -1) nextSaleTick = currentTick + SALE_INTERVAL;
+
+        if (nextSaleTick == -1) {
+            nextSaleTick = scheduleAfter(currentTick, SALE_INTERVAL, "NEXUS_SELL");
+        }
 
         if (currentTick >= nextSaleTick) {
             sellNextItem();
-            nextSaleTick = currentTick + SALE_INTERVAL;
+            nextSaleTick = scheduleAfter(currentTick, SALE_INTERVAL, "NEXUS_SELL");
         }
     }
 
-    /**
-     * Metodo legacy (non dovrebbe essere usato dai nastri, ma per sicurezza)
-     */
     public boolean insertItem(MatterPayload item) {
-        return false; // Il Nexus ora richiede una posizione di origine!
+        return false;
     }
 
-    /**
-     * NUOVO: Inserimento con validazione geometrica rigorosa.
-     */
     public boolean insertItem(MatterPayload item, GridPosition fromPos) {
-        if (item.shape() == null) return false; // Rifiuta liquidi/dye
+        if (item.shape() == null) return false;
         if (fromPos == null) return false;
 
-        // Validazione Porta: Deve entrare da una delle 6 porte centrali
         if (!isValidInputPort(fromPos)) {
             return false;
         }
@@ -69,22 +65,15 @@ public class NexusMachine extends PlacedMachine {
         int y = pos.y();
         int z = pos.z();
 
-        // Coordinate relative (delta)
         int dx = from.x() - x;
         int dy = from.y() - y;
         int dz = from.z() - z;
 
-        // Il Nexus accetta input solo ai livelli Y=0 e Y=1 (relativi alla base)
         if (dy < 0 || dy > 1) return false;
 
-        // Logica Porte Centrali (Il Nexus è 3x3, centro è offset 1)
-        // Nord (z-1) -> Entra in (1, y, 0) -> Delta da origine: x=1, z=-1
         if (dx == 1 && dz == -1) return true;
-        // Sud (z+3) -> Entra in (1, y, 2) -> Delta da origine: x=1, z=3
         if (dx == 1 && dz == 3) return true;
-        // Ovest (x-1) -> Entra in (0, y, 1) -> Delta da origine: x=-1, z=1
         if (dx == -1 && dz == 1) return true;
-        // Est (x+3) -> Entra in (2, y, 1) -> Delta da origine: x=3, z=1
         if (dx == 3 && dz == 1) return true;
 
         return false;
