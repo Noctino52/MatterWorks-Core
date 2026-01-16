@@ -90,8 +90,9 @@ public class ColorMixer extends ProcessorMachine {
 
             if (c1.color() == c2.color()) return;
 
-            inputBuffer.decreaseSlot(0, 1);
-            inputBuffer.decreaseSlot(1, 1);
+            // ✅ consume + telemetry
+            consumeInput(0, 1, c1);
+            consumeInput(1, 1, c2);
 
             MatterColor mixed = MatterColor.mix(c1.color(), c2.color());
             if (mixed == MatterColor.RAW) mixed = MatterColor.WHITE;

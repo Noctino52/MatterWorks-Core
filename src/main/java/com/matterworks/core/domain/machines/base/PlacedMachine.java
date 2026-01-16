@@ -151,12 +151,15 @@ public abstract class PlacedMachine implements IGridComponent {
         long effectiveTicks = computeAcceleratedTicks(baseTicks);
 
         if (effectiveTicks != baseTicks) {
+            /*
             System.out.println("[OVERCLOCK] " + (reasonForLog == null ? "SCHEDULE" : reasonForLog)
                     + " machine=" + typeId
                     + " owner=" + ownerId
                     + " baseTicks=" + baseTicks
                     + " effectiveTicks=" + effectiveTicks
                     + " mult=" + String.format(Locale.US, "%.2f", getEffectiveSpeedMultiplier()));
+
+             */
         }
 
         return currentTick + effectiveTicks;

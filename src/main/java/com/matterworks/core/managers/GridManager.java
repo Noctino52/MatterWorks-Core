@@ -12,6 +12,17 @@ import com.matterworks.core.domain.shop.VoidShopItem;
 import com.matterworks.core.model.PlotUnlockState;
 import com.matterworks.core.ports.IWorldAccess;
 import com.matterworks.core.ui.MariaDBAdapter;
+import com.matterworks.core.domain.telemetry.production.InMemoryProductionTelemetry;
+import com.matterworks.core.domain.telemetry.production.ProductionTelemetry;
+import com.matterworks.core.domain.telemetry.production.ProductionStatsSnapshot;
+import com.matterworks.core.domain.telemetry.production.ProductionTimeWindow;
+import com.matterworks.core.domain.telemetry.production.ProductionStatsView;
+import com.matterworks.core.domain.telemetry.production.ProductionStatLine;
+import com.matterworks.core.domain.telemetry.production.TelemetryKeyFormatter;
+import com.matterworks.core.domain.telemetry.production.KeyKind;
+
+
+
 
 import java.util.*;
 import java.util.concurrent.ExecutorService;
@@ -46,6 +57,10 @@ public class GridManager {
     private volatile double globalOverclockMultiplier = 1.0;
     private volatile long globalOverclockLastDurationSeconds = 0L;
     private volatile long globalOverclockLastFetchMs = 0L;
+
+    private final ProductionTelemetry productionTelemetry = new InMemoryProductionTelemetry();
+
+
 
     public GridManager(MariaDBAdapter repository, IWorldAccess worldAdapter, BlockRegistry registry) {
         this.repository = repository;
@@ -383,6 +398,7 @@ public class GridManager {
         if (Double.isNaN(out) || Double.isInfinite(out) || out <= 0.0) return 1.0;
 
         if (ocPlayer > 1.0 || ocGlobal > 1.0) {
+            /*
             System.out.println("[OVERCLOCK] speed multiplier active for owner=" + ownerId
                     + " machine=" + machineTypeId
                     + " machineSpeed=" + machineSpeed
@@ -390,6 +406,8 @@ public class GridManager {
                     + " overclockGlobal=" + ocGlobal
                     + " effective=" + out
                     + " playtime=" + playtime);
+
+             */
         }
 
         return out;
@@ -452,6 +470,104 @@ public class GridManager {
 
         return (long) Math.ceil(diffMs / 1000.0);
     }
+
+    public ProductionTelemetry getProductionTelemetry() { return productionTelemetry; }
+
+    public ProductionStatsSnapshot getProductionStats(UUID playerId, ProductionTimeWindow window) {
+        if (playerId == null) {
+            return productionTelemetry.getSnapshot(UUID.randomUUID(), ProductionTimeWindow.ONE_MINUTE); // empty-ish safe fallback
+        }
+        if (window == null) window = ProductionTimeWindow.ONE_MINUTE;
+        return productionTelemetry.getSnapshot(playerId, window);
+    }
+
+    public ProductionStatsView getProductionStatsView(UUID playerId, ProductionTimeWindow window) {
+        if (window == null) window = ProductionTimeWindow.ONE_MINUTE;
+
+        ProductionStatsSnapshot snap = getProductionStats(playerId, window);
+
+        var producedColors = snap.getProducedByColorKey().entrySet().stream()
+                .map(e -> new ProductionStatLine(
+                        KeyKind.COLOR,
+                        e.getKey(),
+                        TelemetryKeyFormatter.toLabel(e.getKey()),
+                        e.getValue(),
+                        0.0
+                ))
+                .sorted((a, b) -> Long.compare(b.getQuantity(), a.getQuantity()))
+                .toList();
+
+        var producedMatters = snap.getProducedByMatterKey().entrySet().stream()
+                .map(e -> new ProductionStatLine(
+                        KeyKind.MATTER,
+                        e.getKey(),
+                        TelemetryKeyFormatter.toLabel(e.getKey()),
+                        e.getValue(),
+                        0.0
+                ))
+                .sorted((a, b) -> Long.compare(b.getQuantity(), a.getQuantity()))
+                .toList();
+
+        var consumedColors = snap.getConsumedByColorKey().entrySet().stream()
+                .map(e -> new ProductionStatLine(
+                        KeyKind.COLOR,
+                        e.getKey(),
+                        TelemetryKeyFormatter.toLabel(e.getKey()),
+                        e.getValue(),
+                        0.0
+                ))
+                .sorted((a, b) -> Long.compare(b.getQuantity(), a.getQuantity()))
+                .toList();
+
+        var consumedMatters = snap.getConsumedByMatterKey().entrySet().stream()
+                .map(e -> new ProductionStatLine(
+                        KeyKind.MATTER,
+                        e.getKey(),
+                        TelemetryKeyFormatter.toLabel(e.getKey()),
+                        e.getValue(),
+                        0.0
+                ))
+                .sorted((a, b) -> Long.compare(b.getQuantity(), a.getQuantity()))
+                .toList();
+
+        var soldColors = snap.getSoldByColorKey().entrySet().stream()
+                .map(e -> new ProductionStatLine(
+                        KeyKind.COLOR,
+                        e.getKey(),
+                        TelemetryKeyFormatter.toLabel(e.getKey()),
+                        e.getValue().getQuantity(),
+                        e.getValue().getMoneyEarned()
+                ))
+                .sorted((a, b) -> Double.compare(b.getMoneyEarned(), a.getMoneyEarned()))
+                .toList();
+
+        var soldMatters = snap.getSoldByMatterKey().entrySet().stream()
+                .map(e -> new ProductionStatLine(
+                        KeyKind.MATTER,
+                        e.getKey(),
+                        TelemetryKeyFormatter.toLabel(e.getKey()),
+                        e.getValue().getQuantity(),
+                        e.getValue().getMoneyEarned()
+                ))
+                .sorted((a, b) -> Double.compare(b.getMoneyEarned(), a.getMoneyEarned()))
+                .toList();
+
+        return new ProductionStatsView(
+                window,
+                producedColors,
+                producedMatters,
+                consumedColors,
+                consumedMatters,
+                soldColors,
+                soldMatters,
+                snap.getTotalProduced(),
+                snap.getTotalConsumed(),
+                snap.getTotalSoldQuantity(),
+                snap.getTotalMoneyEarned()
+        );
+    }
+
+
 
     // (optional debug)
     public int getPlacedItemCount(UUID ownerId) { return state.getPlacedItemCount(ownerId); }

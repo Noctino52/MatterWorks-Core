@@ -96,7 +96,8 @@ public abstract class EffectApplicatorMachine extends ProcessorMachine {
         if (in.shape() == null) return;
         if (hasAnyEffects(in)) return;
 
-        inputBuffer.decreaseSlot(0, 1);
+        // ✅ consume + telemetry
+        consumeInput(0, 1, in);
 
         MatterPayload out = new MatterPayload(in.shape(), in.color(), List.of(effectToApply));
         this.currentRecipe = new Recipe(

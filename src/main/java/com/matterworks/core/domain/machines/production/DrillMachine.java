@@ -10,7 +10,6 @@ import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.matter.MatterPayload;
 import com.matterworks.core.domain.matter.MatterShape;
 
-import java.util.Locale;
 import java.util.UUID;
 
 public class DrillMachine extends PlacedMachine {
@@ -82,6 +81,13 @@ public class DrillMachine extends PlacedMachine {
         MatterPayload newItem = new MatterPayload(shape, this.resourceToMine);
 
         if (outputBuffer.insert(newItem)) {
+            // ✅ Telemetry: produced
+            try {
+                if (gridManager != null && gridManager.getProductionTelemetry() != null) {
+                    gridManager.getProductionTelemetry().recordProduced(getOwnerId(), newItem, 1L);
+                }
+            } catch (Throwable ignored) {}
+
             saveInternalState();
         }
     }

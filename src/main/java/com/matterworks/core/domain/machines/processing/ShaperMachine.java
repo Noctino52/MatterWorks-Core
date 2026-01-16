@@ -71,14 +71,13 @@ public class ShaperMachine extends ProcessorMachine {
         MatterPayload in = inputBuffer.getItemInSlot(0);
         if (in == null || in.shape() != MatterShape.CUBE) return;
 
-        inputBuffer.decreaseSlot(0, 1);
+        // ✅ consume + telemetry
+        consumeInput(0, 1, in);
 
         MatterPayload out = new MatterPayload(MatterShape.SPHERE, in.color(), in.effects());
         this.currentRecipe = new Recipe("smoothing_cube_to_sphere", List.of(in), out, 2.0f, 0);
 
-        // OLD: finishTick = currentTick + PROCESS_TICKS;
         this.finishTick = scheduleAfter(currentTick, PROCESS_TICKS, "PROCESS_START");
-
         saveState();
     }
 }

@@ -72,14 +72,13 @@ public class CuttingMachine extends ProcessorMachine {
         MatterPayload in = inputBuffer.getItemInSlot(0);
         if (in == null || in.shape() != MatterShape.SPHERE) return;
 
-        inputBuffer.decreaseSlot(0, 1);
+        // ✅ consume + telemetry
+        consumeInput(0, 1, in);
 
         MatterPayload out = new MatterPayload(MatterShape.PYRAMID, in.color(), in.effects());
         this.currentRecipe = new Recipe("cutting_sphere_to_pyramid", List.of(in), out, 2.0f, 0);
 
-        // OLD: finishTick = currentTick + PROCESS_TICKS;
         this.finishTick = scheduleAfter(currentTick, PROCESS_TICKS, "PROCESS_START");
-
         saveState();
     }
 }

@@ -1,7 +1,6 @@
 package com.matterworks.core.domain.machines.processing;
 
 import com.google.gson.JsonObject;
-import com.matterworks.core.common.Direction;
 import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.domain.machines.base.ProcessorMachine;
@@ -84,8 +83,9 @@ public class Chromator extends ProcessorMachine {
 
             if (cube == null || dye == null) return;
 
-            inputBuffer.decreaseSlot(0, 1);
-            inputBuffer.decreaseSlot(1, 1);
+            // ✅ consume + telemetry
+            consumeInput(0, 1, cube);
+            consumeInput(1, 1, dye);
 
             MatterPayload result = new MatterPayload(cube.shape(), dye.color());
             this.currentRecipe = new Recipe("chroma_working", List.of(cube, dye), result, 1.5f, 0);

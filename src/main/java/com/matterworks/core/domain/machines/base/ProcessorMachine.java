@@ -18,19 +18,15 @@ public abstract class ProcessorMachine extends PlacedMachine {
     public Recipe currentRecipe;
     protected long finishTick = -1;
 
-    /** default legacy */
     protected static final int MAX_INPUT_STACK = 64;
-    /** default legacy */
     public static final int MAX_OUTPUT_STACK = 64;
 
     protected final int maxStackPerSlot;
 
-    /** Legacy constructor (default 64). */
     public ProcessorMachine(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata) {
         this(dbId, ownerId, pos, typeId, metadata, 64);
     }
 
-    /** New constructor with configurable max stack per slot. */
     public ProcessorMachine(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata, int maxStackPerSlot) {
         super(dbId, ownerId, typeId, pos, metadata);
 
@@ -58,8 +54,35 @@ public abstract class ProcessorMachine extends PlacedMachine {
         return false;
     }
 
+    /**
+     * Consume items from an input slot and register telemetry as "consumed".
+     * Caller should pass the item they decided to consume (usually itemInSlot before decreasing).
+     */
+    protected void consumeInput(int slotIndex, int amount, MatterPayload consumedItem) {
+        if (amount <= 0) return;
+        inputBuffer.decreaseSlot(slotIndex, amount);
+
+        try {
+            if (gridManager != null && gridManager.getProductionTelemetry() != null && consumedItem != null) {
+                gridManager.getProductionTelemetry().recordConsumed(getOwnerId(), consumedItem, amount);
+            }
+        } catch (Throwable ignored) {}
+    }
+
     protected void completeProcessing() {
-        if (currentRecipe != null && outputBuffer.insert(currentRecipe.output())) {
+        if (currentRecipe == null) return;
+
+        MatterPayload out = currentRecipe.output();
+        if (out == null) return;
+
+        if (outputBuffer.insert(out)) {
+            // ✅ Telemetry: produced (output of recipe)
+            try {
+                if (gridManager != null && gridManager.getProductionTelemetry() != null) {
+                    gridManager.getProductionTelemetry().recordProduced(getOwnerId(), out, 1L);
+                }
+            } catch (Throwable ignored) {}
+
             this.currentRecipe = null;
             this.finishTick = -1;
             saveState();

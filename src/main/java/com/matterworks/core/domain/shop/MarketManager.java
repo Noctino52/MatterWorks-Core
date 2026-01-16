@@ -50,6 +50,13 @@ public class MarketManager {
                 item.shape() != null ? item.shape().name() : "LIQUID"
         );
 
+        // ✅ Telemetry: final money earned at nexus (already includes multipliers)
+        try {
+            if (gridManager.getProductionTelemetry() != null) {
+                gridManager.getProductionTelemetry().recordSold(sellerId, item, 1L, value);
+            }
+        } catch (Throwable ignored) {}
+
         String shapeTxt = (item.shape() != null ? item.shape().name() : "LIQUID");
         String colorTxt = (item.color() != null ? item.color().name() : "RAW");
         String effTxt = formatEffects(item);

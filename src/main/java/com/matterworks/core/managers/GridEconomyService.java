@@ -116,13 +116,14 @@ final class GridEconomyService {
         } else {
             repository.logTransaction(p, "VOID_SHOP_USE_ADMIN", "OVERCLOCK", 0.0, itemId);
         }
-
+        /*
         System.out.println("[OVERCLOCK] Applied item=" + itemId
                 + " owner=" + ownerId
                 + " startPlaytime=" + playtimeNow
                 + " durationSeconds=" + durationSeconds
                 + " multiplier=2.0");
 
+         */
         return true;
     }
 
