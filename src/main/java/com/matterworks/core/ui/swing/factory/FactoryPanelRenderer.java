@@ -272,7 +272,7 @@ final class FactoryPanelRenderer {
         String type = m.getTypeId();
 
         // ===== PORTS =====
-        if ("drill_mk1".equals(type)) {
+        if ("drill".equals(type)) {
             // âœ… drill: solo OUTPUT (verde), niente input blu
             drawOutputOnlyPort(g, x, z, w, h, CELL, m.getOrientation());
         } else if ("conveyor_belt".equals(type)) {
@@ -770,7 +770,7 @@ final class FactoryPanelRenderer {
     private Color getColorForType(String type) {
         if (type == null) return Color.RED;
         return switch (type) {
-            case "drill_mk1" -> Color.LIGHT_GRAY;
+            case "drill" -> Color.LIGHT_GRAY;
             case "conveyor_belt" -> Color.DARK_GRAY;
             case "nexus_core" -> new Color(150, 0, 150);
             case "chromator" -> new Color(255, 140, 0);

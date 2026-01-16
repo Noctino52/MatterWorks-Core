@@ -12,6 +12,18 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 
+/**
+ * Loads Tech Tree nodes from DB.
+ *
+ * Backward compatible:
+ * - Works with legacy schema (only unlock_machine_ids + parent_node_ids + prestige_cost_mult optional)
+ * - Supports upgrade nodes (tier 2/3) via optional columns:
+ *   - upgrade_machine_ids (JSON list)
+ *   - upgrade_to_tier (INT)
+ *   - speed_multiplier (DOUBLE)
+ *   - nexus_sell_multiplier (DOUBLE)
+ *   - enables_prestige (TINYINT/BOOLEAN)
+ */
 public class TechDefinitionDAO {
 
     private final DatabaseManager db;
@@ -22,93 +34,115 @@ public class TechDefinitionDAO {
     }
 
     public List<TechNode> loadAllNodes() {
-        // Provo con la colonna nuova; se DB vecchio, fallback.
-        try {
-            return loadAllNodesWithPrestigeMult();
+        List<TechNode> out = new ArrayList<>();
+
+        try (Connection conn = db.getConnection()) {
+
+            boolean hasPrestigeMult = SqlCompat.columnExists(conn, "tech_definitions", "prestige_cost_mult");
+
+            boolean hasUpgradeMachineIds = SqlCompat.columnExists(conn, "tech_definitions", "upgrade_machine_ids");
+            boolean hasUpgradeToTier = SqlCompat.columnExists(conn, "tech_definitions", "upgrade_to_tier");
+            boolean hasSpeedMultiplier = SqlCompat.columnExists(conn, "tech_definitions", "speed_multiplier");
+            boolean hasNexusSellMultiplier = SqlCompat.columnExists(conn, "tech_definitions", "nexus_sell_multiplier");
+            boolean hasEnablesPrestige = SqlCompat.columnExists(conn, "tech_definitions", "enables_prestige");
+
+            StringBuilder sb = new StringBuilder();
+            sb.append("SELECT node_id, name_display, cost_money, parent_node_ids, unlock_machine_ids");
+
+            if (hasPrestigeMult) sb.append(", prestige_cost_mult");
+            if (hasUpgradeMachineIds) sb.append(", upgrade_machine_ids");
+            if (hasUpgradeToTier) sb.append(", upgrade_to_tier");
+            if (hasSpeedMultiplier) sb.append(", speed_multiplier");
+            if (hasNexusSellMultiplier) sb.append(", nexus_sell_multiplier");
+            if (hasEnablesPrestige) sb.append(", enables_prestige");
+
+            sb.append(" FROM tech_definitions");
+
+            String sql = sb.toString();
+
+            try (PreparedStatement ps = conn.prepareStatement(sql);
+                 ResultSet rs = ps.executeQuery()) {
+
+                while (rs.next()) {
+                    String id = rs.getString("node_id");
+                    if (id == null || id.isBlank()) continue;
+
+                    String name = rs.getString("name_display");
+                    double baseCost = rs.getDouble("cost_money");
+
+                    List<String> parents = parseJsonList(rs.getString("parent_node_ids"));
+                    List<String> unlocks = parseJsonList(rs.getString("unlock_machine_ids"));
+
+                    double prestigeCostMult = 0.0;
+                    if (hasPrestigeMult) {
+                        prestigeCostMult = rs.getDouble("prestige_cost_mult");
+                        if (rs.wasNull()) prestigeCostMult = 0.0;
+                    }
+
+                    List<String> upgradeMachines = new ArrayList<>();
+                    if (hasUpgradeMachineIds) {
+                        upgradeMachines = parseJsonList(rs.getString("upgrade_machine_ids"));
+                    }
+
+                    int upgradeToTier = 0;
+                    if (hasUpgradeToTier) {
+                        upgradeToTier = rs.getInt("upgrade_to_tier");
+                        if (rs.wasNull()) upgradeToTier = 0;
+                    }
+
+                    double speedMultiplier = 1.0;
+                    if (hasSpeedMultiplier) {
+                        speedMultiplier = rs.getDouble("speed_multiplier");
+                        if (rs.wasNull()) speedMultiplier = 1.0;
+                    }
+
+                    double nexusSellMultiplier = 1.0;
+                    if (hasNexusSellMultiplier) {
+                        nexusSellMultiplier = rs.getDouble("nexus_sell_multiplier");
+                        if (rs.wasNull()) nexusSellMultiplier = 1.0;
+                    }
+
+                    boolean enablesPrestige = false;
+                    if (hasEnablesPrestige) {
+                        int v = rs.getInt("enables_prestige");
+                        if (!rs.wasNull()) enablesPrestige = (v != 0);
+                    }
+
+                    // Hard rule: node_id == "prestige" always enables prestige (even if column missing).
+                    if ("prestige".equalsIgnoreCase(id)) enablesPrestige = true;
+
+                    out.add(new TechNode(
+                            id,
+                            name,
+                            baseCost,
+                            prestigeCostMult,
+                            parents,
+                            unlocks,
+                            upgradeMachines,
+                            upgradeToTier,
+                            speedMultiplier,
+                            nexusSellMultiplier,
+                            enablesPrestige
+                    ));
+                }
+            }
+
         } catch (SQLException e) {
-            if (isUnknownColumn(e)) {
-                System.out.println("⚠️ tech_definitions.prestige_cost_mult not found (legacy DB). Using default mult=0.");
-                return loadAllNodesLegacy();
-            }
-            e.printStackTrace();
-            return new ArrayList<>();
-        }
-    }
-
-    private List<TechNode> loadAllNodesWithPrestigeMult() throws SQLException {
-        List<TechNode> nodes = new ArrayList<>();
-        String sql = """
-            SELECT node_id, name_display, cost_money, prestige_cost_mult, parent_node_ids, unlock_machine_ids
-            FROM tech_definitions
-        """;
-
-        try (Connection conn = db.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql);
-             ResultSet rs = ps.executeQuery()) {
-
-            while (rs.next()) {
-                String id = rs.getString("node_id");
-                String name = rs.getString("name_display");
-                double baseCost = rs.getDouble("cost_money");
-
-                double mult = rs.getDouble("prestige_cost_mult");
-                if (rs.wasNull()) mult = 0.0;
-
-                List<String> parents = parseJsonList(rs.getString("parent_node_ids"));
-                List<String> unlocks = parseJsonList(rs.getString("unlock_machine_ids"));
-
-                nodes.add(new TechNode(id, name, baseCost, mult, parents, unlocks));
-            }
-        }
-        return nodes;
-    }
-
-    private List<TechNode> loadAllNodesLegacy() {
-        List<TechNode> nodes = new ArrayList<>();
-        String sql = """
-            SELECT node_id, name_display, cost_money, parent_node_ids, unlock_machine_ids
-            FROM tech_definitions
-        """;
-
-        try (Connection conn = db.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql);
-             ResultSet rs = ps.executeQuery()) {
-
-            while (rs.next()) {
-                String id = rs.getString("node_id");
-                String name = rs.getString("name_display");
-                double baseCost = rs.getDouble("cost_money");
-
-                List<String> parents = parseJsonList(rs.getString("parent_node_ids"));
-                List<String> unlocks = parseJsonList(rs.getString("unlock_machine_ids"));
-
-                // mult default 0 => costo statico
-                nodes.add(new TechNode(id, name, baseCost, 0.0, parents, unlocks));
-            }
-        } catch (SQLException e) {
             e.printStackTrace();
         }
-        return nodes;
+
+        return out;
     }
 
     private List<String> parseJsonList(String json) {
-        if (json == null || json.isBlank() || json.equals("null")) {
+        if (json == null || json.isBlank() || "null".equalsIgnoreCase(json)) {
             return new ArrayList<>();
         }
         try {
-            return gson.fromJson(json, new TypeToken<List<String>>(){}.getType());
+            return gson.fromJson(json, new TypeToken<List<String>>() {}.getType());
         } catch (Exception e) {
             System.err.println("⚠️ JSON Parse Error in TechDefinitionDAO: " + json);
             return new ArrayList<>();
         }
-    }
-
-    private boolean isUnknownColumn(SQLException e) {
-        // MySQL/MariaDB: SQLState 42S22 = Column not found
-        String state = e.getSQLState();
-        if ("42S22".equalsIgnoreCase(state)) return true;
-
-        String msg = e.getMessage();
-        return msg != null && msg.toLowerCase().contains("unknown column");
     }
 }

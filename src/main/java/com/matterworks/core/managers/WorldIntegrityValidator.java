@@ -25,7 +25,6 @@ public class WorldIntegrityValidator {
         this.registry = registry;
     }
 
-    // --- INTERNAL DTO (non dipende dal tuo PlotObject) ---
     private static final class MachineRow {
         final long id;
         final long plotId;
@@ -47,7 +46,7 @@ public class WorldIntegrityValidator {
     }
 
     public boolean validateWorldIntegrity() {
-        System.out.println("🔍 [System] Avvio Validazione Integrità...");
+        System.out.println("[System] Starting World Integrity Validation...");
 
         Map<Long, List<MachineRow>> machinesByPlot = loadAllMachines();
         Map<Long, Map<GridPosition, MatterColor>> resourcesByPlot = loadAllResources();
@@ -62,13 +61,13 @@ public class WorldIntegrityValidator {
 
             detectOverlaps(plotId, machines, errorLog, toDeleteByPlot);
 
-            // check trivelle nel vuoto (come prima)
+            // Drill placed over void (legacy + new id)
             for (MachineRow m : machines) {
                 if (m == null) continue;
-                if ("drill_mk1".equals(m.typeId)) {
+                if (isDrillType(m.typeId)) {
                     GridPosition pos = new GridPosition(m.x, m.y, m.z);
                     if (!resources.containsKey(new GridPosition(pos.x(), 0, pos.z()))) {
-                        errorLog.add("❌ Plot " + plotId + ": Trivella (ID " + m.id + ") piazzata nel vuoto a " + pos);
+                        errorLog.add("ERROR Plot " + plotId + ": Drill (ID " + m.id + ") placed on void at " + pos);
                     }
                 }
             }
@@ -93,14 +92,14 @@ public class WorldIntegrityValidator {
                 }
             }
 
-            System.out.println("🧹 [System] Self-Heal completato: rimossi " + deleted + " record corrotti su " + plotsFixed + " plot.");
-            System.out.println("🔁 [System] Ri-validazione post-heal...");
+            System.out.println("[System] Self-Heal completed: deleted " + deleted + " corrupted rows across " + plotsFixed + " plots.");
+            System.out.println("[System] Re-validating after heal...");
 
             return validateWorldIntegrityNoHeal();
         }
 
         if (errorLog.isEmpty()) {
-            System.out.println("✅ [System] Integrità verificata: 0 conflitti.");
+            System.out.println("[System] Integrity OK: 0 conflicts.");
             return true;
         }
 
@@ -123,22 +122,27 @@ public class WorldIntegrityValidator {
 
             for (MachineRow m : machines) {
                 if (m == null) continue;
-                if ("drill_mk1".equals(m.typeId)) {
+                if (isDrillType(m.typeId)) {
                     GridPosition pos = new GridPosition(m.x, m.y, m.z);
                     if (!resources.containsKey(new GridPosition(pos.x(), 0, pos.z()))) {
-                        errorLog.add("❌ Plot " + plotId + ": Trivella (ID " + m.id + ") piazzata nel vuoto a " + pos);
+                        errorLog.add("ERROR Plot " + plotId + ": Drill (ID " + m.id + ") placed on void at " + pos);
                     }
                 }
             }
         }
 
         if (errorLog.isEmpty()) {
-            System.out.println("✅ [System] Integrità verificata: 0 conflitti.");
+            System.out.println("[System] Integrity OK: 0 conflicts.");
             return true;
         }
 
         printErrors(errorLog);
         return false;
+    }
+
+    private boolean isDrillType(String typeId) {
+        if (typeId == null) return false;
+        return "drill".equals(typeId) || "drill".equals(typeId);
     }
 
     private void detectOverlaps(
@@ -149,7 +153,7 @@ public class WorldIntegrityValidator {
     ) {
         if (machines == null || machines.isEmpty()) return;
 
-        // manteniamo la tua politica: ID più alto = "winner"
+        // Policy: highest ID wins
         ArrayList<MachineRow> sorted = new ArrayList<>(machines);
         sorted.sort(Comparator.comparingLong((MachineRow m) -> m.id).reversed());
 
@@ -159,10 +163,8 @@ public class WorldIntegrityValidator {
             if (m == null || m.typeId == null) continue;
 
             Vector3Int dim = getOrientedDimensions(m);
-
             boolean conflict = false;
 
-            // detect
             for (int dx = 0; dx < dim.x(); dx++) {
                 for (int dy = 0; dy < dim.y(); dy++) {
                     for (int dz = 0; dz < dim.z(); dz++) {
@@ -170,7 +172,7 @@ public class WorldIntegrityValidator {
                         Long winnerId = occupiedBy.get(p);
                         if (winnerId != null) {
                             conflict = true;
-                            errorLog.add("⚠️ Plot " + plotId + ": Conflitto a " + p + " tra ID " + m.id + " e ID " + winnerId);
+                            errorLog.add("WARN Plot " + plotId + ": Overlap at " + p + " between ID " + m.id + " and ID " + winnerId);
                         }
                     }
                 }
@@ -183,7 +185,6 @@ public class WorldIntegrityValidator {
                 continue;
             }
 
-            // occupy
             for (int dx = 0; dx < dim.x(); dx++) {
                 for (int dy = 0; dy < dim.y(); dy++) {
                     for (int dz = 0; dz < dim.z(); dz++) {
@@ -195,12 +196,6 @@ public class WorldIntegrityValidator {
         }
     }
 
-    /**
-     * FIX principale: footprint coerente col runtime:
-     * - dim base da registry
-     * - orientation dal metadata (default NORTH)
-     * - EAST/WEST => swap X/Z
-     */
     private Vector3Int getOrientedDimensions(MachineRow m) {
         Vector3Int base;
         try {
@@ -237,7 +232,6 @@ public class WorldIntegrityValidator {
         try (Connection conn = db.getConnection()) {
             conn.setAutoCommit(false);
             try {
-                // lock plot: evita heal concorrenti
                 try (PreparedStatement lock = conn.prepareStatement("SELECT id FROM plots WHERE id = ? FOR UPDATE")) {
                     lock.setLong(1, plotId);
                     lock.executeQuery();
@@ -258,7 +252,7 @@ public class WorldIntegrityValidator {
                 return deleted;
             } catch (Exception ex) {
                 conn.rollback();
-                System.err.println("🚨 [System] Self-Heal fallito per plotId=" + plotId + " -> rollback");
+                System.err.println("[System] Self-Heal failed for plotId=" + plotId + " -> rollback");
                 ex.printStackTrace();
                 return 0;
             } finally {
@@ -274,17 +268,15 @@ public class WorldIntegrityValidator {
         if (errorLog == null || errorLog.isEmpty()) return;
 
         if (errorLog.size() > 100) {
-            System.err.println("🚨 [System] ATTENZIONE: Rilevate " + errorLog.size() + " collisioni nel mondo! (Troppe per la lista)");
+            System.err.println("[System] WARNING: detected " + errorLog.size() + " collisions (too many to print).");
         } else {
-            System.err.println("🚨 [System] RILEVATE COLLISIONI:");
+            System.err.println("[System] COLLISIONS DETECTED:");
             for (String s : errorLog) System.err.println(s);
         }
     }
 
     private Map<Long, List<MachineRow>> loadAllMachines() {
         Map<Long, List<MachineRow>> result = new HashMap<>();
-
-        // ✅ FIX: includiamo metadata (serve per orientation)
         String sql = "SELECT id, plot_id, x, y, z, type_id, metadata FROM plot_machines";
 
         try (Connection conn = db.getConnection();
@@ -318,7 +310,7 @@ public class WorldIntegrityValidator {
         try {
             return JsonParser.parseString(jsonString).getAsJsonObject();
         } catch (Exception e) {
-            System.err.println("⚠️ Errore parsing JSON metadata plot_machines: " + e.getMessage());
+            System.err.println("[System] ERROR parsing plot_machines.metadata JSON: " + e.getMessage());
             return new JsonObject();
         }
     }

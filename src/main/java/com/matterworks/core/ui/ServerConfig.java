@@ -18,7 +18,11 @@ public record ServerConfig(
 
         int prestigeVoidCoinsAdd,
         int prestigePlotBonus,
-        double prestigeSellK
+        double prestigeSellK,
+
+        // NEW: prestige action fee (to actually perform prestige)
+        double prestigeActionCostBase,
+        double prestigeActionCostMult
 ) {
     public double startMoney() {
         return playerStartMoney;

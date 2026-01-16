@@ -25,13 +25,13 @@ public class MachineFactory {
         if (metadata == null) metadata = new JsonObject();
 
         Long dbId = model.getId();
-        String typeId = model.getTypeId();
+        String typeId = normalizeTypeId(model.getTypeId());
 
         int maxStack = (serverConfig != null) ? Math.max(1, serverConfig.maxInventoryMachine()) : 64;
 
         return switch (typeId) {
-            // non-logistica -> usa maxStack DB
-            case "drill_mk1" -> new DrillMachine(dbId, ownerId, pos, typeId, metadata, 1, maxStack);
+            // non-logistics -> use maxStack from config
+            case "drill" -> new DrillMachine(dbId, ownerId, pos, typeId, metadata, 1, maxStack);
 
             case "chromator" -> new Chromator(dbId, ownerId, pos, typeId, metadata, maxStack);
             case "color_mixer" -> new ColorMixer(dbId, ownerId, pos, typeId, metadata, maxStack);
@@ -42,20 +42,27 @@ public class MachineFactory {
             case "blazing_forge" -> new BlazingForgeMachine(dbId, ownerId, pos, typeId, metadata, maxStack);
             case "glitch_distorter" -> new GlitchDistorterMachine(dbId, ownerId, pos, typeId, metadata, maxStack);
 
-            // logistica -> invariata
+            // logistics -> unchanged
             case "conveyor_belt" -> new ConveyorBelt(dbId, ownerId, pos, typeId, metadata);
             case "splitter" -> new Splitter(dbId, ownerId, pos, typeId, metadata);
             case "merger" -> new Merger(dbId, ownerId, pos, typeId, metadata);
             case "lift" -> new LiftMachine(dbId, ownerId, pos, typeId, metadata);
             case "dropper" -> new DropperMachine(dbId, ownerId, pos, typeId, metadata);
 
-            // nexus -> escluso (mantieni comportamento attuale)
+            // nexus
             case "nexus_core" -> new NexusMachine(dbId, ownerId, pos, typeId, metadata);
 
-            // strutture
+            // structures
             case "STRUCTURE_GENERIC" -> new StructuralBlock(dbId, ownerId, pos, typeId, metadata);
 
             default -> null;
         };
+    }
+
+    private static String normalizeTypeId(String typeId) {
+        if (typeId == null) return null;
+        // Hard rename: drill -> drill
+        if ("drill".equals(typeId)) return "drill";
+        return typeId;
     }
 }

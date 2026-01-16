@@ -24,6 +24,7 @@ public final class TopBarPanel extends JPanel {
     private final JButton btnPrestigeClassic;
     private final JButton btnPrestigeInstant;
 
+
     private final JSpinner layerSpinner;
     private volatile boolean suppressLayerEvents = false;
     private volatile int lastLayerValue = 0;
@@ -154,7 +155,7 @@ public final class TopBarPanel extends JPanel {
         JPanel row2 = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 5));
         row2.setOpaque(false);
 
-        row1.add(toolButton("⛏ Drill", "drill_mk1", onSelectTool, onBuyToolRightClick));
+        row1.add(toolButton("⛏ Drill", "drill", onSelectTool, onBuyToolRightClick));
         row1.add(toolButton("➡ Belt", "conveyor_belt", onSelectTool, onBuyToolRightClick));
         row1.add(vSep());
 
@@ -349,6 +350,7 @@ public final class TopBarPanel extends JPanel {
             suppressLayerEvents = false;
         }
     }
+
 
     // ===== UI helpers =====
     private JLabel sectionLabel(String text) {

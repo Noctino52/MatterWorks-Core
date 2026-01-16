@@ -150,7 +150,7 @@ final class GridRuntimeState {
 
         if ("nexus_core".equals(itemId) && total > 1) return false;
 
-        if ("drill_mk1".equals(itemId)) {
+        if ("drill".equals(itemId)) {
             Map<GridPosition, MatterColor> veins = playerResources.get(playerId);
             if (total > (veins != null ? veins.size() : 0)) return false;
         }

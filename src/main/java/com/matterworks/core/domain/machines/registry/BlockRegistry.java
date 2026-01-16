@@ -40,8 +40,19 @@ public class BlockRegistry {
     }
 
     public MachineStats getStats(String blockId) {
-        if (blockId == null) return MachineStats.fallback("null");
-        return statsCache.getOrDefault(blockId, MachineStats.fallback(blockId));
+        String id = normalizeId(blockId);
+        if (id == null) return MachineStats.fallback("null");
+
+        MachineStats s = statsCache.get(id);
+        if (s != null) return s;
+
+        // If asked for legacy id but drill exists in DB, return drill stats.
+        if ("drill".equals(blockId)) {
+            MachineStats drill = statsCache.get("drill");
+            if (drill != null) return drill;
+        }
+
+        return MachineStats.fallback(id);
     }
 
     public List<String> getShopMachineIdsFromDb() {
@@ -57,40 +68,51 @@ public class BlockRegistry {
     }
 
     public Vector3Int getDimensions(String blockId) {
-        if (blockId == null) return Vector3Int.one();
+        String id = normalizeId(blockId);
+        if (id == null) return Vector3Int.one();
 
-        MachineStats stats = statsCache.get(blockId);
+        MachineStats stats = statsCache.get(id);
         if (stats != null && stats.dimensions() != null) return stats.dimensions();
 
-        return switch (blockId) {
+        return switch (id) {
             case "nexus_core" -> new Vector3Int(3, 3, 3);
             case "chromator", "color_mixer", "splitter", "merger" -> new Vector3Int(2, 1, 1);
             case "smoothing", "cutting" -> new Vector3Int(2, 1, 1);
             case "shiny_polisher", "blazing_forge", "glitch_distorter" -> new Vector3Int(2, 1, 1);
             case "conveyor_belt" -> Vector3Int.one();
-            case "drill_mk1" -> new Vector3Int(1, 2, 1);
+            case "drill" -> new Vector3Int(1, 2, 1);
             case "lift", "dropper" -> new Vector3Int(1, 2, 1);
             default -> Vector3Int.one();
         };
     }
 
     public double getPrice(String blockId) {
-        if (blockId == null) return 0.0;
-        MachineStats s = statsCache.get(blockId);
+        String id = normalizeId(blockId);
+        if (id == null) return 0.0;
+        MachineStats s = statsCache.get(id);
         return (s != null ? s.basePrice() : 0.0);
     }
 
     public double getPrestigeCostMult(String blockId) {
-        if (blockId == null) return 0.0;
-        MachineStats s = statsCache.get(blockId);
+        String id = normalizeId(blockId);
+        if (id == null) return 0.0;
+        MachineStats s = statsCache.get(id);
         return (s != null ? s.prestigeCostMult() : 0.0);
     }
 
     public double getSpeed(String blockId) {
-        if (blockId == null) return 1.0;
-        MachineStats s = statsCache.get(blockId);
+        String id = normalizeId(blockId);
+        if (id == null) return 1.0;
+        MachineStats s = statsCache.get(id);
         double out = (s != null ? s.speed() : 1.0);
         if (Double.isNaN(out) || Double.isInfinite(out) || out <= 0.0) return 1.0;
         return out;
+    }
+
+    private String normalizeId(String id) {
+        if (id == null) return null;
+        // Hard rename: drill -> drill
+        if ("drill".equals(id)) return "drill";
+        return id;
     }
 }

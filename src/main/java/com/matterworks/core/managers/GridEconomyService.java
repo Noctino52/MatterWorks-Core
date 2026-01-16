@@ -80,7 +80,7 @@ final class GridEconomyService {
             if (have <= 0) return false;
         }
 
-        // ✅ Route GLOBAL overclocks here (so UI can keep calling useOverclock)
+        // Route GLOBAL overclocks here (so UI can keep calling useOverclock)
         if (isGlobalOverclockItem(itemId)) {
             return applyGlobalOverclock(ownerId, itemId, admin);
         }
@@ -116,14 +116,15 @@ final class GridEconomyService {
         } else {
             repository.logTransaction(p, "VOID_SHOP_USE_ADMIN", "OVERCLOCK", 0.0, itemId);
         }
+
         /*
         System.out.println("[OVERCLOCK] Applied item=" + itemId
                 + " owner=" + ownerId
                 + " startPlaytime=" + playtimeNow
                 + " durationSeconds=" + durationSeconds
                 + " multiplier=2.0");
-
          */
+
         return true;
     }
 
@@ -165,7 +166,7 @@ final class GridEconomyService {
         // Persist
         repository.setGlobalOverclockState(newEndMs, newMult, durationSeconds);
 
-        // ✅ Update GridManager cache (no need to touch GridRuntimeState)
+        // Update GridManager cache (no need to touch GridRuntimeState)
         gridManager._setGlobalOverclockStateCached(newEndMs, newMult, durationSeconds);
 
         PlayerProfile p = repository.loadPlayerProfile(activatorId);
@@ -407,7 +408,7 @@ final class GridEconomyService {
             }
 
             ensureInventoryAtLeast(ownerId, "conveyor_belt", 10);
-            ensureInventoryAtLeast(ownerId, "drill_mk1", 1);
+            ensureInventoryAtLeast(ownerId, "drill", 1);
             ensureInventoryAtLeast(ownerId, "nexus_core", 1);
 
             world.loadPlotSynchronously(ownerId);
@@ -417,6 +418,27 @@ final class GridEconomyService {
     void prestigeUser(UUID ownerId) {
         if (ownerId == null) return;
         state.touchPlayer(ownerId);
+
+// Charge prestige action cost (player only)
+        try {
+            PlayerProfile p = repository.loadPlayerProfile(ownerId);
+            if (p != null && !p.isAdmin()) {
+                double cost = getPrestigeActionCost(p);
+                if (p.getMoney() < cost) {
+                    System.out.println("[PRESTIGE] Denied (race): money changed owner=" + ownerId);
+                    return;
+                }
+
+                p.modifyMoney(-cost);
+                repository.savePlayerProfile(p);
+                repository.logTransaction(p, "PRESTIGE_PAY", "MONEY", -cost, "prestige_action_fee");
+                state.activeProfileCache.put(ownerId, p);
+            }
+        } catch (Throwable t) {
+            t.printStackTrace();
+            return;
+        }
+
 
         state.reloadServerConfig();
         final ServerConfig serverConfig = state.getServerConfig();
@@ -457,7 +479,7 @@ final class GridEconomyService {
             }
 
             ensureInventoryAtLeast(ownerId, "conveyor_belt", 10);
-            ensureInventoryAtLeast(ownerId, "drill_mk1", 1);
+            ensureInventoryAtLeast(ownerId, "drill", 1);
             ensureInventoryAtLeast(ownerId, "nexus_core", 1);
 
             world.loadPlotSynchronously(ownerId);
@@ -473,6 +495,24 @@ final class GridEconomyService {
 
         if (cur < target) repository.modifyInventoryItem(ownerId, itemId, target - cur);
     }
+
+    boolean unlockTechNode(UUID playerId, String nodeId) {
+        if (playerId == null || nodeId == null || nodeId.isBlank()) return false;
+
+        state.touchPlayer(playerId);
+
+        PlayerProfile p = state.getCachedProfile(playerId);
+        if (p == null) return false;
+
+        boolean ok = techManager.unlockNode(p, nodeId);
+        if (!ok) return false;
+
+        // techManager.unlockNode already saves the profile and logs transaction
+        // We refresh the cache anyway to keep UI consistent.
+        state.activeProfileCache.put(playerId, p);
+        return true;
+    }
+
 
     // ==========================================================
     // PLAYER MGMT
@@ -490,7 +530,7 @@ final class GridEconomyService {
         repository.savePlayerProfile(p);
         state.activeProfileCache.put(newUuid, p);
 
-        repository.modifyInventoryItem(newUuid, "drill_mk1", 1);
+        repository.modifyInventoryItem(newUuid, "drill", 1);
         repository.modifyInventoryItem(newUuid, "nexus_core", 1);
         repository.modifyInventoryItem(newUuid, "conveyor_belt", 10);
 
@@ -511,4 +551,39 @@ final class GridEconomyService {
         }
         repository.deletePlayerFull(uuid);
     }
+
+    double getPrestigeActionCost(PlayerProfile p) {
+        if (p == null) return 0.0;
+
+        state.reloadServerConfig();
+        ServerConfig cfg = state.getServerConfig();
+
+        double base = Math.max(0.0, cfg.prestigeActionCostBase());
+        double mult = Math.max(0.0, cfg.prestigeActionCostMult());
+
+        int prestige = Math.max(0, p.getPrestigeLevel());
+        double factor = 1.0 + (prestige * mult);
+
+        double out = base * factor;
+        if (Double.isNaN(out) || Double.isInfinite(out)) return base;
+
+        return Math.max(0.0, out);
+    }
+
+    boolean canPerformPrestige(UUID ownerId) {
+        if (ownerId == null) return false;
+
+        PlayerProfile p = state.getCachedProfile(ownerId);
+        if (p == null) return false;
+
+        // Must have prestige tech unlocked even for admin
+        if (!techManager.isPrestigeUnlocked(p)) return false;
+
+        if (p.isAdmin()) return true;
+
+        double cost = getPrestigeActionCost(p);
+        return p.getMoney() >= cost;
+    }
+
+
 }

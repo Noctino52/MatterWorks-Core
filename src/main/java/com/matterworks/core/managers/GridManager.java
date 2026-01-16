@@ -160,6 +160,27 @@ public class GridManager {
         return true;
     }
 
+
+    public boolean unlockTechNode(UUID playerId, String nodeId) {
+        if (playerId == null || nodeId == null || nodeId.isBlank()) return false;
+        return economy.unlockTechNode(playerId, nodeId);
+    }
+
+    public int getUnlockedMachineTier(UUID ownerId, String machineTypeId) {
+        if (ownerId == null || machineTypeId == null || machineTypeId.isBlank()) return 1;
+
+        var p = state.getCachedProfile(ownerId);
+        if (p == null) return 1;
+
+        try {
+            return techManager.getUnlockedTierForMachine(p, machineTypeId);
+        } catch (Throwable ignored) {
+            return 1;
+        }
+    }
+
+
+
     boolean increasePlotUnlockedAreaUnchecked(UUID ownerId) {
         state.touchPlayer(ownerId);
         return increasePlotUnlockedAreaInternal(ownerId);
@@ -370,48 +391,62 @@ public class GridManager {
         return "Global Overclock";
     }
 
-    // ==========================================================
-    // EFFECTIVE MACHINE SPEED (player overclock * global overclock)
-    // ==========================================================
-    public double getEffectiveMachineSpeedMultiplier(UUID ownerId, String machineTypeId) {
-        double machineSpeed = 1.0;
-        try {
-            machineSpeed = blockRegistry.getSpeed(machineTypeId);
-        } catch (Throwable ignored) {}
+// ==========================================================
+// EFFECTIVE MACHINE SPEED (machine base speed * player overclock * global overclock * tech tier)
+// ==========================================================
+public double getEffectiveMachineSpeedMultiplier(UUID ownerId, String machineTypeId) {
+    double machineSpeed = 1.0;
+    try {
+        machineSpeed = blockRegistry.getSpeed(machineTypeId);
+    } catch (Throwable ignored) {}
 
-        if (Double.isNaN(machineSpeed) || Double.isInfinite(machineSpeed) || machineSpeed <= 0.0) {
-            machineSpeed = 1.0;
-        }
+    if (Double.isNaN(machineSpeed) || Double.isInfinite(machineSpeed) || machineSpeed <= 0.0) {
+        machineSpeed = 1.0;
+    }
 
-        if (ownerId == null) return machineSpeed;
+    if (ownerId == null) return machineSpeed;
+
+    var p = state.getCachedProfile(ownerId);
+    if (p == null) return machineSpeed;
+
+    long playtime = state.getPlaytimeSecondsCached(ownerId);
+    double ocPlayer = p.getActiveOverclockMultiplier(playtime);
+
+    refreshGlobalOverclockCache(false);
+    double ocGlobal = getGlobalOverclockMultiplierNow();
+
+    double techMult = 1.0;
+    try {
+        techMult = techManager.getTechSpeedMultiplierForMachine(p, machineTypeId);
+    } catch (Throwable ignored) {}
+    if (Double.isNaN(techMult) || Double.isInfinite(techMult) || techMult <= 0.0) techMult = 1.0;
+
+    double out = machineSpeed * ocPlayer * ocGlobal * techMult;
+    if (Double.isNaN(out) || Double.isInfinite(out) || out <= 0.0) return 1.0;
+
+    return out;
+}
+
+
+    // ==========================================================
+// NEXUS SELL MULTIPLIER (Tech Tier 2/3)
+// ==========================================================
+    public double getTechNexusSellMultiplier(UUID ownerId) {
+        if (ownerId == null) return 1.0;
 
         var p = state.getCachedProfile(ownerId);
-        if (p == null) return machineSpeed;
+        if (p == null) return 1.0;
 
-        long playtime = state.getPlaytimeSecondsCached(ownerId);
-        double ocPlayer = p.getActiveOverclockMultiplier(playtime);
+        double mult = 1.0;
+        try {
+            mult = techManager.getTechNexusSellMultiplier(p);
+        } catch (Throwable ignored) {}
 
-        refreshGlobalOverclockCache(false);
-        double ocGlobal = getGlobalOverclockMultiplierNow();
-
-        double out = machineSpeed * ocPlayer * ocGlobal;
-        if (Double.isNaN(out) || Double.isInfinite(out) || out <= 0.0) return 1.0;
-
-        if (ocPlayer > 1.0 || ocGlobal > 1.0) {
-            /*
-            System.out.println("[OVERCLOCK] speed multiplier active for owner=" + ownerId
-                    + " machine=" + machineTypeId
-                    + " machineSpeed=" + machineSpeed
-                    + " overclockPlayer=" + ocPlayer
-                    + " overclockGlobal=" + ocGlobal
-                    + " effective=" + out
-                    + " playtime=" + playtime);
-
-             */
-        }
-
-        return out;
+        if (Double.isNaN(mult) || Double.isInfinite(mult) || mult <= 0.0) return 1.0;
+        return mult;
     }
+
+
 
     // ==========================================================
     // GLOBAL OVERCLOCK CACHE API (used by GridEconomyService)
@@ -566,6 +601,17 @@ public class GridManager {
                 snap.getTotalMoneyEarned()
         );
     }
+
+    public boolean canPerformPrestige(UUID ownerId) {
+        return economy.canPerformPrestige(ownerId);
+    }
+
+    public double getPrestigeActionCost(UUID ownerId) {
+        var p = state.getCachedProfile(ownerId);
+        if (p == null) return 0.0;
+        return economy.getPrestigeActionCost(p);
+    }
+
 
 
 

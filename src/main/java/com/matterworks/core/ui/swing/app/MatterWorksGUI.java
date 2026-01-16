@@ -310,10 +310,24 @@ public class MatterWorksGUI extends JFrame {
         PlayerProfile p = gridManager.getCachedProfile(u);
         if (p == null) return;
 
-        boolean unlocked = gridManager.getTechManager().isPrestigeUnlocked(p);
-        if (!unlocked) {
+        // NEW: gate is CORE-driven (tech unlock + money check, admin excluded from money)
+        boolean canPrestige = gridManager.canPerformPrestige(u);
+        boolean techUnlocked = gridManager.getTechManager().isPrestigeUnlocked(p);
+
+        if (!techUnlocked) {
             JOptionPane.showMessageDialog(this,
-                    "Prestige is locked. Finish the Tech Tree first.",
+                    "Prestige is locked.\nUnlock the 'Prestige' tech node first.",
+                    "Prestige",
+                    JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+
+        double cost = gridManager.getPrestigeActionCost(u);
+
+        if (!canPrestige) {
+            // Tech unlocked but not enough money (player only)
+            JOptionPane.showMessageDialog(this,
+                    "Not enough money to Prestige.\nRequired: $" + (int) Math.round(cost),
                     "Prestige",
                     JOptionPane.WARNING_MESSAGE);
             return;
@@ -333,9 +347,14 @@ public class MatterWorksGUI extends JFrame {
         int capNow = computeEffectiveCap(baseCap, step, maxCap, currentPrestige);
         int capNext = computeEffectiveCap(baseCap, step, maxCap, nextPrestige);
 
+        String feeLine = p.isAdmin()
+                ? " - Prestige fee: $0 (ADMIN)\n"
+                : " - Prestige fee: $" + (int) Math.round(cost) + "\n";
+
         String msg =
                 "Advance to PRESTIGE " + nextPrestige + "?\n\n" +
                         "This will:\n" +
+                        feeLine +
                         " - Reset plot, inventory and tech tree\n" +
                         " - Grant +" + addVoid + " VOID coins\n" +
                         " - Increase plot size by +" + plotBonus + " X and +" + plotBonus + " Y\n" +
@@ -358,6 +377,7 @@ public class MatterWorksGUI extends JFrame {
         factoryPanel.forceRefreshNow();
         updateEconomyLabelsForce();
     }
+
 
     // NEW: Instant Prestige (premium, NO reset)
     private void handleInstantPrestige() {
@@ -770,8 +790,25 @@ public class MatterWorksGUI extends JFrame {
         PlayerProfile p = gridManager.getCachedProfile(u);
         if (p == null) return;
 
-        boolean prestigeBtnEnabled = gridManager.getTechManager().isPrestigeUnlocked(p);
-        topBar.setPrestigeButtonEnabled(prestigeBtnEnabled);
+        boolean techUnlocked = gridManager.getTechManager().isPrestigeUnlocked(p);
+        boolean canPrestige = gridManager.canPerformPrestige(u);
+        double cost = gridManager.getPrestigeActionCost(u);
+
+        topBar.setPrestigeButtonEnabled(canPrestige);
+
+        if (!techUnlocked) {
+            topBar.setPrestigeButtonToolTip("Unlock the 'Prestige' tech node first.");
+        } else if (p.isAdmin()) {
+            topBar.setPrestigeButtonToolTip("Prestige unlocked (ADMIN: no fee).");
+        } else {
+            int fee = (int) Math.round(cost);
+            if (!canPrestige) {
+                topBar.setPrestigeButtonToolTip("Prestige fee: $" + fee + " (not enough money).");
+            } else {
+                topBar.setPrestigeButtonToolTip("Prestige fee: $" + fee);
+            }
+        }
+
 
         // instant enabled if item present (or admin)
         topBar.setInstantPrestigeButtonEnabled(gridManager.canInstantPrestige(u));

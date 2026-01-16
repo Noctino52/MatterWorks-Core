@@ -41,13 +41,18 @@ public class MarketManager {
         if (item == null || sellerId == null) return;
 
         double value = calculateBaseValue(item);
+
+        // 1) Prestige multiplier
         value = applyPrestigeSellMultiplier(value, sellerId);
+
+        // 2) Nexus tech tier multiplier (Tier 2/3)
+        value = applyNexusTechSellMultiplier(value, sellerId);
 
         gridManager.addMoney(
                 sellerId,
                 value,
                 "MATTER_SELL",
-                item.shape() != null ? item.shape().name() : "LIQUID"
+                item.shape() != null ? item.shape().name() : "COLOR"
         );
 
         // ✅ Telemetry: final money earned at nexus (already includes multipliers)
@@ -57,12 +62,12 @@ public class MarketManager {
             }
         } catch (Throwable ignored) {}
 
-        String shapeTxt = (item.shape() != null ? item.shape().name() : "LIQUID");
+        String shapeTxt = (item.shape() != null ? item.shape().name() : "COLOR");
         String colorTxt = (item.color() != null ? item.color().name() : "RAW");
         String effTxt = formatEffects(item);
 
-        System.out.println("💰 MARKET: Venduto " + shapeTxt + " (" + colorTxt + ") " + effTxt
-                + " per $" + String.format(java.util.Locale.US, "%.2f", value));
+        System.out.println("💰 MARKET: Sold " + shapeTxt + " (" + colorTxt + ") " + effTxt
+                + " for $" + String.format(java.util.Locale.US, "%.2f", value));
     }
 
     private double applyPrestigeSellMultiplier(double value, UUID sellerId) {
@@ -76,6 +81,19 @@ public class MarketManager {
 
         double factor = 1.0 + (prestige * k);
         double out = value * factor;
+        if (Double.isNaN(out) || Double.isInfinite(out)) return value;
+        return Math.max(0.0, out);
+    }
+
+    private double applyNexusTechSellMultiplier(double value, UUID sellerId) {
+        double mult = 1.0;
+        try {
+            mult = gridManager.getTechNexusSellMultiplier(sellerId);
+        } catch (Throwable ignored) {}
+
+        if (Double.isNaN(mult) || Double.isInfinite(mult) || mult <= 0.0) mult = 1.0;
+
+        double out = value * mult;
         if (Double.isNaN(out) || Double.isInfinite(out)) return value;
         return Math.max(0.0, out);
     }

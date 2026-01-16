@@ -145,30 +145,8 @@ final class FactoryPanelController {
         repaintCoalesced();
     }
 
-    String getInspectionTooltipHtml(int mouseX, int mouseY) {
-        if (disposed) return null;
 
-        GridPosition p = gridPosFromMouse(mouseX, mouseY);
-        if (p == null) return null;
-
-        Snapshot snap = snapshot;
-        if (snap == null || snap.machines() == null) return null;
-
-        PlacedMachine m = snap.machines().get(p);
-        if (m == null) return null;
-
-        MachineInspectionInfo info;
-        try {
-            info = MachineInspector.inspect(m);
-        } catch (Throwable t) {
-            return null;
-        }
-
-        if (info == null || !info.showInUi()) return null;
-        return buildTooltipHtml(info);
-    }
-
-    private static String buildTooltipHtml(MachineInspectionInfo info) {
+    private static String buildTooltipHtml(MachineInspectionInfo info, int tier) {
         String name = safe(info.machineName());
         int matter = info.totalMatterCount();
         int colors = info.totalColorCount();
@@ -181,6 +159,8 @@ final class FactoryPanelController {
         StringBuilder sb = new StringBuilder(256);
         sb.append("<html>");
         sb.append("<b>").append(esc(name)).append("</b><br/>");
+
+        sb.append("Tier: ").append(tier).append("<br/>");
         sb.append("Matter: ").append(matter).append(" | Colori: ").append(colors).append("<br/>");
         sb.append("Stato: ").append(esc(st)).append("<br/>");
 
@@ -193,6 +173,7 @@ final class FactoryPanelController {
         sb.append("</html>");
         return sb.toString();
     }
+
 
     private static void appendLines(StringBuilder sb, java.util.List<String> lines) {
         if (lines == null || lines.isEmpty()) {
@@ -441,4 +422,35 @@ final class FactoryPanelController {
             if (!disposed) panel.repaint();
         });
     }
+
+    String getInspectionTooltipHtml(int mouseX, int mouseY) {
+        if (disposed) return null;
+
+        GridPosition p = gridPosFromMouse(mouseX, mouseY);
+        if (p == null) return null;
+
+        Snapshot snap = snapshot;
+        if (snap == null || snap.machines() == null) return null;
+
+        PlacedMachine m = snap.machines().get(p);
+        if (m == null) return null;
+
+        MachineInspectionInfo info;
+        try {
+            info = MachineInspector.inspect(m);
+        } catch (Throwable t) {
+            return null;
+        }
+
+        if (info == null || !info.showInUi()) return null;
+
+        int tier = 1;
+        try {
+            UUID owner = state.playerUuid;
+            tier = gridManager.getUnlockedMachineTier(owner, m.getTypeId());
+        } catch (Throwable ignored) {}
+
+        return buildTooltipHtml(info, tier);
+    }
+
 }

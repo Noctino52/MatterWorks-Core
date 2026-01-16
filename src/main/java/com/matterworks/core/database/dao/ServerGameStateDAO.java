@@ -131,6 +131,10 @@ public class ServerGameStateDAO {
         int prestigePlotBonus = 0;
         double prestigeSellK = 0.0;
 
+        // NEW defaults
+        double prestigeActionCostBase = 0.0;
+        double prestigeActionCostMult = 0.0;
+
         try (Connection conn = db.getConnection()) {
 
             boolean hasMaxInv = SqlCompat.columnExists(conn, "server_gamestate", "max_inventory_machine");
@@ -154,6 +158,10 @@ public class ServerGameStateDAO {
             String colPrestigePlotBonus = SqlCompat.firstExistingColumn(conn, "server_gamestate", "prestige_plotbonus", "prestige_plot_bonus");
             String colPrestigeSellK = SqlCompat.firstExistingColumn(conn, "server_gamestate", "prestige_sell_k");
 
+            // NEW: prestige action fee columns
+            String colPrestigeActionBase = SqlCompat.firstExistingColumn(conn, "server_gamestate", "prestige_action_cost_base");
+            String colPrestigeActionMult = SqlCompat.firstExistingColumn(conn, "server_gamestate", "prestige_action_cost_mult");
+
             StringBuilder sql = new StringBuilder();
             sql.append("SELECT ")
                     .append("player_start_money, vein_raw, vein_red, vein_blue, vein_yellow, sos_threshold");
@@ -170,6 +178,9 @@ public class ServerGameStateDAO {
             if (colPrestigeVoid != null) sql.append(", ").append(colPrestigeVoid).append(" AS prestige_void_coins_add");
             if (colPrestigePlotBonus != null) sql.append(", ").append(colPrestigePlotBonus).append(" AS prestige_plotbonus");
             if (colPrestigeSellK != null) sql.append(", ").append(colPrestigeSellK).append(" AS prestige_sell_k");
+
+            if (colPrestigeActionBase != null) sql.append(", ").append(colPrestigeActionBase).append(" AS prestige_action_cost_base");
+            if (colPrestigeActionMult != null) sql.append(", ").append(colPrestigeActionMult).append(" AS prestige_action_cost_mult");
 
             sql.append(" FROM server_gamestate WHERE id = 1");
 
@@ -196,6 +207,9 @@ public class ServerGameStateDAO {
                     if (colPrestigeVoid != null) prestigeVoidCoinsAdd = Math.max(0, rs.getInt("prestige_void_coins_add"));
                     if (colPrestigePlotBonus != null) prestigePlotBonus = Math.max(0, rs.getInt("prestige_plotbonus"));
                     if (colPrestigeSellK != null) prestigeSellK = Math.max(0.0, rs.getDouble("prestige_sell_k"));
+
+                    if (colPrestigeActionBase != null) prestigeActionCostBase = Math.max(0.0, rs.getDouble("prestige_action_cost_base"));
+                    if (colPrestigeActionMult != null) prestigeActionCostMult = Math.max(0.0, rs.getDouble("prestige_action_cost_mult"));
                 }
             }
 
@@ -211,9 +225,12 @@ public class ServerGameStateDAO {
                 plotIncreaseX, plotIncreaseY,
                 prestigeVoidCoinsAdd,
                 prestigePlotBonus,
-                prestigeSellK
+                prestigeSellK,
+                prestigeActionCostBase,
+                prestigeActionCostMult
         );
     }
+
 
     public int getVoidPlotItemBreakerIncreased() {
         String sql = "SELECT void_plotitembreaker_increased FROM server_gamestate LIMIT 1";

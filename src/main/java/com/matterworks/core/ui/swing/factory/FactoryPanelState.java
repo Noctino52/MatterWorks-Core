@@ -8,21 +8,22 @@ import java.util.UUID;
 final class FactoryPanelState {
 
     // Grid constants
-    static final int GRID_SIZE = 50;   // ✅ nel tuo progetto ora è 50x50
+    static final int GRID_SIZE = 50;
     static final int BASE_CELL_PX = 40;
 
     // Zoom clamp
     static final double MIN_USER_ZOOM = 0.35;
     static final double MAX_USER_ZOOM = 3.0;
 
-    // Padding minimo dal bordo del panel
+    // Minimum padding from panel border
     static final int MIN_PAD = 12;
 
     record Viewport(int cellPx, int offX, int offY, int gridPx) {}
 
     volatile UUID playerUuid;
 
-    volatile String currentTool = "drill_mk1";
+    // Hard rename: default tool is now "drill"
+    volatile String currentTool = "drill";
     volatile Direction currentOrientation = Direction.NORTH;
     volatile int currentLayer = 0;
 
@@ -31,10 +32,10 @@ final class FactoryPanelState {
     volatile int lastHoverGX = Integer.MIN_VALUE;
     volatile int lastHoverGZ = Integer.MIN_VALUE;
 
-    // fattore zoom controllato dall’utente (mouse wheel)
+    // User-controlled zoom factor (mouse wheel)
     volatile double userZoom = 1.0;
 
-    // ✅ Camera pan (in pixel) controllato con middle-mouse drag
+    // Camera pan (pixels), controlled by middle-mouse dragging
     private volatile int panPxX = 0;
     private volatile int panPxY = 0;
 
@@ -42,7 +43,7 @@ final class FactoryPanelState {
     private volatile int lastPanMouseX = 0;
     private volatile int lastPanMouseY = 0;
 
-    // ultimo viewport calcolato
+    // Last computed viewport
     private volatile Viewport lastViewport = new Viewport(BASE_CELL_PX, 50, 50, BASE_CELL_PX * GRID_SIZE);
 
     void rotate() {
@@ -72,6 +73,7 @@ final class FactoryPanelState {
 
     void updatePan(int mouseX, int mouseY) {
         if (!panning) return;
+
         int dx = mouseX - lastPanMouseX;
         int dy = mouseY - lastPanMouseY;
 
@@ -112,32 +114,30 @@ final class FactoryPanelState {
 
         int gridPx = cellPx * GRID_SIZE;
 
-        // centro base
+        // Base centered offsets
         int baseOffX = (w - gridPx) / 2;
         int baseOffY = (h - gridPx) / 2;
 
-        // se grid più piccola del pannello, garantisci padding minimo
+        // If the grid fits inside the panel, keep minimum padding
         if (gridPx <= w) baseOffX = Math.max(baseOffX, MIN_PAD);
         if (gridPx <= h) baseOffY = Math.max(baseOffY, MIN_PAD);
 
-        // ✅ applica pan
+        // Apply pan
         int offX = baseOffX + panPxX;
         int offY = baseOffY + panPxY;
 
-        // ✅ clamp: non permettere di “perdere” completamente la griglia
-        // Range ammesso: lascia almeno MIN_PAD di margine “interno” su uno dei due lati.
+        // Clamp: do not allow the grid to completely leave the view
         int minOffX, maxOffX;
         if (gridPx <= w - 2 * MIN_PAD) {
-            // griglia sta tutta: si può muovere SOLO dentro la cornice
+            // Grid fully fits: keep it inside the frame
             minOffX = MIN_PAD;
             maxOffX = w - MIN_PAD - gridPx;
         } else {
-            // griglia più grande: puoi trascinare, ma non oltre MIN_PAD
+            // Grid larger: allow dragging, but keep at least MIN_PAD visible
             minOffX = w - MIN_PAD - gridPx;
             maxOffX = MIN_PAD;
         }
         if (minOffX > maxOffX) {
-            // caso degenerato (finestre minuscole): blocca al base
             minOffX = maxOffX = baseOffX;
         }
         offX = clampInt(offX, minOffX, maxOffX);
@@ -155,8 +155,7 @@ final class FactoryPanelState {
         }
         offY = clampInt(offY, minOffY, maxOffY);
 
-        // Importante: se clamp “riporta indietro”, aggiorna anche il pan accumulato
-        // così non cresce all’infinito fuori range.
+        // If clamping pulled it back, update stored pan so it doesn't grow unbounded
         panPxX = offX - baseOffX;
         panPxY = offY - baseOffY;
 

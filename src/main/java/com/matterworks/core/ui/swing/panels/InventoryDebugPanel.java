@@ -15,7 +15,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class InventoryDebugPanel extends JPanel {
 
     private static final List<String> FALLBACK_ITEMS = List.of(
-            "drill_mk1",
+            "drill",
             "conveyor_belt",
             "splitter",
             "merger",
@@ -45,7 +45,7 @@ public class InventoryDebugPanel extends JPanel {
 
     private final Map<String, RowUI> rows = new LinkedHashMap<>();
 
-    // separiamo: azioni (+/-) e refresh conteggi
+    // Separate: (+/-) actions and count refreshes
     private final ExecutorService actionExec = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "mw-inventory-actions");
         t.setDaemon(true);
@@ -58,18 +58,18 @@ public class InventoryDebugPanel extends JPanel {
         return t;
     });
 
-    // evita coda infinita di refresh pesanti
+    // Prevent infinite queue of heavy refreshes
     private final AtomicBoolean countsRefreshRunning = new AtomicBoolean(false);
 
-    // timer leggero: prezzi + enable bottoni (no DB)
+    // Light timer: prices + buttons enable (no DB)
     private Timer fastPriceTimer;
 
-    // timer pesante: conteggi inventario + lock (DB)
+    // Heavy timer: inventory counts + unlock (DB)
     private Timer countsTimer;
 
     private volatile boolean disposed = false;
 
-    // per aggiornare titolo/border quando cambia “mode”
+    // Used to update the border title when switching "mode"
     private volatile Boolean lastPlayerView = null;
 
     private static final class RowUI {
@@ -106,27 +106,31 @@ public class InventoryDebugPanel extends JPanel {
         setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
         setBackground(new Color(40, 40, 40));
 
-        // border provvisorio (poi lo aggiorno dinamicamente)
+        // Temporary border (updated dynamically)
         setBorder(BorderFactory.createTitledBorder("Warehouse"));
 
         List<String> itemIds = gridManager.getBlockRegistry().getShopMachineIdsFromDb();
         if (itemIds == null || itemIds.isEmpty()) itemIds = FALLBACK_ITEMS;
 
-        for (String itemId : itemIds) {
+        // Normalize + preserve order + avoid duplicates
+        LinkedHashSet<String> unique = new LinkedHashSet<>();
+        for (String id : itemIds) unique.add(normalizeItemId(id));
+
+        for (String itemId : unique) {
             add(createItemRow(itemId));
             add(Box.createVerticalStrut(8));
         }
 
-        // refresh immediato e frequente
+        // Immediate and frequent refresh
         fastPriceTimer = new Timer(200, e -> refreshPricesAndButtons());
         fastPriceTimer.start();
 
-        // refresh pesante meno frequente
+        // Heavy refresh less frequent
         countsTimer = new Timer(900, e -> requestCountsRefresh());
         countsTimer.start();
 
-        // refresh iniziali
-        refreshPricesAndButtons(); // fa vedere subito la label del prezzo (anche se "...")
+        // Initial refresh
+        refreshPricesAndButtons();
         requestCountsRefresh();
     }
 
@@ -138,6 +142,13 @@ public class InventoryDebugPanel extends JPanel {
         try { countsExec.shutdownNow(); } catch (Exception ignored) {}
     }
 
+    private static String normalizeItemId(String itemId) {
+        if (itemId == null) return null;
+        // Hard rename: drill -> drill (defensive UI normalization)
+        if ("drill".equals(itemId)) return "drill";
+        return itemId;
+    }
+
     private boolean computeIsPlayerView(PlayerProfile p) {
         return p != null && p.getRank() == PlayerProfile.PlayerRank.PLAYER;
     }
@@ -145,12 +156,14 @@ public class InventoryDebugPanel extends JPanel {
     private void ensureBorderForMode(boolean isPlayerView) {
         if (lastPlayerView != null && lastPlayerView == isPlayerView) return;
         lastPlayerView = isPlayerView;
+
         setBorder(BorderFactory.createTitledBorder(isPlayerView ? "Warehouse Shop" : "Warehouse Monitor"));
         revalidate();
         repaint();
     }
 
     private JPanel createItemRow(String itemId) {
+        itemId = normalizeItemId(itemId);
         boolean tradeable = !NON_TRADEABLE.contains(itemId);
 
         JPanel row = new JPanel(new BorderLayout(10, 0));
@@ -167,7 +180,7 @@ public class InventoryDebugPanel extends JPanel {
         setupTinyButton(btnRem, new Color(120, 50, 50));
         setupTinyButton(btnAdd, new Color(50, 110, 50));
 
-        // prezzo (di default visibile: lo nascondiamo solo in monitor mode DURANTE refresh)
+        // Price label (hidden in monitor mode during refresh)
         JLabel lblBuyPrice = new JLabel("...");
         lblBuyPrice.setFont(new Font("SansSerif", Font.PLAIN, 10));
         lblBuyPrice.setForeground(PENDING_GRAY);
@@ -183,7 +196,7 @@ public class InventoryDebugPanel extends JPanel {
         east.add(Box.createHorizontalStrut(6));
         east.add(lblBuyPrice);
 
-        // nexus: non tradeabile
+        // Nexus (or other future items) can be non-tradeable
         if (!tradeable) {
             btnRem.setVisible(false);
             btnAdd.setVisible(false);
@@ -196,13 +209,14 @@ public class InventoryDebugPanel extends JPanel {
             return row;
         }
 
+        final String finalItemId = itemId;
+
         btnAdd.addActionListener(e -> runActionAsync(btnAdd, () -> {
-            // modalità (player vs monitor) viene valutata al momento dell’azione
             PlayerProfile p = gridManager.getCachedProfile(playerUuid);
             boolean isPlayerView = computeIsPlayerView(p);
 
-            if (isPlayerView) gridManager.buyItem(playerUuid, itemId, 1);
-            else repository.modifyInventoryItem(playerUuid, itemId, 1);
+            if (isPlayerView) gridManager.buyItem(playerUuid, finalItemId, 1);
+            else repository.modifyInventoryItem(playerUuid, finalItemId, 1);
         }));
 
         btnRem.addActionListener(e -> runActionAsync(btnRem, () -> {
@@ -210,15 +224,15 @@ public class InventoryDebugPanel extends JPanel {
             boolean isPlayerView = computeIsPlayerView(p);
 
             if (isPlayerView) {
-                int have = repository.getInventoryItemCount(playerUuid, itemId);
+                int have = repository.getInventoryItemCount(playerUuid, finalItemId);
                 if (have > 0) {
-                    // rimborso 50% del prezzo attuale
-                    double refund = gridManager.getEffectiveShopUnitPrice(playerUuid, itemId) * 0.5;
-                    gridManager.addMoney(playerUuid, refund, "ITEM_SELL", itemId);
-                    repository.modifyInventoryItem(playerUuid, itemId, -1);
+                    // Refund 50% of current price
+                    double refund = gridManager.getEffectiveShopUnitPrice(playerUuid, finalItemId) * 0.5;
+                    gridManager.addMoney(playerUuid, refund, "ITEM_SELL", finalItemId);
+                    repository.modifyInventoryItem(playerUuid, finalItemId, -1);
                 }
             } else {
-                repository.modifyInventoryItem(playerUuid, itemId, -1);
+                repository.modifyInventoryItem(playerUuid, finalItemId, -1);
             }
         }));
 
@@ -230,11 +244,11 @@ public class InventoryDebugPanel extends JPanel {
     }
 
     private void setupTinyButton(JButton b, Color bg) {
-        b.setPreferredSize(new Dimension(46, 28));   // +6px larghezza, +3px altezza
+        b.setPreferredSize(new Dimension(46, 28));
         b.setMinimumSize(new Dimension(46, 28));
         b.setMaximumSize(new Dimension(46, 28));
         b.setMargin(new Insets(0, 0, 0, 0));
-        b.setFont(new Font("SansSerif", Font.BOLD, 15)); // un filo più leggibile
+        b.setFont(new Font("SansSerif", Font.BOLD, 15));
         b.setFocusable(false);
         b.setForeground(Color.WHITE);
         b.setBackground(bg);
@@ -252,7 +266,6 @@ public class InventoryDebugPanel extends JPanel {
                 } catch (Throwable t) {
                     t.printStackTrace();
                 } finally {
-                    // refresh immediati
                     SwingUtilities.invokeLater(this::refreshPricesAndButtons);
                     requestCountsRefresh();
 
@@ -273,8 +286,8 @@ public class InventoryDebugPanel extends JPanel {
     }
 
     /**
-     * Refresh IMMEDIATO (NO DB): prezzi + enable bottoni.
-     * Modalità player/monitor è valutata DINAMICAMENTE (non “freezata” nel costruttore).
+     * Immediate refresh (NO DB): prices + button enable states.
+     * Player/monitor mode is evaluated dynamically.
      */
     private void refreshPricesAndButtons() {
         if (disposed) return;
@@ -284,7 +297,7 @@ public class InventoryDebugPanel extends JPanel {
         boolean isPlayerView = computeIsPlayerView(p);
         ensureBorderForMode(isPlayerView);
 
-        // Monitor mode: niente prezzi
+        // Monitor mode: hide prices, enable buttons
         if (!isPlayerView) {
             for (RowUI r : rows.values()) {
                 if (!r.tradeable) continue;
@@ -295,16 +308,17 @@ public class InventoryDebugPanel extends JPanel {
             return;
         }
 
-        // Shop mode: prezzo visibile anche se profilo ancora null -> "..."
+        // Shop mode: profile still loading
         if (p == null) {
             for (RowUI r : rows.values()) {
                 if (!r.tradeable) continue;
+
                 if (r.lblBuyPrice != null) {
                     r.lblBuyPrice.setVisible(true);
                     r.lblBuyPrice.setText("...");
                     r.lblBuyPrice.setForeground(PENDING_GRAY);
                 }
-                // lasciamo bottoni attivi “ragionevoli”
+
                 r.btnAdd.setEnabled(r.unlocked);
                 r.btnRem.setEnabled(r.lastCount > 0);
             }
@@ -339,8 +353,8 @@ public class InventoryDebugPanel extends JPanel {
     }
 
     /**
-     * Refresh PESANTE (DB): conteggi inventario + unlock.
-     * Non si accoda: se già running, skip.
+     * Heavy refresh (DB): inventory counts + unlock states.
+     * Does not queue: if already running, it skips.
      */
     private void requestCountsRefresh() {
         if (disposed) return;
@@ -390,7 +404,6 @@ public class InventoryDebugPanel extends JPanel {
                             }
                         }
 
-                        // dopo counts/unlock -> refresh “fast”
                         refreshPricesAndButtons();
                     });
 
