@@ -26,6 +26,10 @@ final class GridEconomyService {
     private static final String ITEM_OVERCLOCK_24H = "overclock_24h";
     private static final String ITEM_OVERCLOCK_LIFE = "overclock_life";
 
+    private static final String ITEM_GLOBAL_OVERCLOCK_2H = "global_overclock_2h";
+    private static final String ITEM_GLOBAL_OVERCLOCK_12H = "global_overclock_12h";
+    private static final String ITEM_GLOBAL_OVERCLOCK_24H = "global_overclock_24h";
+
     GridEconomyService(
             GridManager gridManager,
             MariaDBAdapter repository,
@@ -51,7 +55,7 @@ final class GridEconomyService {
         return repository.loadVoidShopCatalog();
     }
 
-    boolean canUseOverclock(java.util.UUID ownerId, String itemId) {
+    boolean canUseOverclock(UUID ownerId, String itemId) {
         if (ownerId == null || itemId == null || itemId.isBlank()) return false;
 
         var p = state.getCachedProfile(ownerId);
@@ -61,7 +65,7 @@ final class GridEconomyService {
         return have > 0;
     }
 
-    boolean useOverclock(java.util.UUID ownerId, String itemId) {
+    boolean useOverclock(UUID ownerId, String itemId) {
         if (ownerId == null || itemId == null || itemId.isBlank()) return false;
 
         state.touchPlayer(ownerId);
@@ -74,6 +78,11 @@ final class GridEconomyService {
         if (!admin) {
             int have = repository.getInventoryItemCount(ownerId, itemId);
             if (have <= 0) return false;
+        }
+
+        // ✅ Route GLOBAL overclocks here (so UI can keep calling useOverclock)
+        if (isGlobalOverclockItem(itemId)) {
+            return applyGlobalOverclock(ownerId, itemId, admin);
         }
 
         long durationSeconds = switch (itemId) {
@@ -117,6 +126,67 @@ final class GridEconomyService {
         return true;
     }
 
+    private boolean isGlobalOverclockItem(String itemId) {
+        if (itemId == null) return false;
+        return itemId.equals(ITEM_GLOBAL_OVERCLOCK_2H)
+                || itemId.equals(ITEM_GLOBAL_OVERCLOCK_12H)
+                || itemId.equals(ITEM_GLOBAL_OVERCLOCK_24H);
+    }
+
+    private boolean applyGlobalOverclock(UUID activatorId, String itemId, boolean admin) {
+        long durationSeconds = switch (itemId) {
+            case ITEM_GLOBAL_OVERCLOCK_2H -> 2L * 3600L;
+            case ITEM_GLOBAL_OVERCLOCK_12H -> 12L * 3600L;
+            case ITEM_GLOBAL_OVERCLOCK_24H -> 24L * 3600L;
+            default -> 0L;
+        };
+
+        if (durationSeconds <= 0L) return false;
+
+        long nowMs = System.currentTimeMillis();
+
+        // Read fresh from DB to be safe (so multiple uses stack correctly)
+        long currentEndMs = 0L;
+        double currentMult = 1.0;
+        try {
+            currentEndMs = Math.max(0L, repository.getGlobalOverclockEndEpochMs());
+            currentMult = repository.getGlobalOverclockMultiplier();
+        } catch (Throwable ignored) {}
+
+        if (Double.isNaN(currentMult) || Double.isInfinite(currentMult) || currentMult <= 0.0) currentMult = 1.0;
+
+        // Extend if already active, otherwise start now
+        long baseMs = Math.max(nowMs, currentEndMs);
+        long newEndMs = baseMs + durationSeconds * 1000L;
+
+        double newMult = 2.0;
+
+        // Persist
+        repository.setGlobalOverclockState(newEndMs, newMult, durationSeconds);
+
+        // ✅ Update GridManager cache (no need to touch GridRuntimeState)
+        gridManager._setGlobalOverclockStateCached(newEndMs, newMult, durationSeconds);
+
+        PlayerProfile p = repository.loadPlayerProfile(activatorId);
+        if (p == null) p = state.getCachedProfile(activatorId);
+
+        if (!admin) {
+            repository.modifyInventoryItem(activatorId, itemId, -1);
+            if (p != null) repository.logTransaction(p, "VOID_SHOP_USE", "GLOBAL_OVERCLOCK", 1.0, itemId);
+        } else {
+            if (p != null) repository.logTransaction(p, "VOID_SHOP_USE_ADMIN", "GLOBAL_OVERCLOCK", 0.0, itemId);
+        }
+
+        System.out.println("[GLOBAL_OVERCLOCK] Applied item=" + itemId
+                + " by=" + activatorId
+                + " nowMs=" + nowMs
+                + " prevEndMs=" + currentEndMs
+                + " newEndMs=" + newEndMs
+                + " durationSeconds=" + durationSeconds
+                + " multiplier=" + newMult);
+
+        return true;
+    }
 
     boolean buyVoidShopItem(UUID playerId, String premiumItemId, int amount) {
         state.touchPlayer(playerId);
@@ -131,11 +201,11 @@ final class GridEconomyService {
 
         int unit = Math.max(0, def.voidPrice());
 
-        // ✅ sempre path atomico (MariaDB-only)
+        // always atomic path (MariaDB-only)
         boolean ok = repository.purchaseVoidShopItemAtomic(playerId, premiumItemId, unit, amount, p.isAdmin());
         if (!ok) return false;
 
-        // ricarica profilo per aggiornare void coins in cache/UI
+        // reload profile to update void coins in cache/UI
         PlayerProfile fresh = repository.loadPlayerProfile(playerId);
         if (fresh != null) state.activeProfileCache.put(playerId, fresh);
 
@@ -173,10 +243,10 @@ final class GridEconomyService {
         final int plotBonus = Math.max(0, serverConfig.prestigePlotBonus());
 
         ioExecutor.submit(() -> {
-            // salva stati ma NON resetta DB
+            // save states but do NOT reset DB
             world.saveAndUnloadSpecific(ownerId);
 
-            // consuma item premium
+            // consume premium item
             try {
                 PlayerProfile p = repository.loadPlayerProfile(ownerId);
                 if (p == null) return;
@@ -226,7 +296,7 @@ final class GridEconomyService {
                 t.printStackTrace();
             }
 
-            // ricarica per aggiornare UI/mondo
+            // reload to update UI/world
             world.loadPlotSynchronously(ownerId);
         });
     }

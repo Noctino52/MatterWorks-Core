@@ -5,13 +5,13 @@ import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.domain.machines.base.PlacedMachine;
 import com.matterworks.core.domain.machines.registry.BlockRegistry;
 import com.matterworks.core.domain.matter.MatterColor;
+import com.matterworks.core.domain.player.BoosterStatus;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.domain.shop.MarketManager;
 import com.matterworks.core.domain.shop.VoidShopItem;
 import com.matterworks.core.model.PlotUnlockState;
 import com.matterworks.core.ports.IWorldAccess;
 import com.matterworks.core.ui.MariaDBAdapter;
-import com.matterworks.core.domain.player.BoosterStatus;
 
 import java.util.*;
 import java.util.concurrent.ExecutorService;
@@ -21,6 +21,10 @@ public class GridManager {
 
     public static final String ITEM_INSTANT_PRESTIGE = "instant_prestige";
     public static final String ITEM_PLOT_SIZE_BREAKER = "plot_size_breaker";
+
+    private static final String ITEM_GLOBAL_OVERCLOCK_2H = "global_overclock_2h";
+    private static final String ITEM_GLOBAL_OVERCLOCK_12H = "global_overclock_12h";
+    private static final String ITEM_GLOBAL_OVERCLOCK_24H = "global_overclock_24h";
 
     private final MariaDBAdapter repository;
     private final IWorldAccess worldAdapter;
@@ -35,6 +39,14 @@ public class GridManager {
     private final GridWorldService world;
     private final GridEconomyService economy;
 
+    // ==========================================================
+    // GLOBAL OVERCLOCK CACHE (server-wide, real-time)
+    // ==========================================================
+    private volatile long globalOverclockEndEpochMs = 0L;
+    private volatile double globalOverclockMultiplier = 1.0;
+    private volatile long globalOverclockLastDurationSeconds = 0L;
+    private volatile long globalOverclockLastFetchMs = 0L;
+
     public GridManager(MariaDBAdapter repository, IWorldAccess worldAdapter, BlockRegistry registry) {
         this.repository = repository;
         this.worldAdapter = worldAdapter;
@@ -47,6 +59,8 @@ public class GridManager {
         this.economy = new GridEconomyService(this, repository, blockRegistry, techManager, ioExecutor, state, world);
 
         this.marketManager = new MarketManager(this, repository);
+
+        refreshGlobalOverclockCache(true);
     }
 
     public TechManager getTechManager() { return techManager; }
@@ -121,7 +135,7 @@ public class GridManager {
 
                 repository.logTransaction(fresh, "PLOT_SIZE_BREAKER_USED", "ITEM", 1, ITEM_PLOT_SIZE_BREAKER);
 
-                // Se hai già aggiunto i metodi DB/DAO per la statistica globale, scommenta:
+                // If you track global stats:
                 // repository.addVoidPlotItemBreakerIncreased(1);
             } catch (Throwable t) {
                 t.printStackTrace();
@@ -131,9 +145,7 @@ public class GridManager {
         return true;
     }
 
-
     boolean increasePlotUnlockedAreaUnchecked(UUID ownerId) {
-        // New: same logic as admin increase, but without admin check
         state.touchPlayer(ownerId);
         return increasePlotUnlockedAreaInternal(ownerId);
     }
@@ -159,7 +171,6 @@ public class GridManager {
     }
 
     public boolean decreasePlotUnlockedArea(UUID ownerId) { return world.decreasePlotUnlockedArea(ownerId); }
-
 
     public void reloadMinutesToInactive() { state.reloadMinutesToInactive(); }
     public void touchPlayer(UUID ownerId) { state.touchPlayer(ownerId); }
@@ -193,7 +204,7 @@ public class GridManager {
     public int getEffectiveItemPlacedOnPlotCap(UUID ownerId) { return state.getEffectiveItemPlacedOnPlotCap(ownerId); }
 
     // ==========================================================
-    // ✅ PERSISTENT "+" MECHANIC
+    // PERSISTENT "+" MECHANIC
     // plots.void_itemcap_extra += server_gamestate.itemcap_void_increase_step
     // ==========================================================
     public boolean increaseMaxItemPlacedOnPlotCap(UUID requesterId) {
@@ -243,7 +254,6 @@ public class GridManager {
             try {
                 repository.modifyInventoryItem(requesterId, BREAKER_ITEM_ID, -1);
 
-                // Optional: track consumption as a transaction (same style as Instant Prestige).
                 PlayerProfile fresh = null;
                 try { fresh = repository.loadPlayerProfile(requesterId); } catch (Throwable ignored) {}
                 if (fresh == null) fresh = p;
@@ -257,16 +267,20 @@ public class GridManager {
         return increased;
     }
 
-    // Add into GridManager public methods:
-
-    public boolean canUseOverclock(java.util.UUID playerId, String itemId) {
+    // ==========================================================
+    // OVERCLOCK USE (player + global)
+    // ==========================================================
+    public boolean canUseOverclock(UUID playerId, String itemId) {
         return economy.canUseOverclock(playerId, itemId);
     }
 
-    public boolean useOverclock(java.util.UUID playerId, String itemId) {
+    public boolean useOverclock(UUID playerId, String itemId) {
         return economy.useOverclock(playerId, itemId);
     }
 
+    // ==========================================================
+    // BOOSTERS LIST
+    // ==========================================================
     public List<BoosterStatus> getActiveBoosters(UUID ownerId) {
         List<BoosterStatus> out = new ArrayList<>();
         if (ownerId == null) return out;
@@ -274,8 +288,8 @@ public class GridManager {
         var p = state.getCachedProfile(ownerId);
         if (p == null) return out;
 
+        // Player overclock (playtime-based)
         long playtime = state.getPlaytimeSecondsCached(ownerId);
-
         long remaining = p.getOverclockRemainingSeconds(playtime);
         if (remaining != 0L && p.getOverclockMultiplier() > 1.0) {
             String id = inferOverclockBoosterId(p.getOverclockDurationSeconds());
@@ -287,6 +301,24 @@ public class GridManager {
                     p.getOverclockMultiplier(),
                     remaining,
                     p.getOverclockDurationSeconds()
+            ));
+        }
+
+        // Global overclock (real-time)
+        refreshGlobalOverclockCache(false);
+        long globalRemaining = getGlobalOverclockRemainingSeconds();
+        double globalMult = getGlobalOverclockMultiplierNow();
+
+        if (globalRemaining > 0L && globalMult > 1.0) {
+            String gid = inferGlobalOverclockBoosterId(globalOverclockLastDurationSeconds);
+            String gname = inferGlobalOverclockDisplayName(globalOverclockLastDurationSeconds);
+
+            out.add(new BoosterStatus(
+                    gid,
+                    gname,
+                    globalMult,
+                    globalRemaining,
+                    globalOverclockLastDurationSeconds
             ));
         }
 
@@ -309,7 +341,24 @@ public class GridManager {
         return "Overclock";
     }
 
-    public double getEffectiveMachineSpeedMultiplier(java.util.UUID ownerId, String machineTypeId) {
+    private String inferGlobalOverclockBoosterId(long durationSeconds) {
+        if (durationSeconds == 2L * 3600L) return ITEM_GLOBAL_OVERCLOCK_2H;
+        if (durationSeconds == 12L * 3600L) return ITEM_GLOBAL_OVERCLOCK_12H;
+        if (durationSeconds == 24L * 3600L) return ITEM_GLOBAL_OVERCLOCK_24H;
+        return "global_overclock";
+    }
+
+    private String inferGlobalOverclockDisplayName(long durationSeconds) {
+        if (durationSeconds == 2L * 3600L) return "Global Overclock (2h)";
+        if (durationSeconds == 12L * 3600L) return "Global Overclock (12h)";
+        if (durationSeconds == 24L * 3600L) return "Global Overclock (24h)";
+        return "Global Overclock";
+    }
+
+    // ==========================================================
+    // EFFECTIVE MACHINE SPEED (player overclock * global overclock)
+    // ==========================================================
+    public double getEffectiveMachineSpeedMultiplier(UUID ownerId, String machineTypeId) {
         double machineSpeed = 1.0;
         try {
             machineSpeed = blockRegistry.getSpeed(machineTypeId);
@@ -325,16 +374,20 @@ public class GridManager {
         if (p == null) return machineSpeed;
 
         long playtime = state.getPlaytimeSecondsCached(ownerId);
-        double oc = p.getActiveOverclockMultiplier(playtime);
+        double ocPlayer = p.getActiveOverclockMultiplier(playtime);
 
-        double out = machineSpeed * oc;
+        refreshGlobalOverclockCache(false);
+        double ocGlobal = getGlobalOverclockMultiplierNow();
+
+        double out = machineSpeed * ocPlayer * ocGlobal;
         if (Double.isNaN(out) || Double.isInfinite(out) || out <= 0.0) return 1.0;
 
-        if (oc > 1.0) {
+        if (ocPlayer > 1.0 || ocGlobal > 1.0) {
             System.out.println("[OVERCLOCK] speed multiplier active for owner=" + ownerId
                     + " machine=" + machineTypeId
                     + " machineSpeed=" + machineSpeed
-                    + " overclock=" + oc
+                    + " overclockPlayer=" + ocPlayer
+                    + " overclockGlobal=" + ocGlobal
                     + " effective=" + out
                     + " playtime=" + playtime);
         }
@@ -342,12 +395,63 @@ public class GridManager {
         return out;
     }
 
+    // ==========================================================
+    // GLOBAL OVERCLOCK CACHE API (used by GridEconomyService)
+    // ==========================================================
+    void _setGlobalOverclockStateCached(long endEpochMs, double multiplier, long lastDurationSeconds) {
+        long endMs = Math.max(0L, endEpochMs);
+        double mult = multiplier;
+        if (Double.isNaN(mult) || Double.isInfinite(mult) || mult <= 0.0) mult = 1.0;
 
+        this.globalOverclockEndEpochMs = endMs;
+        this.globalOverclockMultiplier = mult;
+        this.globalOverclockLastDurationSeconds = Math.max(0L, lastDurationSeconds);
+        this.globalOverclockLastFetchMs = System.currentTimeMillis();
+    }
 
+    private void refreshGlobalOverclockCache(boolean force) {
+        long now = System.currentTimeMillis();
+        if (!force && (now - globalOverclockLastFetchMs) < 2000L) return;
 
+        try {
+            long endMs = Math.max(0L, repository.getGlobalOverclockEndEpochMs());
+            double mult = repository.getGlobalOverclockMultiplier();
+            long lastDur = Math.max(0L, repository.getGlobalOverclockLastDurationSeconds());
 
+            if (Double.isNaN(mult) || Double.isInfinite(mult) || mult <= 0.0) mult = 1.0;
 
+            globalOverclockEndEpochMs = endMs;
+            globalOverclockMultiplier = mult;
+            globalOverclockLastDurationSeconds = lastDur;
+            globalOverclockLastFetchMs = now;
+        } catch (Throwable ignored) {
+            // keep previous cached values
+        }
+    }
 
+    private double getGlobalOverclockMultiplierNow() {
+        long endMs = globalOverclockEndEpochMs;
+        if (endMs <= 0L) return 1.0;
+
+        long now = System.currentTimeMillis();
+        if (now >= endMs) return 1.0;
+
+        double mult = globalOverclockMultiplier;
+        if (Double.isNaN(mult) || Double.isInfinite(mult) || mult <= 0.0) return 1.0;
+
+        return mult;
+    }
+
+    private long getGlobalOverclockRemainingSeconds() {
+        long endMs = globalOverclockEndEpochMs;
+        if (endMs <= 0L) return 0L;
+
+        long now = System.currentTimeMillis();
+        long diffMs = endMs - now;
+        if (diffMs <= 0L) return 0L;
+
+        return (long) Math.ceil(diffMs / 1000.0);
+    }
 
     // (optional debug)
     public int getPlacedItemCount(UUID ownerId) { return state.getPlacedItemCount(ownerId); }

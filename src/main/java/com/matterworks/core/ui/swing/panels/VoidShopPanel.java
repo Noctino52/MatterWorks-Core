@@ -355,8 +355,12 @@ public class VoidShopPanel extends JPanel {
         return itemId.equals("overclock_2h")
                 || itemId.equals("overclock_12h")
                 || itemId.equals("overclock_24h")
-                || itemId.equals("overclock_life");
+                || itemId.equals("overclock_life")
+                || itemId.equals("global_overclock_2h")
+                || itemId.equals("global_overclock_12h")
+                || itemId.equals("global_overclock_24h");
     }
+
 
     private static Boolean tryCallBoolean(Object target, String methodName, Class<?>[] argTypes, Object[] args) {
         try {

@@ -40,13 +40,21 @@ final class GridRuntimeState {
 
     final Map<UUID, PlaytimeCacheEntry> playtimeCache = new ConcurrentHashMap<>();
 
-    // ✅ Cache of persisted bonus (plots.void_itemcap_extra)
+    // Cache of persisted bonus (plots.void_itemcap_extra)
     final Map<UUID, Integer> voidItemCapExtraCache = new ConcurrentHashMap<>();
+
+    // ==========================================================
+    // GLOBAL OVERCLOCK (server-wide, real-time)
+    // ==========================================================
+    volatile long globalOverclockEndEpochMs = 0L;
+    volatile double globalOverclockMultiplier = 1.0;
+    volatile long globalOverclockLastDurationSeconds = 0L;
 
     GridRuntimeState(MariaDBAdapter repository) {
         this.repository = repository;
         this.serverConfig = repository.loadServerConfig();
         reloadMinutesToInactive();
+        reloadGlobalOverclockFromDb();
     }
 
     ServerConfig getServerConfig() {
@@ -58,8 +66,7 @@ final class GridRuntimeState {
         return cfg;
     }
 
-// Add inside GridRuntimeState:
-    long getPlaytimeSecondsCached(java.util.UUID ownerId) {
+    long getPlaytimeSecondsCached(UUID ownerId) {
         if (ownerId == null) return 0L;
 
         PlaytimeCacheEntry e = playtimeCache.computeIfAbsent(ownerId, k -> new PlaytimeCacheEntry());
@@ -74,9 +81,6 @@ final class GridRuntimeState {
 
         return e.seconds;
     }
-
-
-
 
     void reloadServerConfig() {
         this.serverConfig = repository.loadServerConfig();
@@ -218,13 +222,74 @@ final class GridRuntimeState {
         PlayerProfile p = getCachedProfile(ownerId);
         if (p != null) prestige = Math.max(0, p.getPrestigeLevel());
 
-        // ✅ persisted bonus from plots.void_itemcap_extra
         int voidExtra = getPersistedVoidItemCapExtra(ownerId);
 
-        long raw = (long) base + (long) prestige * (long) prestigeStep + (long) voidExtra;
-        int cap = raw > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) raw;
+        long computed = (long) base + (long) prestigeStep * prestige + (long) voidExtra;
+        if (computed > Integer.MAX_VALUE) computed = Integer.MAX_VALUE;
 
+        int cap = (int) computed;
         cap = Math.min(cap, max);
-        return Math.max(1, cap);
+        cap = Math.max(1, cap);
+        return cap;
+    }
+
+    // ==========================================================
+    // GLOBAL OVERCLOCK (server-wide, real-time)
+    // ==========================================================
+
+    void reloadGlobalOverclockFromDb() {
+        try {
+            long endMs = Math.max(0L, repository.getGlobalOverclockEndEpochMs());
+            double mult = repository.getGlobalOverclockMultiplier();
+            long lastDur = Math.max(0L, repository.getGlobalOverclockLastDurationSeconds());
+
+            if (Double.isNaN(mult) || Double.isInfinite(mult) || mult <= 0.0) mult = 1.0;
+
+            globalOverclockEndEpochMs = endMs;
+            globalOverclockMultiplier = mult;
+            globalOverclockLastDurationSeconds = lastDur;
+        } catch (Throwable t) {
+            globalOverclockEndEpochMs = 0L;
+            globalOverclockMultiplier = 1.0;
+            globalOverclockLastDurationSeconds = 0L;
+        }
+    }
+
+    void setGlobalOverclockStateCached(long endEpochMs, double multiplier, long lastDurationSeconds) {
+        long endMs = Math.max(0L, endEpochMs);
+        double mult = multiplier;
+        if (Double.isNaN(mult) || Double.isInfinite(mult) || mult <= 0.0) mult = 1.0;
+        long lastDur = Math.max(0L, lastDurationSeconds);
+
+        globalOverclockEndEpochMs = endMs;
+        globalOverclockMultiplier = mult;
+        globalOverclockLastDurationSeconds = lastDur;
+    }
+
+    double getGlobalOverclockMultiplierNow() {
+        long endMs = globalOverclockEndEpochMs;
+        if (endMs <= 0L) return 1.0;
+
+        long now = System.currentTimeMillis();
+        if (now >= endMs) return 1.0;
+
+        double mult = globalOverclockMultiplier;
+        if (Double.isNaN(mult) || Double.isInfinite(mult) || mult <= 0.0) return 1.0;
+        return mult;
+    }
+
+    long getGlobalOverclockRemainingSeconds() {
+        long endMs = globalOverclockEndEpochMs;
+        if (endMs <= 0L) return 0L;
+
+        long now = System.currentTimeMillis();
+        long diffMs = endMs - now;
+        if (diffMs <= 0L) return 0L;
+
+        return (long) Math.ceil(diffMs / 1000.0);
+    }
+
+    long getGlobalOverclockLastDurationSecondsCached() {
+        return Math.max(0L, globalOverclockLastDurationSeconds);
     }
 }

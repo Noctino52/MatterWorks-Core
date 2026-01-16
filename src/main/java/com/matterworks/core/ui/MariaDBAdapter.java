@@ -2,7 +2,17 @@ package com.matterworks.core.ui;
 
 import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.database.DatabaseManager;
-import com.matterworks.core.database.dao.*;
+import com.matterworks.core.database.dao.InventoryDAO;
+import com.matterworks.core.database.dao.PlayerDAO;
+import com.matterworks.core.database.dao.PlayerSessionDAO;
+import com.matterworks.core.database.dao.PlotDAO;
+import com.matterworks.core.database.dao.PlotMaintenanceDAO;
+import com.matterworks.core.database.dao.PlotResourceDAO;
+import com.matterworks.core.database.dao.ServerGameStateDAO;
+import com.matterworks.core.database.dao.TechDefinitionDAO;
+import com.matterworks.core.database.dao.TransactionDAO;
+import com.matterworks.core.database.dao.VoidShopDAO;
+import com.matterworks.core.database.dao.VoidShopPurchaseDAO;
 import com.matterworks.core.domain.machines.base.PlacedMachine;
 import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.player.PlayerProfile;
@@ -72,8 +82,6 @@ public class MariaDBAdapter {
         catch (Throwable t) { return null; }
     }
 
-
-
     public boolean purchaseVoidShopItemAtomic(UUID playerId, String itemId, int unitPrice, int amount, boolean isAdmin) {
         return voidShopPurchaseDAO.purchaseVoidShopItemAtomic(playerId, itemId, unitPrice, amount, isAdmin);
     }
@@ -101,18 +109,37 @@ public class MariaDBAdapter {
         serverGameStateDAO.updateMaxItemPlacedOnPlotCap(newCap);
     }
 
-    // ✅ NEW: reads server_gamestate.itemcap_void_increase_step (compat fallback handled in DAO)
+    // reads server_gamestate.itemcap_void_increase_step (compat fallback handled in DAO)
     public int getVoidItemCapIncreaseStep() {
         return serverGameStateDAO.getVoidItemCapIncreaseStep();
     }
 
-    // ✅ NEW: persisted per-plot bonus on plots.void_itemcap_extra
+    // persisted per-plot bonus on plots.void_itemcap_extra
     public int getPlotVoidItemCapExtra(UUID ownerId) {
         return plotDAO.getVoidItemCapExtra(ownerId);
     }
 
     public int addPlotVoidItemCapExtra(UUID ownerId, int delta) {
         return plotDAO.addVoidItemCapExtra(ownerId, delta);
+    }
+
+    // ==========================================================
+    // GLOBAL OVERCLOCK (server-wide, real time)
+    // ==========================================================
+    public long getGlobalOverclockEndEpochMs() {
+        return serverGameStateDAO.getGlobalOverclockEndEpochMs();
+    }
+
+    public double getGlobalOverclockMultiplier() {
+        return serverGameStateDAO.getGlobalOverclockMultiplier();
+    }
+
+    public long getGlobalOverclockLastDurationSeconds() {
+        return serverGameStateDAO.getGlobalOverclockLastDurationSeconds();
+    }
+
+    public void setGlobalOverclockState(long endEpochMs, double multiplier, long lastDurationSeconds) {
+        serverGameStateDAO.setGlobalOverclockState(endEpochMs, multiplier, lastDurationSeconds);
     }
 
     // ==========================================================
@@ -203,7 +230,6 @@ public class MariaDBAdapter {
     public int addVoidPlotItemBreakerIncreased(int delta) {
         return serverGameStateDAO.addVoidPlotItemBreakerIncreased(delta);
     }
-
 
     public long getTotalPlaytimeSeconds(UUID playerUuid) {
         return playerDAO.getTotalPlaytimeSeconds(playerUuid);

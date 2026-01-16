@@ -50,7 +50,6 @@ public class ServerGameStateDAO {
      * If the column does not exist (older DB), returns 0.
      */
     public int getVoidItemCapIncreaseStep() {
-        // Preferred column name (current DB): itemcap_void_increase_step
         String sql = "SELECT itemcap_void_increase_step FROM server_gamestate WHERE id = 1";
         try (Connection conn = db.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql);
@@ -58,11 +57,9 @@ public class ServerGameStateDAO {
 
             if (rs.next()) return Math.max(0, rs.getInt("itemcap_void_increase_step"));
         } catch (SQLException e) {
-            // Backward compat: older / different naming
             if (!SqlCompat.isUnknownColumn(e)) e.printStackTrace();
         }
 
-        // Fallback attempt: older naming (if someone used it)
         String sql2 = "SELECT void_itemcap_increase_step FROM server_gamestate WHERE id = 1";
         try (Connection conn = db.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql2);
@@ -120,7 +117,7 @@ public class ServerGameStateDAO {
 
     public ServerConfig loadServerConfig() {
 
-        // defaults “safe”
+        // defaults "safe"
         double playerStartMoney = 1000.0;
         int veinRaw = 3, veinRed = 1, veinBlue = 1, veinYellow = 0;
         double sosThreshold = 500.0;
@@ -259,4 +256,71 @@ public class ServerGameStateDAO {
         return getVoidPlotItemBreakerIncreased();
     }
 
+    // ==========================================================
+    // GLOBAL OVERCLOCK (server-wide, real-time)
+    // ==========================================================
+
+    public long getGlobalOverclockEndEpochMs() {
+        String sql = "SELECT global_overclock_end_ms FROM server_gamestate WHERE id = 1";
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+
+            if (rs.next()) return Math.max(0L, rs.getLong(1));
+        } catch (SQLException e) {
+            if (!SqlCompat.isUnknownColumn(e)) e.printStackTrace();
+        }
+        return 0L;
+    }
+
+    public double getGlobalOverclockMultiplier() {
+        String sql = "SELECT global_overclock_multiplier FROM server_gamestate WHERE id = 1";
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+
+            if (rs.next()) {
+                double v = rs.getDouble(1);
+                if (Double.isNaN(v) || Double.isInfinite(v) || v <= 0.0) return 1.0;
+                return v;
+            }
+        } catch (SQLException e) {
+            if (!SqlCompat.isUnknownColumn(e)) e.printStackTrace();
+        }
+        return 1.0;
+    }
+
+    public long getGlobalOverclockLastDurationSeconds() {
+        String sql = "SELECT global_overclock_last_duration_seconds FROM server_gamestate WHERE id = 1";
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+
+            if (rs.next()) return Math.max(0L, rs.getLong(1));
+        } catch (SQLException e) {
+            if (!SqlCompat.isUnknownColumn(e)) e.printStackTrace();
+        }
+        return 0L;
+    }
+
+    public void setGlobalOverclockState(long endEpochMs, double multiplier, long lastDurationSeconds) {
+        long endMs = Math.max(0L, endEpochMs);
+        double mult = multiplier;
+        if (Double.isNaN(mult) || Double.isInfinite(mult) || mult <= 0.0) mult = 1.0;
+
+        long lastDur = Math.max(0L, lastDurationSeconds);
+
+        String sql = "UPDATE server_gamestate SET global_overclock_end_ms = ?, global_overclock_multiplier = ?, global_overclock_last_duration_seconds = ? WHERE id = 1";
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+
+            ps.setLong(1, endMs);
+            ps.setDouble(2, mult);
+            ps.setLong(3, lastDur);
+            ps.executeUpdate();
+
+        } catch (SQLException e) {
+            if (!SqlCompat.isUnknownColumn(e)) e.printStackTrace();
+        }
+    }
 }
