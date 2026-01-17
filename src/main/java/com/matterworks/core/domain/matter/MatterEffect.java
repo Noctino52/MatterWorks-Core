@@ -4,5 +4,4 @@ public enum MatterEffect {
     SHINY,
     BLAZING,
     GLITCH,
-    RADIOACTIVE
 }

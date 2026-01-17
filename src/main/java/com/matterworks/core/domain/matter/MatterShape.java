@@ -4,5 +4,4 @@ public enum MatterShape {
     CUBE,
     SPHERE,
     PYRAMID,
-    CYLINDER
 }
