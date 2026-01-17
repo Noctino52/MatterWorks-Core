@@ -30,6 +30,7 @@ import java.util.*;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class MatterWorksGUI extends JFrame {
 
@@ -77,6 +78,21 @@ public class MatterWorksGUI extends JFrame {
 
     // NEW: cache per enable del bottone item cap "+"
     private volatile boolean lastItemCapPlusEnabled = false;
+
+    // ===== Economy DB cache (to avoid blocking EDT) =====
+    private final AtomicBoolean economyFetchRunning = new AtomicBoolean(false);
+    private volatile UUID economyCacheUuid = null;
+    private volatile long economyCacheLoadedAtMs = 0L;
+
+    private volatile Long cachedPlotId = null;
+    private volatile int cachedBlockCapBreakerOwned = 0;
+    private volatile int cachedPlotSizeBreakerOwned = 0;
+
+    private volatile int cachedVoidItemCapStep = 0;
+    private volatile int cachedDefaultItemCap = 1;
+    private volatile int cachedItemCapStep = 0;
+    private volatile int cachedMaxItemCap = Integer.MAX_VALUE;
+
 
 
 
@@ -275,35 +291,83 @@ public class MatterWorksGUI extends JFrame {
     }
 
     private void handleSOS() {
-        if (currentPlayerUuid == null) return;
-        gridManager.touchPlayer(currentPlayerUuid);
-        if (gridManager.attemptBailout(currentPlayerUuid)) {
-            JOptionPane.showMessageDialog(this, "SOS approved! Funds granted.");
-            updateEconomyLabelsForce();
-        }
+        UUID u = currentPlayerUuid;
+        if (u == null) return;
+
+        setLoading(true);
+
+        runOffEdt(() -> {
+            boolean ok = false;
+            try {
+                gridManager.touchPlayer(u);
+                ok = gridManager.attemptBailout(u);
+            } catch (Throwable t) {
+                t.printStackTrace();
+            } finally {
+                final boolean fOk = ok;
+                SwingUtilities.invokeLater(() -> {
+                    setLoading(false);
+                    if (fOk) JOptionPane.showMessageDialog(this, "SOS approved! Funds granted.");
+                    requestEconomyRefresh();
+                });
+            }
+        });
     }
+
 
     private void handleSave() {
-        if (currentPlayerUuid != null) gridManager.touchPlayer(currentPlayerUuid);
-        onSave.run();
-        updateEconomyLabelsForce();
+        UUID u = currentPlayerUuid;
+        if (u == null) return;
+
+        setLoading(true);
+
+        runOffEdt(() -> {
+            try {
+                gridManager.touchPlayer(u);
+                onSave.run();
+            } catch (Throwable t) {
+                t.printStackTrace();
+            } finally {
+                SwingUtilities.invokeLater(() -> {
+                    setLoading(false);
+                    requestEconomyRefresh();
+                });
+            }
+        });
     }
 
+
     private void handleReset() {
-        if (currentPlayerUuid == null) return;
+        UUID u = currentPlayerUuid;
+        if (u == null) return;
+
         int res = JOptionPane.showConfirmDialog(
                 this,
                 "Reset plot? All progress will be lost.",
                 "Reset",
                 JOptionPane.YES_NO_OPTION
         );
-        if (res == JOptionPane.YES_OPTION) {
-            gridManager.touchPlayer(currentPlayerUuid);
-            gridManager.resetUserPlot(currentPlayerUuid);
-            factoryPanel.forceRefreshNow();
-            updateEconomyLabelsForce();
-        }
+        if (res != JOptionPane.YES_OPTION) return;
+
+        setLoading(true);
+
+        runOffEdt(() -> {
+            try {
+                gridManager.touchPlayer(u);
+                gridManager.resetUserPlot(u);
+            } catch (Throwable t) {
+                t.printStackTrace();
+            } finally {
+                SwingUtilities.invokeLater(() -> {
+                    setLoading(false);
+                    factoryPanel.forceRefreshNow();
+                    requestEconomyRefresh();
+                });
+            }
+        });
     }
+
+
 
     private void handlePrestige() {
         UUID u = currentPlayerUuid;
@@ -450,25 +514,36 @@ public class MatterWorksGUI extends JFrame {
         // '-' admin only
         if (dir < 0 && !isAdmin) return;
 
-        boolean ok;
-        if (dir > 0) {
-            // CORE must handle: admin path OR consume plot_size_breaker for players
-            ok = gridManager.increasePlotUnlockedArea(u);
-        } else {
-            ok = gridManager.decreasePlotUnlockedArea(u);
-        }
+        setLoading(true);
 
-        if (!ok) {
-            String msg = (dir > 0)
-                    ? "Impossibile espandere: gi\u00e0 al MAX o non consentito."
-                    : "Impossibile ridurre: ci sono macchine fuori dalla nuova area o sei gi\u00e0 allo START.";
-            JOptionPane.showMessageDialog(this, msg, "Plot Resize", JOptionPane.WARNING_MESSAGE);
-            return;
-        }
+        runOffEdt(() -> {
+            boolean ok = false;
+            try {
+                if (dir > 0) ok = gridManager.increasePlotUnlockedArea(u);
+                else ok = gridManager.decreasePlotUnlockedArea(u);
+            } catch (Throwable t) {
+                t.printStackTrace();
+            } finally {
+                final boolean fOk = ok;
 
-        factoryPanel.forceRefreshNow();
-        updateEconomyLabelsForce();
+                SwingUtilities.invokeLater(() -> {
+                    setLoading(false);
+
+                    if (!fOk) {
+                        String msg = (dir > 0)
+                                ? "Impossibile espandere: già al MAX o non consentito."
+                                : "Impossibile ridurre: ci sono macchine fuori dalla nuova area o sei già allo START.";
+                        JOptionPane.showMessageDialog(this, msg, "Plot Resize", JOptionPane.WARNING_MESSAGE);
+                        return;
+                    }
+
+                    factoryPanel.forceRefreshNow();
+                    requestEconomyRefresh();
+                });
+            }
+        });
     }
+
 
 
     // NEW: Item cap "+" (NO admin gate). Core decide se applicare o meno.
@@ -518,8 +593,74 @@ public class MatterWorksGUI extends JFrame {
 
 
     private void requestEconomyRefresh() {
-        SwingUtilities.invokeLater(this::updateEconomyLabelsForce);
+        UUID u = currentPlayerUuid;
+
+        // If no player selected, just paint the empty state on EDT.
+        if (u == null) {
+            SwingUtilities.invokeLater(this::updateEconomyLabelsForce);
+            return;
+        }
+
+        // Avoid parallel fetches.
+        if (!economyFetchRunning.compareAndSet(false, true)) {
+            return;
+        }
+
+        runOffEdt(() -> {
+            try {
+                PlayerProfile p = gridManager.getCachedProfile(u);
+                if (p == null) return;
+
+                boolean isAdmin = p.isAdmin();
+                long now = System.currentTimeMillis();
+
+                // Refresh DB cache at most once per 800ms per player.
+                boolean mustReload = (economyCacheUuid == null)
+                        || !economyCacheUuid.equals(u)
+                        || (now - economyCacheLoadedAtMs) > 800L;
+
+                if (mustReload) {
+                    Long pid = null;
+                    try { pid = repository.getPlotId(u); } catch (Throwable ignored) {}
+
+                    int blockBreaker = 0;
+                    int plotBreaker = 0;
+
+                    if (!isAdmin) {
+                        try { blockBreaker = repository.getInventoryItemCount(u, "block_cap_breaker"); } catch (Throwable ignored) {}
+                        try { plotBreaker  = repository.getInventoryItemCount(u, "plot_size_breaker"); } catch (Throwable ignored) {}
+                    }
+
+                    int voidStep = 0;
+                    int baseCap = 1;
+                    int step = 0;
+                    int maxCap = Integer.MAX_VALUE;
+
+                    try { voidStep = safeGetVoidItemCapStep(); } catch (Throwable ignored) {}
+                    try { baseCap = safeGetDefaultItemCap(); } catch (Throwable ignored) {}
+                    try { step = safeGetItemCapStep(); } catch (Throwable ignored) {}
+                    try { maxCap = safeGetMaxItemCap(); } catch (Throwable ignored) {}
+
+                    economyCacheUuid = u;
+                    economyCacheLoadedAtMs = now;
+
+                    cachedPlotId = pid;
+                    cachedBlockCapBreakerOwned = Math.max(0, blockBreaker);
+                    cachedPlotSizeBreakerOwned = Math.max(0, plotBreaker);
+
+                    cachedVoidItemCapStep = Math.max(0, voidStep);
+                    cachedDefaultItemCap = Math.max(1, baseCap);
+                    cachedItemCapStep = Math.max(0, step);
+                    cachedMaxItemCap = (maxCap <= 0 ? Integer.MAX_VALUE : maxCap);
+                }
+            } finally {
+                economyFetchRunning.set(false);
+                // Apply labels on EDT (fast, no DB).
+                SwingUtilities.invokeLater(this::updateEconomyLabelsForce);
+            }
+        });
     }
+
 
     // ===== Tabs =====
 
@@ -826,7 +967,7 @@ public class MatterWorksGUI extends JFrame {
         int voidCoins = p.getVoidCoins();
         int prestige = Math.max(0, p.getPrestigeLevel());
 
-        Long pid = repository.getPlotId(u);
+        Long pid = cachedPlotId;
 
         // IMPORTANT: placed count includes structures (STRUCTURE_GENERIC) via runtime snapshot.
         int placed = computePlacedItemsIncludingStructures(u);
@@ -845,28 +986,13 @@ public class MatterWorksGUI extends JFrame {
 
 
 
-        // enable item cap "+" for everyone if step > 0 (no admin gate)
-        int voidStep = safeGetVoidItemCapStep();
+        int voidStep = cachedVoidItemCapStep;
 
-        final String BREAKER_ITEM_ID = "block_cap_breaker";
+        boolean itemCapPlusEnabled = (voidStep > 0) && (isAdmin || cachedBlockCapBreakerOwned > 0);
 
-        int breakerOwned = 0;
-        if (!isAdmin && voidStep > 0) {
-            try { breakerOwned = repository.getInventoryItemCount(u, BREAKER_ITEM_ID); }
-            catch (Throwable ignored) {}
-        }
-        boolean itemCapPlusEnabled = (voidStep > 0) && (isAdmin || breakerOwned > 0);
+        boolean plotPlusEnabled = isAdmin || cachedPlotSizeBreakerOwned > 0;
+        boolean plotMinusEnabled = isAdmin; // '-' is admin-only (as before)
 
-        final String PLOT_BREAKER_ITEM_ID = "plot_size_breaker";
-
-        int plotBreakerOwned = 0;
-        if (!isAdmin) {
-            try { plotBreakerOwned = repository.getInventoryItemCount(u, PLOT_BREAKER_ITEM_ID); }
-            catch (Throwable ignored) {}
-        }
-
-        boolean plotPlusEnabled = isAdmin || plotBreakerOwned > 0;
-        boolean plotMinusEnabled = isAdmin; // '-' resta admin-only
 
 
         String plotAreaStr = null;

@@ -8,10 +8,10 @@ import com.matterworks.core.ui.MariaDBAdapter;
 import javax.swing.*;
 import javax.swing.Timer;
 import java.awt.*;
-import java.lang.reflect.Method;
 import java.util.*;
 import java.util.List;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class VoidShopPanel extends JPanel {
 
@@ -24,11 +24,12 @@ public class VoidShopPanel extends JPanel {
     private final Map<String, Row> rows = new HashMap<>();
 
     private final ExecutorService exec = Executors.newSingleThreadExecutor(r -> {
-        Thread t = new Thread(r, "void-shop-panel");
+        Thread t = new Thread(r, "mw-void-shop-panel");
         t.setDaemon(true);
         return t;
     });
 
+    private final AtomicBoolean refreshRunning = new AtomicBoolean(false);
     private final Timer refreshTimer;
 
     private volatile boolean disposed = false;
@@ -36,6 +37,12 @@ public class VoidShopPanel extends JPanel {
     private static final Color BG = new Color(30, 30, 35);
     private static final Color CARD = new Color(50, 50, 55);
     private static final Color PURPLE = new Color(190, 0, 220);
+
+    private static final Color BUY_OK = new Color(120, 40, 180);
+    private static final Color BUY_NO = new Color(80, 80, 80);
+
+    private static final Color USE_OK = new Color(60, 120, 80);
+    private static final Color USE_NO = new Color(80, 80, 80);
 
     private static final class Row {
         final String itemId;
@@ -46,6 +53,8 @@ public class VoidShopPanel extends JPanel {
         final JButton btnUse;
 
         volatile int lastOwned = Integer.MIN_VALUE;
+        volatile boolean lastCanBuy = true;
+        volatile boolean lastCanUse = true;
 
         Row(String itemId, JLabel lblTitle, JLabel lblDetail, JLabel lblOwned, JButton btnBuy, JButton btnUse) {
             this.itemId = itemId;
@@ -98,10 +107,11 @@ public class VoidShopPanel extends JPanel {
 
         renderCatalog();
 
-        refreshTimer = new Timer(700, e -> refreshStates());
+        // IMPORTANT: refresh timer must never do DB work on EDT.
+        refreshTimer = new Timer(900, e -> requestRefreshAsync());
         refreshTimer.start();
 
-        refreshStates();
+        requestRefreshAsync();
     }
 
     public void dispose() {
@@ -179,7 +189,7 @@ public class VoidShopPanel extends JPanel {
         JButton btnBuy = new JButton("BUY");
         btnBuy.setFont(new Font("SansSerif", Font.BOLD, 11));
         btnBuy.setFocusable(false);
-        btnBuy.setBackground(new Color(120, 40, 180));
+        btnBuy.setBackground(BUY_OK);
         btnBuy.setForeground(Color.WHITE);
         btnBuy.setToolTipText("Buy 1x for " + it.voidPrice() + " VOID coins");
         btnBuy.addActionListener(e -> buyAsync(id));
@@ -187,7 +197,7 @@ public class VoidShopPanel extends JPanel {
         JButton btnUse = new JButton("USE");
         btnUse.setFont(new Font("SansSerif", Font.BOLD, 11));
         btnUse.setFocusable(false);
-        btnUse.setBackground(new Color(60, 120, 80));
+        btnUse.setBackground(USE_OK);
         btnUse.setForeground(Color.WHITE);
         btnUse.setToolTipText("Use 1x from your inventory (if supported)");
         btnUse.addActionListener(e -> useAsync(id));
@@ -221,23 +231,28 @@ public class VoidShopPanel extends JPanel {
         if (playerUuid == null) return;
 
         exec.submit(() -> {
+            boolean ok = false;
             try {
-                boolean ok = gridManager.buyVoidShopItem(playerUuid, itemId, 1);
-                SwingUtilities.invokeLater(() -> {
-                    if (!ok) {
-                        JOptionPane.showMessageDialog(
-                                this,
-                                "Not enough VOID coins (or purchase not allowed).",
-                                "Void Shop",
-                                JOptionPane.WARNING_MESSAGE
-                        );
-                    }
-                    if (onEconomyMaybeChanged != null) onEconomyMaybeChanged.run();
-                    refreshStates();
-                });
+                ok = gridManager.buyVoidShopItem(playerUuid, itemId, 1);
             } catch (Throwable t) {
                 t.printStackTrace();
             }
+
+            final boolean fOk = ok;
+            SwingUtilities.invokeLater(() -> {
+                if (disposed) return;
+
+                if (!fOk) {
+                    JOptionPane.showMessageDialog(
+                            this,
+                            "Not enough VOID coins (or purchase not allowed).",
+                            "Void Shop",
+                            JOptionPane.WARNING_MESSAGE
+                    );
+                }
+                if (onEconomyMaybeChanged != null) onEconomyMaybeChanged.run();
+                requestRefreshAsync();
+            });
         });
     }
 
@@ -246,130 +261,114 @@ public class VoidShopPanel extends JPanel {
         if (playerUuid == null) return;
 
         exec.submit(() -> {
+            boolean ok = false;
+            String msgOk = "Item used!";
+            String msgFail = "Use failed: missing item (or not allowed).";
+
             try {
-                if (!isOverclockItem(itemId)) {
-                    SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(
-                            this,
-                            "This item cannot be used from here yet.",
-                            "Void Shop",
-                            JOptionPane.INFORMATION_MESSAGE
-                    ));
-                    return;
+                // Keep current behavior: useOverclock supports also global overclock route.
+                ok = gridManager.useOverclock(playerUuid, itemId);
+                msgOk = "Activated!";
+            } catch (Throwable ignored) {
+                ok = false;
+            }
+
+            final boolean fOk = ok;
+            final String fMsgOk = msgOk;
+            final String fMsgFail = msgFail;
+
+            SwingUtilities.invokeLater(() -> {
+                if (disposed) return;
+
+                JOptionPane.showMessageDialog(
+                        this,
+                        fOk ? fMsgOk : fMsgFail,
+                        "Void Shop",
+                        fOk ? JOptionPane.INFORMATION_MESSAGE : JOptionPane.WARNING_MESSAGE
+                );
+
+                if (onEconomyMaybeChanged != null) onEconomyMaybeChanged.run();
+                requestRefreshAsync();
+            });
+        });
+    }
+
+    /**
+     * Runs refresh in background, then applies UI updates on EDT.
+     * NO DB calls on EDT.
+     */
+    private void requestRefreshAsync() {
+        if (disposed) return;
+        if (playerUuid == null) return;
+        if (!refreshRunning.compareAndSet(false, true)) return;
+
+        exec.submit(() -> {
+            try {
+                PlayerProfile p = gridManager.getCachedProfile(playerUuid);
+                if (p == null) return;
+
+                final int voidCoins = p.getVoidCoins();
+                final boolean admin = p.isAdmin();
+
+                List<VoidShopItem> catalog = List.of();
+                try { catalog = gridManager.getVoidShopCatalog(); } catch (Throwable ignored) {}
+                if (catalog == null) catalog = List.of();
+
+                // Pre-index catalog by id (avoid O(n^2) on EDT)
+                final Map<String, VoidShopItem> byId = new HashMap<>();
+                for (VoidShopItem it : catalog) {
+                    if (it != null && it.itemId() != null) byId.put(it.itemId(), it);
                 }
 
-                boolean ok = false;
-
-                // Prefer direct call if present
-                try {
-                    ok = gridManager.useOverclock(playerUuid, itemId);
-                } catch (Throwable ignored) {
-                    ok = false;
+                // Load owned counts in background (still DB, but not EDT)
+                final Map<String, Integer> ownedById = new HashMap<>();
+                for (Row r : rows.values()) {
+                    int owned = 0;
+                    try { owned = repository.getInventoryItemCount(playerUuid, r.itemId); }
+                    catch (Throwable ignored) {}
+                    ownedById.put(r.itemId, owned);
                 }
 
-                final boolean fOk = ok;
                 SwingUtilities.invokeLater(() -> {
-                    if (!fOk) {
-                        JOptionPane.showMessageDialog(
-                                this,
-                                "Use failed: missing item (or not allowed).",
-                                "Void Shop",
-                                JOptionPane.WARNING_MESSAGE
-                        );
-                    } else {
-                        JOptionPane.showMessageDialog(
-                                this,
-                                "Overclock activated!",
-                                "Void Shop",
-                                JOptionPane.INFORMATION_MESSAGE
-                        );
-                    }
-                    if (onEconomyMaybeChanged != null) onEconomyMaybeChanged.run();
-                    refreshStates();
+                    if (disposed) return;
+                    applySnapshotOnEdt(voidCoins, admin, byId, ownedById);
                 });
 
-            } catch (Throwable t) {
-                t.printStackTrace();
+            } finally {
+                refreshRunning.set(false);
             }
         });
     }
 
-    private void refreshStates() {
-        if (disposed) return;
-        if (playerUuid == null) return;
-
-        PlayerProfile p = gridManager.getCachedProfile(playerUuid);
-        if (p == null) return;
-
-        int voidCoins = p.getVoidCoins();
-        boolean admin = p.isAdmin();
-
-        List<VoidShopItem> catalog = Collections.emptyList();
-        try { catalog = gridManager.getVoidShopCatalog(); } catch (Throwable ignored) {}
+    private void applySnapshotOnEdt(int voidCoins,
+                                    boolean admin,
+                                    Map<String, VoidShopItem> catalogById,
+                                    Map<String, Integer> ownedById) {
 
         for (Row r : rows.values()) {
-            int owned = 0;
-            try { owned = repository.getInventoryItemCount(playerUuid, r.itemId); }
-            catch (Throwable ignored) {}
+            int owned = ownedById.getOrDefault(r.itemId, 0);
 
             if (owned != r.lastOwned) {
                 r.lastOwned = owned;
                 r.lblOwned.setText("Owned: " + owned);
             }
 
-            VoidShopItem def = null;
-            try {
-                if (catalog != null) {
-                    for (VoidShopItem x : catalog) {
-                        if (x != null && r.itemId.equals(x.itemId())) { def = x; break; }
-                    }
-                }
-            } catch (Throwable ignored) {}
-
+            VoidShopItem def = catalogById.get(r.itemId);
             int price = (def != null ? Math.max(0, def.voidPrice()) : Integer.MAX_VALUE);
 
             boolean canBuy = admin || voidCoins >= price;
-            r.btnBuy.setEnabled(canBuy);
-            r.btnBuy.setBackground(canBuy ? new Color(120, 40, 180) : new Color(90, 90, 40));
-
-            // USE button rules
-            boolean usable = isOverclockItem(r.itemId);
-
-            boolean canUse;
-            if (!usable) {
-                canUse = false;
-            } else {
-                // If GridManager has canUseOverclock, use it; otherwise fallback to (admin || owned>0)
-                Boolean canUseFromCore = tryCallBoolean(gridManager, "canUseOverclock",
-                        new Class<?>[]{UUID.class, String.class},
-                        new Object[]{playerUuid, r.itemId});
-                canUse = (canUseFromCore != null) ? canUseFromCore : (admin || owned > 0);
+            if (canBuy != r.lastCanBuy) {
+                r.lastCanBuy = canBuy;
+                r.btnBuy.setEnabled(canBuy);
+                r.btnBuy.setBackground(canBuy ? BUY_OK : BUY_NO);
             }
 
-            r.btnUse.setEnabled(canUse);
-            r.btnUse.setBackground(canUse ? new Color(60, 120, 80) : new Color(70, 70, 70));
-        }
-    }
-
-    private boolean isOverclockItem(String itemId) {
-        if (itemId == null) return false;
-        return itemId.equals("overclock_2h")
-                || itemId.equals("overclock_12h")
-                || itemId.equals("overclock_24h")
-                || itemId.equals("overclock_life")
-                || itemId.equals("global_overclock_2h")
-                || itemId.equals("global_overclock_12h")
-                || itemId.equals("global_overclock_24h");
-    }
-
-
-    private static Boolean tryCallBoolean(Object target, String methodName, Class<?>[] argTypes, Object[] args) {
-        try {
-            Method m = target.getClass().getMethod(methodName, argTypes);
-            Object r = m.invoke(target, args);
-            if (r instanceof Boolean b) return b;
-            return null;
-        } catch (Throwable ignored) {
-            return null;
+            boolean canUse = admin || owned > 0;
+            if (canUse != r.lastCanUse) {
+                r.lastCanUse = canUse;
+                r.btnUse.setEnabled(canUse);
+                r.btnUse.setBackground(canUse ? USE_OK : USE_NO);
+            }
         }
     }
 }

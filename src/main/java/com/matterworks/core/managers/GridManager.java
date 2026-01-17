@@ -26,6 +26,9 @@ import com.matterworks.core.domain.telemetry.production.KeyKind;
 import com.matterworks.core.domain.factions.FactionDefinition;
 import com.matterworks.core.domain.factions.FactionRotationInfo;
 
+import com.matterworks.core.synchronization.GridSaverService;
+import com.matterworks.core.ui.ServerConfig;
+
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -59,6 +62,11 @@ public class GridManager {
     private final GridWorldService world;
     private final GridEconomyService economy;
 
+    private volatile GridSaverService saverService;
+
+
+    private final AsyncEconomyWriter economyWriter;
+
     // ==========================================================
     // GLOBAL OVERCLOCK CACHE (server-wide, real-time)
     // ==========================================================
@@ -83,6 +91,7 @@ public class GridManager {
         this.economy = new GridEconomyService(this, repository, blockRegistry, techManager, ioExecutor, state, world);
 
         this.marketManager = new MarketManager(this, repository);
+        this.economyWriter = new AsyncEconomyWriter(repository);
 
         refreshGlobalOverclockCache(true);
     }
@@ -188,6 +197,12 @@ public class GridManager {
         }
     }
 
+    public void setSaverService(GridSaverService saverService) {
+        this.saverService = saverService;
+    }
+
+
+
 
 
     boolean increasePlotUnlockedAreaUnchecked(UUID ownerId) {
@@ -221,8 +236,6 @@ public class GridManager {
     public void touchPlayer(UUID ownerId) { state.touchPlayer(ownerId); }
 
     public PlayerProfile getCachedProfile(UUID uuid) { return state.getCachedProfile(uuid); }
-    public void addMoney(UUID playerId, double amount, String actionType, String itemId) { economy.addMoney(playerId, amount, actionType, itemId); }
-
     public boolean buyItem(UUID playerId, String itemId, int amount) { return economy.buyItem(playerId, itemId, amount); }
     public double getEffectiveShopUnitPrice(UUID playerId, String itemId) { return economy.getEffectiveShopUnitPrice(playerId, itemId); }
     public double getEffectiveShopUnitPrice(PlayerProfile p, String itemId) { return economy.getEffectiveShopUnitPrice(p, itemId); }
@@ -780,9 +793,51 @@ public double getEffectiveMachineSpeedMultiplier(UUID ownerId, String machineTyp
             return java.util.List.of();
         }
     }
-    public void addMoney(UUID playerId, double amount, String actionType, String itemId, Integer factionId) {
-        economy.addMoney(playerId, amount, actionType, itemId, factionId, amount);
+    public ServerConfig getServerConfig() {
+        return state.getServerConfig();
     }
+
+
+    public void markPlotDirty(UUID ownerId) {
+        GridSaverService s = this.saverService;
+        if (s != null && ownerId != null) {
+            s.markPlotDirty(ownerId);
+        }
+    }
+
+    public void addMoney(UUID playerId, double amount, String actionType, String itemId) {
+        addMoney(playerId, amount, actionType, itemId, (Integer) null, (Double) null);
+    }
+
+    public void addMoney(UUID playerId, double amount, String actionType, String itemId, int factionId) {
+        addMoney(playerId, amount, actionType, itemId, Integer.valueOf(factionId), (Double) null);
+    }
+
+    void addMoney(UUID playerId, double amount, String actionType, String itemId, Integer factionId, Double value) {
+        PlayerProfile p = state.getCachedProfile(playerId);
+        if (p == null) return;
+
+        // Update in-memory only (fast, tick-safe)
+        p.modifyMoney(amount);
+        state.activeProfileCache.put(playerId, p);
+
+        // Mark profile as dirty (will be saved async)
+        economyWriter.markProfileDirty(playerId, p);
+
+        // If caller didn't provide value, default to "amount" for MATTER_SELL
+        Double valueToLog = value;
+        if (valueToLog == null && "MATTER_SELL".equals(actionType)) {
+            valueToLog = amount;
+        }
+
+        // Log transaction asynchronously + aggregated
+        economyWriter.recordTransaction(p, actionType, "MONEY", amount, itemId, factionId, valueToLog);
+    }
+
+
+
+
+
 
 
 

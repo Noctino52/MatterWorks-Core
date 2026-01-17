@@ -30,13 +30,14 @@ public class FactoryPanel extends JPanel {
         setFocusable(true);
         setDoubleBuffered(true);
 
-        // ✅ abilita tooltip e rendilo "dopo 0.5s di hover"
+        // Tooltip: Swing will call getToolTipText() frequently while hovering.
+        // We must keep getToolTipText() O(1) and NEVER do heavy work on EDT.
         ToolTipManager.sharedInstance().registerComponent(this);
-        ToolTipManager.sharedInstance().setInitialDelay(500);   // 0.5s prima che appaia
-        ToolTipManager.sharedInstance().setReshowDelay(500);    // evita riapparizione immediata spostandosi tra celle
+        ToolTipManager.sharedInstance().setInitialDelay(500);
+        ToolTipManager.sharedInstance().setReshowDelay(500);
         ToolTipManager.sharedInstance().setDismissDelay(60_000);
 
-        // serve per "accendere" i tooltip su Swing (poi getToolTipText viene chiamato dinamicamente)
+        // Required by Swing to enable dynamic tooltips
         setToolTipText(" ");
     }
 
@@ -88,8 +89,10 @@ public class FactoryPanel extends JPanel {
     @Override
     public String getToolTipText(MouseEvent event) {
         if (event == null) return null;
+        // Must be constant-time, cached-only.
         return controller.getInspectionTooltipHtml(event.getX(), event.getY());
     }
+
 
     @Override
     protected void paintComponent(Graphics g) {

@@ -47,6 +47,7 @@ public class Main {
 
         // ✅ GridSaverService nel tuo refactor deve accettare MariaDBAdapter (o comunque non IRepository)
         GridSaverService saverService = new GridSaverService(gridManager, repository);
+        gridManager.setSaverService(saverService);
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             try {

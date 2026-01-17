@@ -9,17 +9,28 @@ import java.util.concurrent.atomic.AtomicLong;
 
 public class FactoryLoop {
 
+    private static final long TICK_MS = 50L; // 20 TPS
+
     private final GridManager gridManager;
     private final ScheduledExecutorService scheduler;
     private final AtomicLong currentTick = new AtomicLong(0);
 
     private volatile boolean running = false;
 
+    // light telemetry
+    private volatile long lastWarnMs = 0L;
+
     public FactoryLoop(GridManager gridManager) {
         this.gridManager = gridManager;
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "mw-factory-loop");
             t.setDaemon(true);
+
+            // Keep EDT responsive in the Swing mock app
+            try {
+                t.setPriority(Math.max(Thread.MIN_PRIORITY, Thread.NORM_PRIORITY - 1));
+            } catch (Throwable ignored) {}
+
             return t;
         });
     }
@@ -28,20 +39,34 @@ public class FactoryLoop {
         if (running) return;
         running = true;
 
-        // 20 TPS -> 50ms per tick
-        scheduler.scheduleAtFixedRate(() -> {
+        // CRITICAL FIX:
+        // scheduleWithFixedDelay does NOT try to "catch up" if a tick is slow.
+        // This prevents CPU saturation and UI starvation when a tick spikes.
+        scheduler.scheduleWithFixedDelay(() -> {
             if (!running) return;
 
+            long startNs = System.nanoTime();
             try {
                 long tick = currentTick.incrementAndGet();
                 gridManager.tick(tick);
             } catch (Throwable t) {
                 System.err.println("CRITICAL: Exception in Factory Loop!");
                 t.printStackTrace();
-            }
-        }, 0, 50, TimeUnit.MILLISECONDS);
+            } finally {
+                long elapsedMs = (System.nanoTime() - startNs) / 1_000_000L;
 
-        System.out.println("🏭 Factory Loop Started.");
+                // Warn if tick is taking too long (once per second max)
+                if (elapsedMs > TICK_MS) {
+                    long now = System.currentTimeMillis();
+                    if (now - lastWarnMs > 1000L) {
+                        lastWarnMs = now;
+                        System.out.println("[PERF] Tick over budget: " + elapsedMs + "ms (budget=" + TICK_MS + "ms)");
+                    }
+                }
+            }
+        }, 0, TICK_MS, TimeUnit.MILLISECONDS);
+
+        System.out.println("Factory Loop Started.");
     }
 
     public void stop() {

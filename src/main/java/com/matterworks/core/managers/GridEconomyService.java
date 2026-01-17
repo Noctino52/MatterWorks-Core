@@ -7,8 +7,8 @@ import com.matterworks.core.model.PlotUnlockState;
 import com.matterworks.core.ui.MariaDBAdapter;
 import com.matterworks.core.ui.ServerConfig;
 
-import java.util.List;
 import java.util.UUID;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 
 final class GridEconomyService {
@@ -20,6 +20,9 @@ final class GridEconomyService {
     private final ExecutorService ioExecutor;
     private final GridRuntimeState state;
     private final GridWorldService world;
+
+    // NEW: async write-behind for money + transactions
+    private final AsyncEconomyWriter economyWriter;
 
     private static final String ITEM_OVERCLOCK_2H = "overclock_2h";
     private static final String ITEM_OVERCLOCK_12H = "overclock_12h";
@@ -46,6 +49,8 @@ final class GridEconomyService {
         this.ioExecutor = ioExecutor;
         this.state = state;
         this.world = world;
+
+        this.economyWriter = new AsyncEconomyWriter(repository);
     }
 
     // ==========================================================
@@ -117,14 +122,6 @@ final class GridEconomyService {
             repository.logTransaction(p, "VOID_SHOP_USE_ADMIN", "OVERCLOCK", 0.0, itemId);
         }
 
-        /*
-        System.out.println("[OVERCLOCK] Applied item=" + itemId
-                + " owner=" + ownerId
-                + " startPlaytime=" + playtimeNow
-                + " durationSeconds=" + durationSeconds
-                + " multiplier=2.0");
-         */
-
         return true;
     }
 
@@ -166,7 +163,7 @@ final class GridEconomyService {
         // Persist
         repository.setGlobalOverclockState(newEndMs, newMult, durationSeconds);
 
-        // Update GridManager cache (no need to touch GridRuntimeState)
+        // Update GridManager cache
         gridManager._setGlobalOverclockStateCached(newEndMs, newMult, durationSeconds);
 
         PlayerProfile p = repository.loadPlayerProfile(activatorId);
@@ -203,7 +200,6 @@ final class GridEconomyService {
 
         int unit = Math.max(0, def.voidPrice());
 
-        // always atomic path (MariaDB-only)
         boolean ok = repository.purchaseVoidShopItemAtomic(playerId, premiumItemId, unit, amount, p.isAdmin());
         if (!ok) return false;
 
@@ -220,116 +216,35 @@ final class GridEconomyService {
         return true;
     }
 
-    boolean canInstantPrestige(UUID ownerId) {
-        if (ownerId == null) return false;
-        PlayerProfile p = state.getCachedProfile(ownerId);
-        if (p != null && p.isAdmin()) return true;
-        return repository.getInventoryItemCount(ownerId, GridManager.ITEM_INSTANT_PRESTIGE) > 0;
-    }
-
-    void instantPrestigeUser(UUID ownerId) {
-        if (ownerId == null) return;
-        state.touchPlayer(ownerId);
-
-        PlayerProfile cached = state.getCachedProfile(ownerId);
-        if (cached == null) return;
-
-        if (!cached.isAdmin()) {
-            int have = repository.getInventoryItemCount(ownerId, GridManager.ITEM_INSTANT_PRESTIGE);
-            if (have <= 0) return;
-        }
-
-        state.reloadServerConfig();
-        final ServerConfig serverConfig = state.getServerConfig();
-        final int addVoidCoins = Math.max(0, serverConfig.prestigeVoidCoinsAdd());
-        final int plotBonus = Math.max(0, serverConfig.prestigePlotBonus());
-
-        ioExecutor.submit(() -> {
-            // save states but do NOT reset DB
-            world.saveAndUnloadSpecific(ownerId);
-
-            // consume premium item
-            try {
-                PlayerProfile p = repository.loadPlayerProfile(ownerId);
-                if (p == null) return;
-
-                if (!p.isAdmin()) {
-                    int have = repository.getInventoryItemCount(ownerId, GridManager.ITEM_INSTANT_PRESTIGE);
-                    if (have <= 0) return;
-
-                    repository.modifyInventoryItem(ownerId, GridManager.ITEM_INSTANT_PRESTIGE, -1);
-                    repository.logTransaction(p, "INSTANT_PRESTIGE_USE", "ITEM", 1, GridManager.ITEM_INSTANT_PRESTIGE);
-                }
-            } catch (Throwable t) {
-                t.printStackTrace();
-                return;
-            }
-
-            // plot bonus (unlocked_extra_x/y)
-            try {
-                PlotUnlockState cur = repository.loadPlotUnlockState(ownerId);
-                if (cur == null) cur = PlotUnlockState.zero();
-
-                PlotUnlockState upd = new PlotUnlockState(
-                        cur.extraX() + plotBonus,
-                        cur.extraY() + plotBonus
-                );
-                repository.updatePlotUnlockState(ownerId, upd);
-            } catch (Throwable t) {
-                t.printStackTrace();
-            }
-
-            // prestige + void coins (NO reset)
-            try {
-                PlayerProfile p = repository.loadPlayerProfile(ownerId);
-                if (p != null) {
-                    p.setPrestigeLevel(p.getPrestigeLevel() + 1);
-                    if (addVoidCoins > 0) p.modifyVoidCoins(addVoidCoins);
-
-                    repository.savePlayerProfile(p);
-                    state.activeProfileCache.put(ownerId, p);
-
-                    repository.logTransaction(p, "INSTANT_PRESTIGE", "NONE", 0, "prestige+1");
-                    if (addVoidCoins > 0) {
-                        repository.logTransaction(p, "INSTANT_PRESTIGE_REWARD", "VOID_COINS", addVoidCoins, "prestige_reward");
-                    }
-                }
-            } catch (Throwable t) {
-                t.printStackTrace();
-            }
-
-            // reload to update UI/world
-            world.loadPlotSynchronously(ownerId);
-        });
-    }
-
     // ==========================================================
     // PROFILES / MONEY
     // ==========================================================
-// ==========================================================
-// PROFILES / MONEY
-// ==========================================================
     void addMoney(UUID playerId, double amount, String actionType, String itemId) {
         addMoney(playerId, amount, actionType, itemId, null, null);
     }
 
     void addMoney(UUID playerId, double amount, String actionType, String itemId, Integer factionId, Double value) {
+        if (playerId == null || actionType == null || itemId == null) return;
+
         PlayerProfile p = state.getCachedProfile(playerId);
         if (p == null) return;
 
+        // FAST: in-memory only
         p.modifyMoney(amount);
-        repository.savePlayerProfile(p);
+        state.activeProfileCache.put(playerId, p);
 
-        // If caller didn't provide value, default to "amount" for MATTER_SELL (your request: "quanto valeva")
+        // async persist profile
+        economyWriter.markProfileDirty(playerId, p);
+
+        // default value for MATTER_SELL (your telemetry requirement)
         Double valueToLog = value;
         if (valueToLog == null && "MATTER_SELL".equals(actionType)) {
             valueToLog = amount;
         }
 
-        repository.logTransaction(p, actionType, "MONEY", amount, itemId, factionId, valueToLog);
-        state.activeProfileCache.put(playerId, p);
+        // async aggregated transaction
+        economyWriter.recordTransaction(p, actionType, "MONEY", amount, itemId, factionId, valueToLog);
     }
-
 
     // ==========================================================
     // SHOP / ECONOMY
@@ -376,9 +291,6 @@ final class GridEconomyService {
         return Math.max(0.0, out);
     }
 
-    // ==========================================================
-    // SOS
-    // ==========================================================
     boolean attemptBailout(UUID ownerId) {
         state.touchPlayer(ownerId);
 
@@ -397,8 +309,102 @@ final class GridEconomyService {
     }
 
     // ==========================================================
-    // RESET / PRESTIGE CLASSICO
+    // PRESTIGE / RESET
     // ==========================================================
+    boolean canInstantPrestige(UUID ownerId) {
+        if (ownerId == null) return false;
+        PlayerProfile p = state.getCachedProfile(ownerId);
+        if (p != null && p.isAdmin()) return true;
+        return repository.getInventoryItemCount(ownerId, GridManager.ITEM_INSTANT_PRESTIGE) > 0;
+    }
+
+    void instantPrestigeUser(UUID ownerId) {
+        if (ownerId == null) return;
+        state.touchPlayer(ownerId);
+
+        PlayerProfile cached = state.getCachedProfile(ownerId);
+        if (cached == null) return;
+
+        if (!cached.isAdmin()) {
+            int have = repository.getInventoryItemCount(ownerId, GridManager.ITEM_INSTANT_PRESTIGE);
+            if (have <= 0) return;
+        }
+
+        state.reloadServerConfig();
+        final ServerConfig serverConfig = state.getServerConfig();
+        final int addVoidCoins = Math.max(0, serverConfig.prestigeVoidCoinsAdd());
+        final int plotBonus = Math.max(0, serverConfig.prestigePlotBonus());
+
+        ioExecutor.submit(() -> {
+            world.saveAndUnloadSpecific(ownerId);
+
+            try {
+                PlayerProfile p = repository.loadPlayerProfile(ownerId);
+                if (p == null) return;
+
+                if (!p.isAdmin()) {
+                    int have = repository.getInventoryItemCount(ownerId, GridManager.ITEM_INSTANT_PRESTIGE);
+                    if (have <= 0) return;
+
+                    repository.modifyInventoryItem(ownerId, GridManager.ITEM_INSTANT_PRESTIGE, -1);
+                    repository.logTransaction(p, "INSTANT_PRESTIGE_USE", "ITEM", 1, GridManager.ITEM_INSTANT_PRESTIGE);
+                }
+            } catch (Throwable t) {
+                t.printStackTrace();
+                return;
+            }
+
+            try {
+                PlotUnlockState cur = repository.loadPlotUnlockState(ownerId);
+                if (cur == null) cur = PlotUnlockState.zero();
+
+                PlotUnlockState upd = new PlotUnlockState(
+                        cur.extraX() + plotBonus,
+                        cur.extraY() + plotBonus
+                );
+                repository.updatePlotUnlockState(ownerId, upd);
+            } catch (Throwable t) {
+                t.printStackTrace();
+            }
+
+            try {
+                PlayerProfile p = repository.loadPlayerProfile(ownerId);
+                if (p != null) {
+                    p.setPrestigeLevel(p.getPrestigeLevel() + 1);
+                    if (addVoidCoins > 0) p.modifyVoidCoins(addVoidCoins);
+
+                    repository.savePlayerProfile(p);
+                    state.activeProfileCache.put(ownerId, p);
+
+                    repository.logTransaction(p, "INSTANT_PRESTIGE", "NONE", 0, "prestige+1");
+                    if (addVoidCoins > 0) {
+                        repository.logTransaction(p, "INSTANT_PRESTIGE_REWARD", "VOID_COINS", addVoidCoins, "prestige_reward");
+                    }
+                }
+            } catch (Throwable t) {
+                t.printStackTrace();
+            }
+
+            world.loadPlotSynchronously(ownerId);
+        });
+    }
+
+    boolean unlockTechNode(UUID playerId, String nodeId) {
+        if (playerId == null || nodeId == null || nodeId.isBlank()) return false;
+
+        state.touchPlayer(playerId);
+
+        PlayerProfile p = state.getCachedProfile(playerId);
+        if (p == null) return false;
+
+        boolean ok = techManager.unlockNode(p, nodeId);
+        if (!ok) return false;
+
+        // techManager.unlockNode already saves the profile and logs transaction
+        state.activeProfileCache.put(playerId, p);
+        return true;
+    }
+
     void resetUserPlot(UUID ownerId) {
         if (ownerId == null) return;
         state.touchPlayer(ownerId);
@@ -435,7 +441,7 @@ final class GridEconomyService {
         if (ownerId == null) return;
         state.touchPlayer(ownerId);
 
-// Charge prestige action cost (player only)
+        // Charge prestige action cost (player only)
         try {
             PlayerProfile p = repository.loadPlayerProfile(ownerId);
             if (p != null && !p.isAdmin()) {
@@ -454,7 +460,6 @@ final class GridEconomyService {
             t.printStackTrace();
             return;
         }
-
 
         state.reloadServerConfig();
         final ServerConfig serverConfig = state.getServerConfig();
@@ -502,37 +507,6 @@ final class GridEconomyService {
         });
     }
 
-    private void ensureInventoryAtLeast(UUID ownerId, String itemId, int target) {
-        if (ownerId == null || itemId == null || target <= 0) return;
-
-        int cur;
-        try { cur = repository.getInventoryItemCount(ownerId, itemId); }
-        catch (Throwable t) { cur = 0; }
-
-        if (cur < target) repository.modifyInventoryItem(ownerId, itemId, target - cur);
-    }
-
-    boolean unlockTechNode(UUID playerId, String nodeId) {
-        if (playerId == null || nodeId == null || nodeId.isBlank()) return false;
-
-        state.touchPlayer(playerId);
-
-        PlayerProfile p = state.getCachedProfile(playerId);
-        if (p == null) return false;
-
-        boolean ok = techManager.unlockNode(p, nodeId);
-        if (!ok) return false;
-
-        // techManager.unlockNode already saves the profile and logs transaction
-        // We refresh the cache anyway to keep UI consistent.
-        state.activeProfileCache.put(playerId, p);
-        return true;
-    }
-
-
-    // ==========================================================
-    // PLAYER MGMT
-    // ==========================================================
     PlayerProfile createNewPlayer(String username) {
         state.reloadServerConfig();
         ServerConfig serverConfig = state.getServerConfig();
@@ -567,7 +541,6 @@ final class GridEconomyService {
         }
         repository.deletePlayerFull(uuid);
     }
-
     double getPrestigeActionCost(PlayerProfile p) {
         if (p == null) return 0.0;
 
@@ -602,4 +575,16 @@ final class GridEconomyService {
     }
 
 
+    private void ensureInventoryAtLeast(UUID ownerId, String itemId, int target) {
+        if (ownerId == null || itemId == null || target <= 0) return;
+
+        int cur;
+        try {
+            cur = repository.getInventoryItemCount(ownerId, itemId);
+        } catch (Throwable t) {
+            cur = 0;
+        }
+
+        if (cur < target) repository.modifyInventoryItem(ownerId, itemId, target - cur);
+    }
 }

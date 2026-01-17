@@ -15,6 +15,7 @@ import com.matterworks.core.domain.matter.MatterColor;
 
 import java.awt.*;
 import java.awt.image.BufferedImage;
+import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.Map;
 
@@ -34,7 +35,7 @@ final class FactoryPanelRenderer {
     private static final Color EFFECT_GLITCH = new Color(255, 0, 220);
     private static final Color EFFECT_NONE = new Color(210, 210, 210);
 
-    // âœ… input special per color/dye
+    // Special input color for "dye/color" (Chromator slot1 + ColorMixer inputs)
     private static final Color PORT_COLOR_INPUT = new Color(255, 80, 200);
 
     private final BlockRegistry registry;
@@ -48,12 +49,17 @@ final class FactoryPanelRenderer {
     private volatile int gridKeyOffX = -999999;
     private volatile int gridKeyOffY = -999999;
 
-    // ghost cache
+    // Ghost cache
     private volatile String cachedGhostTool = null;
     private volatile Direction cachedGhostOri = null;
     private volatile Vector3Int cachedGhostDim = null;
 
-    // machine lookup for this paint frame (cell -> occupant machine)
+    // Machine lookup for hit-tests (cell -> occupant machine).
+    // IMPORTANT: this is now cached and rebuilt only when machines change.
+    private volatile long occupancyFingerprint = Long.MIN_VALUE;
+    private volatile Map<GridPosition, PlacedMachine> occupancyCache = Map.of();
+
+    // Current paint frame lookup (points to occupancyCache)
     private Map<GridPosition, PlacedMachine> machineGrid = Map.of();
 
     FactoryPanelRenderer(BlockRegistry registry, FactoryPanelController controller, FactoryPanelState state) {
@@ -70,16 +76,22 @@ final class FactoryPanelRenderer {
 
     void invalidateAllCaches() {
         invalidateGhostCache();
+
         gridImage = null;
         gridKeyW = -1;
         gridKeyH = -1;
         gridKeyCell = -1;
         gridKeyOffX = -999999;
         gridKeyOffY = -999999;
+
+        occupancyFingerprint = Long.MIN_VALUE;
+        occupancyCache = Map.of();
+        machineGrid = Map.of();
     }
 
     void paint(Graphics g, int width, int height) {
         Graphics2D g2 = (Graphics2D) g;
+
         g2.setColor(BG);
         g2.fillRect(0, 0, width, height);
 
@@ -93,11 +105,25 @@ final class FactoryPanelRenderer {
 
         var snap = controller.getSnapshot();
 
-        this.machineGrid = buildExpandedOccupancy((snap.machines() != null) ? snap.machines() : Map.of());
+        Map<GridPosition, PlacedMachine> machines = (snap.machines() != null) ? snap.machines() : Map.of();
 
-        if (state.currentLayer == 0) drawTerrainResources(g2, snap.resources(), CELL, OFF_X, OFF_Y);
-        drawLockedOverlay(g2, controller.getPlotAreaInfo(), CELL, OFF_X, OFF_Y);
-        drawMachines(g2, snap.machines(), CELL, OFF_X, OFF_Y);
+        // Cache expanded occupancy only when machines changed
+        long fp = fingerprintMachines(machines);
+        if (fp != occupancyFingerprint) {
+            occupancyCache = buildExpandedOccupancy(machines);
+            occupancyFingerprint = fp;
+        }
+        this.machineGrid = occupancyCache;
+
+        if (state.currentLayer == 0) {
+            drawTerrainResources(g2, snap.resources(), CELL, OFF_X, OFF_Y);
+        }
+
+
+        drawLockedOverlay(g2, controller.getPlotAreaInfoSnapshot(), CELL, OFF_X, OFF_Y);
+
+
+        drawMachines(g2, machines, CELL, OFF_X, OFF_Y);
         drawGhost(g2, CELL, OFF_X, OFF_Y);
     }
 
@@ -137,11 +163,51 @@ final class FactoryPanelRenderer {
         gridKeyOffY = offY;
     }
 
+    /**
+     * Fingerprint of machines to decide when to rebuild expanded occupancy.
+     * We hash: typeId + pos + orientation for each unique machine instance.
+     */
+    private long fingerprintMachines(Map<GridPosition, PlacedMachine> machines) {
+        if (machines == null || machines.isEmpty()) return 0L;
+
+        long h = 1469598103934665603L; // FNV offset basis
+        IdentityHashMap<PlacedMachine, Boolean> seen = new IdentityHashMap<>();
+
+        for (PlacedMachine m : machines.values()) {
+            if (m == null) continue;
+            if (seen.put(m, Boolean.TRUE) != null) continue;
+
+            GridPosition p = m.getPos();
+            if (p != null) {
+                h ^= (p.x() * 73856093L) ^ (p.y() * 19349663L) ^ (p.z() * 83492791L);
+                h *= 1099511628211L;
+            }
+
+            Direction o = m.getOrientation();
+            if (o != null) {
+                h ^= (o.ordinal() + 1L) * 2654435761L;
+                h *= 1099511628211L;
+            }
+
+            String id = m.getTypeId();
+            if (id != null) {
+                h ^= id.hashCode();
+                h *= 1099511628211L;
+            }
+        }
+
+        return h;
+    }
+
+    /**
+     * Builds a "cell -> machine" map including multi-cell footprints.
+     * This MUST NOT be called every paint; it is cached via fingerprint.
+     */
     private Map<GridPosition, PlacedMachine> buildExpandedOccupancy(Map<GridPosition, PlacedMachine> machines) {
         if (machines == null || machines.isEmpty()) return Map.of();
 
-        java.util.HashMap<GridPosition, PlacedMachine> out = new java.util.HashMap<>();
-        java.util.IdentityHashMap<PlacedMachine, Boolean> seen = new java.util.IdentityHashMap<>();
+        HashMap<GridPosition, PlacedMachine> out = new HashMap<>(Math.max(64, machines.size() * 2));
+        IdentityHashMap<PlacedMachine, Boolean> seen = new IdentityHashMap<>();
 
         for (PlacedMachine m : machines.values()) {
             if (m == null) continue;
@@ -192,7 +258,6 @@ final class FactoryPanelRenderer {
         }
     }
 
-
     private void drawLockedOverlay(Graphics2D g, com.matterworks.core.managers.GridManager.PlotAreaInfo info, int CELL, int OFF_X, int OFF_Y) {
         if (info == null) return;
 
@@ -201,7 +266,6 @@ final class FactoryPanelRenderer {
         int maxXEx = info.maxXExclusive();
         int maxZEx = info.maxZExclusive();
 
-        // Nota rossa molto leggera sulle celle bloccate
         g.setColor(new Color(255, 0, 0, 35));
 
         for (int gx = 0; gx < FactoryPanelState.GRID_SIZE; gx++) {
@@ -229,6 +293,7 @@ final class FactoryPanelRenderer {
 
             Vector3Int base = registry.getDimensions(m.getTypeId());
             if (base == null) base = Vector3Int.one();
+
             int ySize = base.y();
             int baseY = pos.y();
             if (state.currentLayer < baseY || state.currentLayer >= baseY + ySize) continue;
@@ -273,10 +338,10 @@ final class FactoryPanelRenderer {
 
         // ===== PORTS =====
         if ("drill".equals(type)) {
-            // âœ… drill: solo OUTPUT (verde), niente input blu
+            // Drill: output only
             drawOutputOnlyPort(g, x, z, w, h, CELL, m.getOrientation());
         } else if ("conveyor_belt".equals(type)) {
-            // âœ… belt: solo OUTPUT (verde), niente input blu
+            // Belt: output only
             drawOutputOnlyPort(g, x, z, w, h, CELL, m.getOrientation());
         } else if ("nexus_core".equals(type)) {
             drawNexusPortsGrid(g, m, x, z, CELL);
@@ -285,10 +350,10 @@ final class FactoryPanelRenderer {
         } else if ("merger".equals(type)) {
             drawMergerPortsGrid(g, m, x, z, CELL);
         } else if ("chromator".equals(type)) {
-            // âœ… chromator: 2 input (slot0 matter=blu, slot1 dye=magenta) + output verde
+            // Chromator: 2 inputs (slot0 matter=blue, slot1 dye=magenta) + output green
             drawChromatorPorts_2x1(g, m, x, z, CELL);
         } else if ("color_mixer".equals(type)) {
-            // âœ… mixer: entrambi input sono "dye/color" (nel tuo codice), quindi entrambi magenta
+            // Color mixer: both inputs are dye/color => both magenta
             drawColorMixerPorts_2x1(g, m, x, z, CELL);
         } else if ("smoothing".equals(type) || "cutting".equals(type)
                 || "shiny_polisher".equals(type) || "blazing_forge".equals(type) || "glitch_distorter".equals(type)) {
@@ -299,16 +364,16 @@ final class FactoryPanelRenderer {
             drawStandardPorts(g, m, x, z, w, h, CELL);
         }
 
-        // items
+        // Items
         if (m instanceof ConveyorBelt belt) drawBeltItem(g, belt, x, z, CELL);
         if (m instanceof Splitter splitter) drawSplitterItem(g, splitter, x, z, CELL);
         if (m instanceof Merger merger) drawMergerItem(g, merger, x, z, CELL);
 
-        // direction dot
+        // Direction dot
         drawDirectionDot(g, x, z, w, h, m.getOrientation());
     }
 
-    // ===== Output-only port (verde) =====
+    // ===== Output-only port (green) =====
     private void drawOutputOnlyPort(Graphics2D g, int x, int z, int w, int h, int CELL, Direction ori) {
         int p = Math.max(6, Math.min(10, CELL / 5));
         Point front = null;
@@ -316,14 +381,14 @@ final class FactoryPanelRenderer {
         switch (ori) {
             case NORTH -> front = new Point(x + w / 2 - p / 2, z);
             case SOUTH -> front = new Point(x + w / 2 - p / 2, z + h - p);
-            case EAST  -> front = new Point(x + w - p, z + h / 2 - p / 2);
-            case WEST  -> front = new Point(x, z + h / 2 - p / 2);
+            case EAST -> front = new Point(x + w - p, z + h / 2 - p / 2);
+            case WEST -> front = new Point(x, z + h / 2 - p / 2);
         }
 
         if (front != null) drawPort(g, front, Color.GREEN, p);
     }
 
-    // ======= Machine lookup (cell -> occupant) =======
+    // ===== Machine lookup (cell -> occupant) =====
 
     private PlacedMachine getMachineAt(GridPosition p) {
         if (p == null) return null;
@@ -344,7 +409,7 @@ final class FactoryPanelRenderer {
         return p;
     }
 
-    // ======= Ports drawing helpers =======
+    // ===== Ports drawing helpers =====
 
     private void drawPortOnCellEdge(Graphics2D g, int baseX, int baseZ, int cellDx, int cellDz, Direction edge, Color c, int CELL) {
         int p = Math.max(6, Math.min(10, CELL / 5));
@@ -354,8 +419,8 @@ final class FactoryPanelRenderer {
         Point pt = switch (edge) {
             case NORTH -> new Point(cellX + CELL / 2 - p / 2, cellZ);
             case SOUTH -> new Point(cellX + CELL / 2 - p / 2, cellZ + CELL - p);
-            case EAST  -> new Point(cellX + CELL - p, cellZ + CELL / 2 - p / 2);
-            case WEST  -> new Point(cellX, cellZ + CELL / 2 - p / 2);
+            case EAST -> new Point(cellX + CELL - p, cellZ + CELL / 2 - p / 2);
+            case WEST -> new Point(cellX, cellZ + CELL / 2 - p / 2);
             default -> new Point(cellX + CELL / 2 - p / 2, cellZ + CELL / 2 - p / 2);
         };
 
@@ -403,7 +468,7 @@ final class FactoryPanelRenderer {
         drawPortOnCellEdge(g, baseX, baseZ, 0, 0, front, Color.GREEN, CELL);
     }
 
-    // âœ… Chromator: slot0 = matter(blue), slot1 = dye(magenta)
+    // Chromator: slot0 = matter(blue), slot1 = dye(magenta)
     private void drawChromatorPorts_2x1(Graphics2D g, PlacedMachine m, int baseX, int baseZ, int CELL) {
         Direction o = m.getOrientation();
 
@@ -418,7 +483,7 @@ final class FactoryPanelRenderer {
         }
 
         if (o == Direction.SOUTH) {
-            // SOUTH: mapping invertito nel tuo getSlotForPosition
+            // SOUTH: mapping inverted in getSlotForPosition
             // slot0 = right cell, slot1 = left cell
             drawPortOnCellEdge(g, baseX, baseZ, 0, 0, Direction.NORTH, PORT_COLOR_INPUT, CELL); // slot1 dye
             drawPortOnCellEdge(g, baseX, baseZ, 1, 0, Direction.NORTH, Color.BLUE, CELL);       // slot0 matter
@@ -442,7 +507,7 @@ final class FactoryPanelRenderer {
         }
     }
 
-    // âœ… ColorMixer: entrambi gli input sono dye/color -> entrambi magenta, output verde come prima
+    // ColorMixer: both inputs are dye/color -> both magenta, output green
     private void drawColorMixerPorts_2x1(Graphics2D g, PlacedMachine m, int baseX, int baseZ, int CELL) {
         Direction o = m.getOrientation();
 
@@ -482,34 +547,39 @@ final class FactoryPanelRenderer {
         Vector3Int bv = back.toVector();
 
         GridPosition outStart = new GridPosition(pos.x() + fv.x(), pos.y() + fv.y(), pos.z() + fv.z());
-        GridPosition inStart  = new GridPosition(pos.x() + bv.x(), pos.y() + bv.y(), pos.z() + bv.z());
+        GridPosition inStart = new GridPosition(pos.x() + bv.x(), pos.y() + bv.y(), pos.z() + bv.z());
 
         GridPosition outCell = resolvePortCellOutsideFootprint(m, outStart, front);
-        GridPosition inCell  = resolvePortCellOutsideFootprint(m, inStart,  back);
+        GridPosition inCell = resolvePortCellOutsideFootprint(m, inStart, back);
 
         int dxOut = outCell.x() - pos.x();
         int dzOut = outCell.z() - pos.z();
-        int dxIn  = inCell.x()  - pos.x();
-        int dzIn  = inCell.z()  - pos.z();
+        int dxIn = inCell.x() - pos.x();
+        int dzIn = inCell.z() - pos.z();
 
-        int dxInInside  = dxIn  + fv.x();
-        int dzInInside  = dzIn  + fv.z();
+        int dxInInside = dxIn + fv.x();
+        int dzInInside = dzIn + fv.z();
 
         int dxOutInside = dxOut + bv.x();
         int dzOutInside = dzOut + bv.z();
 
-        drawPortOnCellEdge(g, baseX, baseZ, dxInInside,  dzInInside,  back,  Color.BLUE, CELL);
+        drawPortOnCellEdge(g, baseX, baseZ, dxInInside, dzInInside, back, Color.BLUE, CELL);
         drawPortOnCellEdge(g, baseX, baseZ, dxOutInside, dzOutInside, front, Color.GREEN, CELL);
     }
 
     private Vector3Int getEffectiveFootprint(String typeId, Direction ori) {
         Vector3Int base = registry.getDimensions(typeId);
         if (base == null) base = Vector3Int.one();
+
         int dx = base.x();
         int dz = base.z();
+
         if (ori == Direction.EAST || ori == Direction.WEST) {
-            int tmp = dx; dx = dz; dz = tmp;
+            int tmp = dx;
+            dx = dz;
+            dz = tmp;
         }
+
         return new Vector3Int(dx, base.y(), dz);
     }
 
@@ -553,7 +623,9 @@ final class FactoryPanelRenderer {
         int dx = base.x();
         int dz = base.z();
         if (ori == Direction.EAST || ori == Direction.WEST) {
-            int tmp = dx; dx = dz; dz = tmp;
+            int tmp = dx;
+            dx = dz;
+            dz = tmp;
         }
 
         cachedGhostTool = tool;
@@ -570,10 +642,22 @@ final class FactoryPanelRenderer {
         Point front = null, back = null;
 
         switch (m.getOrientation()) {
-            case NORTH -> { front = new Point(x + c / 2 - p / 2, z); back = new Point(x + c / 2 - p / 2, z + c - p); }
-            case SOUTH -> { front = new Point(x + c / 2 - p / 2, z + c - p); back = new Point(x + c / 2 - p / 2, z); }
-            case EAST  -> { front = new Point(x + c - p, z + c / 2 - p / 2); back = new Point(x, z + c / 2 - p / 2); }
-            case WEST  -> { front = new Point(x, z + c / 2 - p / 2); back = new Point(x + c - p, z + c / 2 - p / 2); }
+            case NORTH -> {
+                front = new Point(x + c / 2 - p / 2, z);
+                back = new Point(x + c / 2 - p / 2, z + c - p);
+            }
+            case SOUTH -> {
+                front = new Point(x + c / 2 - p / 2, z + c - p);
+                back = new Point(x + c / 2 - p / 2, z);
+            }
+            case EAST -> {
+                front = new Point(x + c - p, z + c / 2 - p / 2);
+                back = new Point(x, z + c / 2 - p / 2);
+            }
+            case WEST -> {
+                front = new Point(x, z + c / 2 - p / 2);
+                back = new Point(x + c - p, z + c / 2 - p / 2);
+            }
         }
 
         if (isLift) {
@@ -606,10 +690,22 @@ final class FactoryPanelRenderer {
         Point front = null, back = null;
 
         switch (m.getOrientation()) {
-            case NORTH -> { front = new Point(x + w / 2 - p / 2, z); back = new Point(x + w / 2 - p / 2, z + h - p); }
-            case SOUTH -> { front = new Point(x + w / 2 - p / 2, z + h - p); back = new Point(x + w / 2 - p / 2, z); }
-            case EAST  -> { front = new Point(x + w - p, z + h / 2 - p / 2); back = new Point(x, z + h / 2 - p / 2); }
-            case WEST  -> { front = new Point(x, z + h / 2 - p / 2); back = new Point(x + w - p, z + h / 2 - p / 2); }
+            case NORTH -> {
+                front = new Point(x + w / 2 - p / 2, z);
+                back = new Point(x + w / 2 - p / 2, z + h - p);
+            }
+            case SOUTH -> {
+                front = new Point(x + w / 2 - p / 2, z + h - p);
+                back = new Point(x + w / 2 - p / 2, z);
+            }
+            case EAST -> {
+                front = new Point(x + w - p, z + h / 2 - p / 2);
+                back = new Point(x, z + h / 2 - p / 2);
+            }
+            case WEST -> {
+                front = new Point(x, z + h / 2 - p / 2);
+                back = new Point(x + w - p, z + h / 2 - p / 2);
+            }
         }
 
         if (back != null) drawPort(g, back, Color.BLUE, p);
@@ -626,10 +722,17 @@ final class FactoryPanelRenderer {
     private void drawBeltItem(Graphics2D g, ConveyorBelt belt, int x, int z, int CELL) {
         JsonObject meta = controller.getMetaCached(belt);
         if (meta == null) return;
-        if (!meta.has("currentItem")) return;
-        if (!meta.get("currentItem").isJsonObject()) return;
-        drawItemShape(g, meta.getAsJsonObject("currentItem"), x, z, CELL);
+
+        // Safer than meta.has(): meta.get(...) can still be null in some edge cases
+        JsonElement el = meta.get("currentItem");
+        if (el == null || el.isJsonNull() || !el.isJsonObject()) return;
+
+        JsonObject obj = el.getAsJsonObject();
+        if (obj == null) return;
+
+        drawItemShape(g, obj, x, z, CELL);
     }
+
 
     private void drawSplitterItem(Graphics2D g, Splitter splitter, int x, int z, int CELL) {
         JsonObject meta = controller.getMetaCached(splitter);
@@ -650,7 +753,12 @@ final class FactoryPanelRenderer {
     }
 
     private void drawItemShape(Graphics2D g, JsonObject item, int x, int z, int CELL) {
-        String colorStr = item.has("color") ? item.get("color").getAsString() : "RAW";
+        if (item == null) return; // <-- CRITICAL: prevents EDT NPE
+
+        String colorStr = (item.has("color") && !item.get("color").isJsonNull())
+                ? item.get("color").getAsString()
+                : "RAW";
+
         String shapeStr = (item.has("shape") && !item.get("shape").isJsonNull())
                 ? item.get("shape").getAsString()
                 : "LIQUID";
@@ -661,6 +769,7 @@ final class FactoryPanelRenderer {
         int pad = (CELL - size) / 2;
 
         g.setColor(getColorFromStr(colorStr, 255));
+
         if ("CUBE".equals(shapeStr)) {
             g.fillRect(x + pad, z + pad, size, size);
         } else if ("PYRAMID".equals(shapeStr)) {
@@ -682,6 +791,7 @@ final class FactoryPanelRenderer {
 
         if (effect != null) drawEffectOverlay(g, effect, x + pad, z + pad, size);
     }
+
 
     private String readSingleEffect(JsonObject item) {
         if (item == null) return null;
@@ -747,8 +857,8 @@ final class FactoryPanelRenderer {
         switch (dir) {
             case NORTH -> g.fillOval(cx - 3, y + 2, d, d);
             case SOUTH -> g.fillOval(cx - 3, y + h - 8, d, d);
-            case EAST  -> g.fillOval(x + w - 8, cy - 3, d, d);
-            case WEST  -> g.fillOval(x + 2, cy - 3, d, d);
+            case EAST -> g.fillOval(x + w - 8, cy - 3, d, d);
+            case WEST -> g.fillOval(x + 2, cy - 3, d, d);
         }
     }
 
@@ -783,7 +893,7 @@ final class FactoryPanelRenderer {
             case "cutting" -> new Color(241, 196, 15);
 
             case "shiny_polisher" -> new Color(190, 190, 190);
-            case "blazing_forge" -> new Color(210, 70, 0);
+            case "blazing_forge" -> new Color(255, 69, 0);
             case "glitch_distorter" -> new Color(170, 0, 210);
 
             default -> Color.RED;

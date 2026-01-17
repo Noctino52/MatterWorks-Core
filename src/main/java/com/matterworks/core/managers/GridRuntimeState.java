@@ -8,8 +8,12 @@ import com.matterworks.core.model.PlotUnlockState;
 import com.matterworks.core.ui.MariaDBAdapter;
 import com.matterworks.core.ui.ServerConfig;
 
-import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.*;
 
 final class GridRuntimeState {
 
@@ -23,7 +27,20 @@ final class GridRuntimeState {
     final Map<UUID, Map<GridPosition, MatterColor>> playerResources = new ConcurrentHashMap<>();
     final Map<UUID, PlotUnlockState> plotUnlockCache = new ConcurrentHashMap<>();
 
-    final List<PlacedMachine> tickingMachines = Collections.synchronizedList(new ArrayList<>());
+    /**
+     * A concurrent "set" of machines to tick. We rely on PlacedMachine default identity hashCode/equals.
+     * This removes:
+     * - global synchronized list lock
+     * - O(n) contains() checks on every placement
+     */
+    final ConcurrentHashMap<PlacedMachine, Boolean> tickingMachines = new ConcurrentHashMap<>();
+
+    /**
+     * Dedicated pool for ticking machines in parallel.
+     * Keep it bounded to avoid killing EDT when running the Swing mock app.
+     * On the real server, this uses CPU cores efficiently.
+     */
+    final ExecutorService tickPool;
 
     // --- ACTIVITY / SLEEPING ---
     final Map<UUID, Long> lastActivityMs = new ConcurrentHashMap<>();
@@ -55,6 +72,16 @@ final class GridRuntimeState {
         this.serverConfig = repository.loadServerConfig();
         reloadMinutesToInactive();
         reloadGlobalOverclockFromDb();
+
+        int cores = Runtime.getRuntime().availableProcessors();
+        // Keep one core free for UI / networking where possible
+        int threads = Math.max(1, cores - 1);
+
+        this.tickPool = Executors.newFixedThreadPool(threads, r -> {
+            Thread t = new Thread(r, "mw-tick-worker");
+            t.setDaemon(true);
+            return t;
+        });
     }
 
     ServerConfig getServerConfig() {
@@ -95,14 +122,13 @@ final class GridRuntimeState {
 
         lastActivityMs.put(ownerId, System.currentTimeMillis());
 
+        // If player was sleeping, wake them and re-add their machines to ticking set
         if (sleepingPlayers.remove(ownerId)) {
             Map<GridPosition, PlacedMachine> grid = playerGrids.get(ownerId);
             if (grid != null && !grid.isEmpty()) {
-                synchronized (tickingMachines) {
-                    for (PlacedMachine pm : new HashSet<>(grid.values())) {
-                        if (pm == null) continue;
-                        if (!tickingMachines.contains(pm)) tickingMachines.add(pm);
-                    }
+                for (PlacedMachine pm : new HashSet<>(grid.values())) {
+                    if (pm == null) continue;
+                    tickingMachines.put(pm, Boolean.TRUE);
                 }
             }
         }
@@ -121,9 +147,10 @@ final class GridRuntimeState {
 
             if (!sleepingPlayers.contains(ownerId) && (now - last) >= threshold) {
                 sleepingPlayers.add(ownerId);
-                synchronized (tickingMachines) {
-                    tickingMachines.removeIf(m -> m != null && ownerId.equals(m.getOwnerId()));
-                }
+
+                // Remove all machines for that owner from ticking set
+                tickingMachines.keySet().removeIf(m -> m != null && ownerId.equals(m.getOwnerId()));
+
                 repository.closePlayerSession(ownerId);
             }
         }
@@ -202,7 +229,7 @@ final class GridRuntimeState {
         int placed = getPlacedItemCount(ownerId);
 
         if (placed >= cap) {
-            System.out.println("⚠️ CAP REACHED: owner=" + ownerId
+            System.out.println("CAP REACHED: owner=" + ownerId
                     + " placed=" + placed + " cap=" + cap
                     + " -> remove something first!");
             return false;

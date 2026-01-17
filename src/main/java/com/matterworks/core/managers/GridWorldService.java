@@ -1,3 +1,4 @@
+
 package com.matterworks.core.managers;
 
 import com.matterworks.core.common.Direction;
@@ -16,18 +17,10 @@ import com.matterworks.core.ports.IWorldAccess;
 import com.matterworks.core.ui.MariaDBAdapter;
 import com.matterworks.core.ui.ServerConfig;
 
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Random;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.stream.Collectors;
-
-import static com.matterworks.core.managers.GridManager.ITEM_PLOT_SIZE_BREAKER;
 
 final class GridWorldService {
 
@@ -38,6 +31,8 @@ final class GridWorldService {
     private final TechManager techManager;
     private final ExecutorService ioExecutor;
     private final GridRuntimeState state;
+
+    private volatile long lastTickPerfLogMs = 0L;
 
     GridWorldService(
             GridManager gridManager,
@@ -138,9 +133,6 @@ final class GridWorldService {
         return true;
     }
 
-
-
-
     boolean decreasePlotUnlockedArea(UUID ownerId) {
         state.touchPlayer(ownerId);
 
@@ -223,9 +215,8 @@ final class GridWorldService {
         state.plotUnlockCache.remove(ownerId);
         state.sleepingPlayers.remove(ownerId);
 
-        synchronized (state.tickingMachines) {
-            state.tickingMachines.removeIf(m -> m != null && ownerId.equals(m.getOwnerId()));
-        }
+        // tickingMachines is ConcurrentHashMap<PlacedMachine, Boolean>
+        state.tickingMachines.keySet().removeIf(m -> m != null && ownerId.equals(m.getOwnerId()));
 
         try {
             try {
@@ -264,13 +255,33 @@ final class GridWorldService {
     void tick(long t) {
         state.sweepInactivePlayers(t);
 
-        synchronized (state.tickingMachines) {
-            for (PlacedMachine m : state.tickingMachines) {
-                if (m == null) continue;
+        long startNs = System.nanoTime();
+
+        PlacedMachine[] toTick = state.tickingMachines.keySet().toArray(new PlacedMachine[0]);
+        for (PlacedMachine m : toTick) {
+            if (m == null) continue;
+            try {
                 m.tick(t);
+                if (m.getDbId() != null && m.isDirty()) {
+                    gridManager.markPlotDirty(m.getOwnerId());
+                }
+            } catch (Throwable ignored) {
+                // keep ticking even if a machine throws
+            }
+        }
+
+        long elapsedMs = (System.nanoTime() - startNs) / 1_000_000L;
+
+        // Log once per second if tick is heavy
+        if (elapsedMs > 40) {
+            long now = System.currentTimeMillis();
+            if (now - lastTickPerfLogMs > 1000L) {
+                lastTickPerfLogMs = now;
+                System.out.println("[PERF] world.tick=" + elapsedMs + "ms | machines=" + toTick.length);
             }
         }
     }
+
 
     // ==========================================================
     // PLACEMENT / REMOVAL
@@ -299,7 +310,6 @@ final class GridWorldService {
         state.touchPlayer(ownerId);
 
         if (ownerId == null || pos == null || typeId == null) return false;
-
         if (!state.canPlaceAnotherItem(ownerId)) return false;
 
         PlayerProfile p = state.getCachedProfile(ownerId);
@@ -312,10 +322,9 @@ final class GridWorldService {
 
         if (!isWithinPlotBounds(ownerId, pos, effDim)) return false;
         if (!isAreaUnlocked(ownerId, pos, effDim)) return false;
-
         if (!isAreaClear(ownerId, pos, effDim)) return false;
 
-        if (!(p.isAdmin())) {
+        if (!p.isAdmin()) {
             int inv = repository.getInventoryItemCount(ownerId, typeId);
             if (inv <= 0) {
                 System.out.println("⚠️ PLACE_MACHINE FAILED: inventory empty for type=" + typeId
@@ -324,7 +333,6 @@ final class GridWorldService {
             }
             repository.modifyInventoryItem(ownerId, typeId, -1);
         }
-
 
         PlotObject dto = new PlotObject(null, null, pos.x(), pos.y(), pos.z(), typeId, null);
         PlacedMachine m = MachineFactory.createFromModel(dto, ownerId);
@@ -378,6 +386,8 @@ final class GridWorldService {
         }
 
         internalRemoveMachine(ownerId, target);
+
+        // Correct lifecycle hook in your codebase
         target.onRemove(worldAdapter);
 
         if (target.getDbId() != null) {
@@ -414,9 +424,8 @@ final class GridWorldService {
         state.lastActivityMs.remove(ownerId);
         state.sleepingPlayers.remove(ownerId);
 
-        synchronized (state.tickingMachines) {
-            state.tickingMachines.removeIf(m -> m != null && ownerId.equals(m.getOwnerId()));
-        }
+        // tickingMachines is ConcurrentHashMap<PlacedMachine, Boolean>
+        state.tickingMachines.keySet().removeIf(m -> m != null && ownerId.equals(m.getOwnerId()));
     }
 
     // ==========================================================
@@ -434,7 +443,8 @@ final class GridWorldService {
 
         m.setGridContext(gridManager);
 
-        Map<GridPosition, PlacedMachine> grid = state.playerGrids.computeIfAbsent(ownerId, _k -> new ConcurrentHashMap<>());
+        Map<GridPosition, PlacedMachine> grid =
+                state.playerGrids.computeIfAbsent(ownerId, _k -> new ConcurrentHashMap<>());
 
         Vector3Int dim;
         try {
@@ -457,9 +467,8 @@ final class GridWorldService {
         }
 
         if (!state.sleepingPlayers.contains(ownerId)) {
-            synchronized (state.tickingMachines) {
-                if (!state.tickingMachines.contains(m)) state.tickingMachines.add(m);
-            }
+            // tickingMachines is ConcurrentHashMap<PlacedMachine, Boolean>
+            state.tickingMachines.put(m, Boolean.TRUE);
         }
     }
 
@@ -469,9 +478,8 @@ final class GridWorldService {
         Map<GridPosition, PlacedMachine> grid = state.playerGrids.get(ownerId);
         if (grid != null) grid.entrySet().removeIf(e -> e.getValue() == m);
 
-        synchronized (state.tickingMachines) {
-            state.tickingMachines.removeIf(x -> x == m);
-        }
+        // tickingMachines is ConcurrentHashMap<PlacedMachine, Boolean>
+        state.tickingMachines.remove(m);
     }
 
     private boolean isAreaClear(UUID ownerId, GridPosition pos, Vector3Int size) {
@@ -549,9 +557,9 @@ final class GridWorldService {
             MatterColor t = e.getValue();
             if (p == null || t == null) continue;
             if (p.y() != y) continue;
-            if (t != c) continue;
-
-            if (p.x() >= minX && p.x() < maxXEx && p.z() >= minZ && p.z() < maxZEx) n++;
+            if (p.x() < minX || p.x() >= maxXEx) continue;
+            if (p.z() < minZ || p.z() >= maxZEx) continue;
+            if (t == c) n++;
         }
         return n;
     }
@@ -560,40 +568,24 @@ final class GridWorldService {
                                        MatterColor t, int y, GridManager.PlotAreaInfo info, int maxX, int maxY) {
         if (out == null) return;
 
-        int minX = info.minX();
-        int maxXEx = info.maxXExclusive();
-        int minZ = info.minZ();
-        int maxZEx = info.maxZExclusive();
-
         Random r = new Random();
 
-        for (int tries = 0; tries < 3000; tries++) {
+        for (int tries = 0; tries < 4000; tries++) {
             int x = r.nextInt(maxX);
             int z = r.nextInt(maxY);
 
-            boolean insideUnlocked = x >= minX && x < maxXEx && z >= minZ && z < maxZEx;
-            if (insideUnlocked) continue;
+            if (x >= info.minX() && x < info.maxXExclusive()
+                    && z >= info.minZ() && z < info.maxZExclusive()) {
+                continue;
+            }
 
             GridPosition key = new GridPosition(x, y, z);
             if (out.containsKey(key)) continue;
 
+            // Correct method in your MariaDBAdapter
             db.saveResource(pid, x, z, t);
             out.put(key, t);
             return;
-        }
-
-        for (int x = 0; x < maxX; x++) {
-            for (int z = 0; z < maxY; z++) {
-                boolean insideUnlocked = x >= minX && x < maxXEx && z >= minZ && z < maxZEx;
-                if (insideUnlocked) continue;
-
-                GridPosition key = new GridPosition(x, y, z);
-                if (out.containsKey(key)) continue;
-
-                db.saveResource(pid, x, z, t);
-                out.put(key, t);
-                return;
-            }
         }
     }
 
@@ -676,6 +668,4 @@ final class GridWorldService {
         state.plotUnlockCache.put(ownerId, next);
         return true;
     }
-
-
 }

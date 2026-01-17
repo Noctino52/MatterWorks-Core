@@ -16,6 +16,7 @@ import java.util.IdentityHashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLong;
 
 final class FactoryPanelController {
 
@@ -29,7 +30,17 @@ final class FactoryPanelController {
     private final ScheduledExecutorService refreshExec;
     private final ExecutorService commandExec;
 
-    // ✅ NEW: repaint periodico (decoupled dal mouse)
+    // Tooltip cache (EDT hot path)
+    private volatile PlacedMachine lastTooltipMachine = null;
+    private volatile String lastTooltipHtml = null;
+    private volatile long lastTooltipAtNanos = 0L;
+    private static final long TOOLTIP_TTL_NANOS = 250_000_000L; // 250ms
+
+
+    // Tooltip work must never block EDT
+    private final ScheduledExecutorService tooltipExec;
+
+    // Periodic repaint (decoupled from mouse activity)
     private final Timer visualRepaintTimer;
 
     private volatile boolean disposed = false;
@@ -37,16 +48,28 @@ final class FactoryPanelController {
     private volatile Snapshot snapshot = new Snapshot(Map.of(), Map.of());
     private volatile long lastFingerprint = 0L;
 
+    // Cache PlotAreaInfo computed in background (never call GridManager from EDT)
+    private volatile GridManager.PlotAreaInfo plotAreaInfoSnapshot = null;
+
     private final IdentityHashMap<PlacedMachine, JsonObject> metaCache = new IdentityHashMap<>();
     private final IdentityHashMap<PlacedMachine, Long> metaCacheNanos = new IdentityHashMap<>();
 
-    // prima era 150ms; con repaint periodico conviene un TTL un po' più alto
     private static final long META_CACHE_TTL_NANOS = 500_000_000L; // 0.5s
 
     private volatile boolean repaintQueued = false;
-
-    // ✅ scegli quanto spesso vuoi aggiornare visivamente (250ms = 4fps; 1000ms = 1fps)
     private static final int VISUAL_REPAINT_MS = 250;
+
+    // Tooltip cache/debounce
+    private static final int TOOLTIP_DEBOUNCE_MS = 120;
+    private static final long TOOLTIP_CACHE_TTL_NANOS = 1_000_000_000L; // 1.0s
+
+    private final AtomicLong tooltipSeq = new AtomicLong(0);
+    private volatile ScheduledFuture<?> pendingTooltipTask = null;
+
+    private volatile GridPosition tooltipPos = null;
+    private volatile String tooltipHtml = null;
+    private volatile long tooltipCreatedNanos = 0L;
+    private volatile long tooltipFingerprint = -1L;
 
     FactoryPanelController(FactoryPanel panel,
                            GridManager gridManager,
@@ -70,7 +93,12 @@ final class FactoryPanelController {
             return t;
         });
 
-        // ✅ heartbeat di repaint: la UI si aggiorna anche se la fingerprint non cambia
+        tooltipExec = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "mw-factorypanel-tooltip");
+            t.setDaemon(true);
+            return t;
+        });
+
         visualRepaintTimer = new Timer(VISUAL_REPAINT_MS, e -> {
             if (!disposed && panel.isDisplayable()) {
                 panel.repaint();
@@ -81,29 +109,44 @@ final class FactoryPanelController {
 
         hookInputListeners();
 
-        // refresh snapshot “strutturale” (macchine piazzate / risorse statiche)
+        // Structural snapshot refresh (machines/resources/plot area)
         refreshExec.scheduleWithFixedDelay(this::refreshCacheLoop, 0, 180, TimeUnit.MILLISECONDS);
     }
 
     void dispose() {
         disposed = true;
 
-        try {
-            if (visualRepaintTimer != null) visualRepaintTimer.stop();
-        } catch (Throwable ignored) {}
+        try { if (visualRepaintTimer != null) visualRepaintTimer.stop(); } catch (Throwable ignored) {}
 
         try { refreshExec.shutdownNow(); } catch (Throwable ignored) {}
         try { commandExec.shutdownNow(); } catch (Throwable ignored) {}
+        try { tooltipExec.shutdownNow(); } catch (Throwable ignored) {}
 
         snapshot = new Snapshot(Map.of(), Map.of());
+        plotAreaInfoSnapshot = null;
+
         synchronized (metaCache) {
             metaCache.clear();
             metaCacheNanos.clear();
         }
+
+        tooltipPos = null;
+        tooltipHtml = null;
+        tooltipCreatedNanos = 0L;
+        tooltipFingerprint = -1L;
+        pendingTooltipTask = null;
     }
 
     Snapshot getSnapshot() {
         return snapshot;
+    }
+
+    long getLastFingerprint() {
+        return lastFingerprint;
+    }
+
+    GridManager.PlotAreaInfo getPlotAreaInfoSnapshot() {
+        return plotAreaInfoSnapshot;
     }
 
     JsonObject getMetaCached(PlacedMachine m) {
@@ -125,26 +168,27 @@ final class FactoryPanelController {
         }
     }
 
-    GridManager.PlotAreaInfo getPlotAreaInfo() {
-        UUID u = state.playerUuid;
-        if (u == null) return null;
-        try {
-            return gridManager.getPlotAreaInfo(u);
-        } catch (Throwable t) {
-            return null;
-        }
-    }
-
     void forceRefreshNow() {
         if (disposed) return;
+
         synchronized (metaCache) {
             metaCache.clear();
             metaCacheNanos.clear();
         }
+
+        // Also invalidate tooltip cache (it depends on snapshot + tier info)
+        invalidateTooltipCache();
+
         refreshOnce(true);
         repaintCoalesced();
     }
 
+    private void invalidateTooltipCache() {
+        tooltipPos = null;
+        tooltipHtml = null;
+        tooltipCreatedNanos = 0L;
+        tooltipFingerprint = -1L;
+    }
 
     private static String buildTooltipHtml(MachineInspectionInfo info, int tier) {
         String name = safe(info.machineName());
@@ -173,7 +217,6 @@ final class FactoryPanelController {
         sb.append("</html>");
         return sb.toString();
     }
-
 
     private static void appendLines(StringBuilder sb, java.util.List<String> lines) {
         if (lines == null || lines.isEmpty()) {
@@ -268,14 +311,21 @@ final class FactoryPanelController {
                     state.mouseHoverPos != null && state.mouseHoverPos.y() == state.currentLayer) {
                 return false;
             }
+
             state.lastHoverGX = p.x();
             state.lastHoverGZ = p.z();
             state.mouseHoverPos = p;
+
+            // Precompute tooltip async (never on EDT)
+            requestTooltipAsync(p);
+
             return true;
         }
 
         if (state.mouseHoverPos != null) {
             state.clearHover();
+            // Invalidate tooltip when leaving the grid
+            invalidateTooltipCache();
             return true;
         }
         return false;
@@ -308,6 +358,10 @@ final class FactoryPanelController {
         state.mouseHoverPos = target;
         state.lastHoverGX = target.x();
         state.lastHoverGZ = target.z();
+
+        // Precompute tooltip for the clicked cell too
+        requestTooltipAsync(target);
+
         repaintCoalesced();
 
         final String tool = state.currentTool;
@@ -347,35 +401,46 @@ final class FactoryPanelController {
 
         Map<GridPosition, PlacedMachine> machines;
         Map<GridPosition, MatterColor> resources;
+        GridManager.PlotAreaInfo areaInfo;
 
         try {
             if (u == null) {
                 machines = Map.of();
                 resources = Map.of();
+                areaInfo = null;
             } else {
                 Map<GridPosition, PlacedMachine> snap = gridManager.getSnapshot(u);
                 machines = (snap != null) ? snap : Map.of();
 
                 Map<GridPosition, MatterColor> res = gridManager.getTerrainResources(u);
                 resources = (res != null) ? new HashMap<>(res) : Map.of();
+
+                // IMPORTANT: computed off-EDT
+                areaInfo = gridManager.getPlotAreaInfo(u);
             }
         } catch (Throwable ex) {
             ex.printStackTrace();
             machines = Map.of();
             resources = Map.of();
+            areaInfo = null;
         }
 
         long fp = fingerprint(machines, resources);
         if (!forceRepaint && fp == lastFingerprint) {
-            // ✅ niente repaint qui: ci pensa il timer VISUAL_REPAINT_MS
+            // No need to push a repaint here: VISUAL_REPAINT_MS timer keeps it smooth.
+            // However, we still update plotAreaInfoSnapshot if it changed.
+            plotAreaInfoSnapshot = areaInfo;
             return;
         }
 
         lastFingerprint = fp;
         snapshot = new Snapshot(machines, resources);
+        plotAreaInfoSnapshot = areaInfo;
+
+        // Snapshot changed => tooltip may be stale
+        invalidateTooltipCache();
 
         if (forceRepaint) repaintCoalesced();
-        // altrimenti, ancora una volta: il timer fa repaint “fluido”
     }
 
     private long fingerprint(Map<GridPosition, PlacedMachine> machines, Map<GridPosition, MatterColor> resources) {
@@ -423,6 +488,10 @@ final class FactoryPanelController {
         });
     }
 
+    /**
+     * EDT-safe: returns only cached tooltip html.
+     * If missing/stale, it schedules an async computation (debounced) and returns null.
+     */
     String getInspectionTooltipHtml(int mouseX, int mouseY) {
         if (disposed) return null;
 
@@ -434,6 +503,12 @@ final class FactoryPanelController {
 
         PlacedMachine m = snap.machines().get(p);
         if (m == null) return null;
+
+        // Fast path cache (same machine hovered frequently)
+        long now = System.nanoTime();
+        if (m == lastTooltipMachine && lastTooltipHtml != null && (now - lastTooltipAtNanos) <= TOOLTIP_TTL_NANOS) {
+            return lastTooltipHtml;
+        }
 
         MachineInspectionInfo info;
         try {
@@ -450,7 +525,93 @@ final class FactoryPanelController {
             tier = gridManager.getUnlockedMachineTier(owner, m.getTypeId());
         } catch (Throwable ignored) {}
 
-        return buildTooltipHtml(info, tier);
+        String html = buildTooltipHtml(info, tier);
+
+        lastTooltipMachine = m;
+        lastTooltipHtml = html;
+        lastTooltipAtNanos = now;
+
+        return html;
     }
 
+
+    private void requestTooltipAsync(GridPosition p) {
+        if (disposed) return;
+        if (p == null) return;
+
+        // If already cached and fresh for this cell + fingerprint, don't reschedule
+        long now = System.nanoTime();
+        GridPosition cp = tooltipPos;
+        if (cp != null && cp.equals(p) && tooltipFingerprint == lastFingerprint && tooltipHtml != null) {
+            if ((now - tooltipCreatedNanos) <= TOOLTIP_CACHE_TTL_NANOS) return;
+        }
+
+        long myId = tooltipSeq.incrementAndGet();
+
+        ScheduledFuture<?> prev = pendingTooltipTask;
+        if (prev != null) {
+            try { prev.cancel(false); } catch (Throwable ignored) {}
+        }
+
+        pendingTooltipTask = tooltipExec.schedule(() -> computeTooltip(myId, p), TOOLTIP_DEBOUNCE_MS, TimeUnit.MILLISECONDS);
+    }
+
+    private void computeTooltip(long requestId, GridPosition p) {
+        if (disposed) return;
+
+        // Only the latest request should win
+        if (requestId != tooltipSeq.get()) return;
+
+        // If hover moved away, skip
+        GridPosition hover = state.mouseHoverPos;
+        if (hover == null || !hover.equals(p)) return;
+
+        Snapshot snap = snapshot;
+        if (snap == null || snap.machines() == null) {
+            tooltipPos = p;
+            tooltipHtml = null;
+            tooltipCreatedNanos = System.nanoTime();
+            tooltipFingerprint = lastFingerprint;
+            return;
+        }
+
+        PlacedMachine m = snap.machines().get(p);
+        if (m == null) {
+            tooltipPos = p;
+            tooltipHtml = null;
+            tooltipCreatedNanos = System.nanoTime();
+            tooltipFingerprint = lastFingerprint;
+            return;
+        }
+
+        try {
+            MachineInspectionInfo info = MachineInspector.inspect(m);
+            if (info == null || !info.showInUi()) {
+                tooltipPos = p;
+                tooltipHtml = null;
+                tooltipCreatedNanos = System.nanoTime();
+                tooltipFingerprint = lastFingerprint;
+                return;
+            }
+
+            int tier = 1;
+            try {
+                UUID owner = state.playerUuid;
+                tier = gridManager.getUnlockedMachineTier(owner, m.getTypeId());
+            } catch (Throwable ignored) {}
+
+            String html = buildTooltipHtml(info, tier);
+
+            tooltipPos = p;
+            tooltipHtml = html;
+            tooltipCreatedNanos = System.nanoTime();
+            tooltipFingerprint = lastFingerprint;
+
+        } catch (Throwable t) {
+            tooltipPos = p;
+            tooltipHtml = null;
+            tooltipCreatedNanos = System.nanoTime();
+            tooltipFingerprint = lastFingerprint;
+        }
+    }
 }
