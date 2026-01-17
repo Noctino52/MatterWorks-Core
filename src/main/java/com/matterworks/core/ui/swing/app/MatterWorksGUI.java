@@ -15,6 +15,8 @@ import com.matterworks.core.ui.swing.panels.TopBarPanel;
 import com.matterworks.core.ui.swing.panels.VoidShopPanel;
 import com.matterworks.core.domain.player.BoosterStatus;
 import com.matterworks.core.ui.swing.panels.ProductionPanel;
+import com.matterworks.core.ui.swing.panels.FactionsPanel;
+
 
 
 
@@ -526,7 +528,8 @@ public class MatterWorksGUI extends JFrame {
             if (c instanceof InventoryDebugPanel p) p.dispose();
             if (c instanceof TechTreePanel p) p.dispose();
             if (c instanceof VoidShopPanel p) p.dispose();
-            if (c instanceof ProductionPanel p) p.dispose(); // ✅ NEW
+            if (c instanceof ProductionPanel p) p.dispose();
+            if (c instanceof FactionsPanel p) p.dispose(); // ✅ NEW
         }
 
         rightTabbedPane.removeAll();
@@ -535,13 +538,17 @@ public class MatterWorksGUI extends JFrame {
             rightTabbedPane.addTab("Shop", new InventoryDebugPanel(repository, currentPlayerUuid, gridManager, this::requestEconomyRefresh));
             rightTabbedPane.addTab("Tech Tree", new TechTreePanel(repository, currentPlayerUuid, gridManager));
             rightTabbedPane.addTab("Void Shop", new VoidShopPanel(repository, currentPlayerUuid, gridManager, this::requestEconomyRefresh));
-
-            // ✅ NEW: Production
             rightTabbedPane.addTab("Production", new ProductionPanel(currentPlayerUuid, gridManager));
+
+            // ✅ NEW: Factions (server-wide, DB-driven)
+            rightTabbedPane.addTab("Factions", new FactionsPanel(repository, gridManager));
+
+
         } else {
             rightTabbedPane.addTab("Info", new JPanel() {{ add(new JLabel("No Player Selected")); }});
         }
     }
+
 
 
     // ===== Switching / Session =====

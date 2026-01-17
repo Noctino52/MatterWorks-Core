@@ -2,17 +2,9 @@ package com.matterworks.core.ui;
 
 import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.database.DatabaseManager;
-import com.matterworks.core.database.dao.InventoryDAO;
-import com.matterworks.core.database.dao.PlayerDAO;
-import com.matterworks.core.database.dao.PlayerSessionDAO;
-import com.matterworks.core.database.dao.PlotDAO;
-import com.matterworks.core.database.dao.PlotMaintenanceDAO;
-import com.matterworks.core.database.dao.PlotResourceDAO;
-import com.matterworks.core.database.dao.ServerGameStateDAO;
-import com.matterworks.core.database.dao.TechDefinitionDAO;
-import com.matterworks.core.database.dao.TransactionDAO;
-import com.matterworks.core.database.dao.VoidShopDAO;
-import com.matterworks.core.database.dao.VoidShopPurchaseDAO;
+import com.matterworks.core.database.dao.*;
+import com.matterworks.core.domain.factions.FactionDefinition;
+import com.matterworks.core.domain.factions.FactionPricingRule;
 import com.matterworks.core.domain.machines.base.PlacedMachine;
 import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.player.PlayerProfile;
@@ -42,6 +34,9 @@ public class MariaDBAdapter {
     private final PlotMaintenanceDAO plotMaintenanceDAO;
     private final VoidShopPurchaseDAO voidShopPurchaseDAO;
 
+    // NEW: factions
+    private final FactionDAO factionDAO;
+
     public MariaDBAdapter(DatabaseManager dbManager) {
         this.dbManager = dbManager;
 
@@ -57,6 +52,8 @@ public class MariaDBAdapter {
         this.playerSessionDAO = new PlayerSessionDAO(dbManager);
         this.plotMaintenanceDAO = new PlotMaintenanceDAO(dbManager);
         this.voidShopPurchaseDAO = new VoidShopPurchaseDAO(dbManager);
+
+        this.factionDAO = new FactionDAO(dbManager);
     }
 
     // --- Extra ---
@@ -67,6 +64,29 @@ public class MariaDBAdapter {
     public DatabaseManager getDbManager() { return dbManager; }
 
     public TechDefinitionDAO getTechDefinitionDAO() { return techDefinitionDAO; }
+
+    // ==========================================================
+    // FACTIONS (DATA-DRIVEN)
+    // ==========================================================
+    public List<FactionDefinition> loadFactions() {
+        try { return factionDAO.loadAllFactions(); }
+        catch (Throwable t) { return List.of(); }
+    }
+
+    public List<FactionPricingRule> loadFactionRules(int factionId) {
+        try { return factionDAO.loadRulesForFaction(factionId); }
+        catch (Throwable t) { return List.of(); }
+    }
+
+    public int getActiveFactionId() {
+        try { return serverGameStateDAO.getActiveFactionId(); }
+        catch (Throwable t) { return 1; }
+    }
+
+    public void setActiveFactionId(int factionId) {
+        try { serverGameStateDAO.setActiveFactionId(factionId); }
+        catch (Throwable ignored) {}
+    }
 
     // ==========================================================
     // VOID SHOP
@@ -234,6 +254,12 @@ public class MariaDBAdapter {
     public long getTotalPlaytimeSeconds(UUID playerUuid) {
         return playerDAO.getTotalPlaytimeSeconds(playerUuid);
     }
+
+    public int getFactionRotationHours() {
+        try { return serverGameStateDAO.getFactionRotationHours(); }
+        catch (Throwable ignored) { return 0; }
+    }
+
 
     // ==========================================================
     // PLOT UNLOCK

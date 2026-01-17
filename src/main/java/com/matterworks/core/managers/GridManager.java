@@ -2,6 +2,8 @@ package com.matterworks.core.managers;
 
 import com.matterworks.core.common.Direction;
 import com.matterworks.core.common.GridPosition;
+import com.matterworks.core.domain.factions.FactionRotationInfo;
+import com.matterworks.core.domain.factions.FactionRotationSlot;
 import com.matterworks.core.domain.machines.base.PlacedMachine;
 import com.matterworks.core.domain.machines.registry.BlockRegistry;
 import com.matterworks.core.domain.matter.MatterColor;
@@ -20,6 +22,13 @@ import com.matterworks.core.domain.telemetry.production.ProductionStatsView;
 import com.matterworks.core.domain.telemetry.production.ProductionStatLine;
 import com.matterworks.core.domain.telemetry.production.TelemetryKeyFormatter;
 import com.matterworks.core.domain.telemetry.production.KeyKind;
+
+import com.matterworks.core.domain.factions.FactionDefinition;
+import com.matterworks.core.domain.factions.FactionRotationInfo;
+
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
 
 
 
@@ -227,7 +236,53 @@ public class GridManager {
     public void preloadPlotFromDB(UUID ownerId) { world.preloadPlotFromDB(ownerId); }
     public void loadPlotFromDB(UUID ownerId) { world.loadPlotFromDB(ownerId); }
 
-    public void tick(long t) { world.tick(t); }
+    public void tick(long t) {
+
+        // Check rotation every 5 seconds (20 TPS * 5 = 100 ticks).
+        // Rotation is based on real-world time (System.currentTimeMillis), not on uptime.
+        if (t % 100 == 0) {
+            try {
+                int hours = repository.getFactionRotationHours();
+                if (hours > 0) {
+
+                    var factions = repository.loadFactions();
+                    if (factions != null && !factions.isEmpty()) {
+
+                        // Ensure deterministic ordering: sort_order, then id
+                        factions = new ArrayList<>(factions);
+                        factions.sort(Comparator
+                                .comparingInt((com.matterworks.core.domain.factions.FactionDefinition f) -> f.sortOrder())
+                                .thenComparingInt(com.matterworks.core.domain.factions.FactionDefinition::id));
+
+                        long periodMs = (long) hours * 3600_000L;
+                        if (periodMs <= 0L) periodMs = 3600_000L; // safety fallback
+
+                        long nowMs = System.currentTimeMillis();
+                        long slot = Math.floorDiv(nowMs, periodMs);
+
+                        int idx = (int) Math.floorMod(slot, factions.size());
+                        int desiredFactionId = factions.get(idx).id();
+
+                        int currentFactionId = repository.getActiveFactionId();
+                        if (currentFactionId != desiredFactionId) {
+                            repository.setActiveFactionId(desiredFactionId);
+
+                            var def = factions.get(idx);
+                            System.out.println("[FACTIONS] Rotation applied -> "
+                                    + def.displayName() + " (#" + def.id() + ")"
+                                    + " | hours=" + hours
+                                    + " | nowMs=" + nowMs);
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {
+                // Never break the tick loop because of rotation.
+            }
+        }
+
+        world.tick(t);
+    }
+
 
     public boolean placeStructure(UUID ownerId, GridPosition pos, String nativeBlockId) { return world.placeStructure(ownerId, pos, nativeBlockId); }
     public boolean placeMachine(UUID ownerId, GridPosition pos, String typeId, Direction orientation) { return world.placeMachine(ownerId, pos, typeId, orientation); }
@@ -611,6 +666,123 @@ public double getEffectiveMachineSpeedMultiplier(UUID ownerId, String machineTyp
         if (p == null) return 0.0;
         return economy.getPrestigeActionCost(p);
     }
+
+    public FactionRotationInfo getFactionRotationInfo() {
+        try {
+            int hours = repository.getFactionRotationHours();
+
+            // Current active faction as stored/resolved from DB (legacy-safe)
+            int activeId = Math.max(1, repository.getActiveFactionId());
+
+            List<FactionDefinition> factions = repository.loadFactions();
+            if (factions == null || factions.isEmpty()) {
+                return FactionRotationInfo.disabled(activeId, "Faction #" + activeId);
+            }
+
+            // Deterministic ordering (same as rotation logic)
+            List<FactionDefinition> ordered = new ArrayList<>(factions);
+            ordered.sort(Comparator
+                    .comparingInt(FactionDefinition::sortOrder)
+                    .thenComparingInt(FactionDefinition::id));
+
+            FactionDefinition currentDef = ordered.stream()
+                    .filter(f -> f != null && f.id() == activeId)
+                    .findFirst()
+                    .orElse(null);
+
+            String currentName = (currentDef != null) ? currentDef.displayName() : ("Faction #" + activeId);
+
+            if (hours <= 0) {
+                return FactionRotationInfo.disabled(activeId, currentName);
+            }
+
+            long periodMs = (long) hours * 3600_000L;
+            if (periodMs <= 0L) periodMs = 3600_000L;
+
+            long nowMs = System.currentTimeMillis();
+
+            long slot = Math.floorDiv(nowMs, periodMs);
+            int idx = (int) Math.floorMod(slot, ordered.size());
+
+            int computedNowId = ordered.get(idx).id();
+            String computedNowName = ordered.get(idx).displayName();
+
+            long nextChange = (slot + 1L) * periodMs;
+            long remaining = Math.max(0L, nextChange - nowMs);
+
+            int nextIdx = (idx + 1) % ordered.size();
+            int nextId = ordered.get(nextIdx).id();
+            String nextName = ordered.get(nextIdx).displayName();
+
+            return new FactionRotationInfo(
+                    true,
+                    hours,
+                    computedNowId,
+                    computedNowName,
+                    nextId,
+                    nextName,
+                    remaining,
+                    nextChange
+            );
+
+        } catch (Throwable t) {
+            // Fallback safe
+            int activeId = 1;
+            try { activeId = Math.max(1, repository.getActiveFactionId()); } catch (Throwable ignored) {}
+            return FactionRotationInfo.disabled(activeId, "Faction #" + activeId);
+        }
+    }
+
+    public java.util.List<FactionRotationSlot> getFactionRotationSchedule(int count) {
+        int n = Math.max(1, Math.min(count, 48)); // safety: max 48 slots
+        try {
+            int hours = repository.getFactionRotationHours();
+            if (hours <= 0) return java.util.List.of();
+
+            java.util.List<com.matterworks.core.domain.factions.FactionDefinition> factions = repository.loadFactions();
+            if (factions == null || factions.isEmpty()) return java.util.List.of();
+
+            java.util.List<com.matterworks.core.domain.factions.FactionDefinition> ordered = new java.util.ArrayList<>(factions);
+            ordered.sort(java.util.Comparator
+                    .comparingInt(com.matterworks.core.domain.factions.FactionDefinition::sortOrder)
+                    .thenComparingInt(com.matterworks.core.domain.factions.FactionDefinition::id));
+
+            long periodMs = (long) hours * 3600_000L;
+            if (periodMs <= 0L) periodMs = 3600_000L;
+
+            long nowMs = System.currentTimeMillis();
+            long currentSlot = Math.floorDiv(nowMs, periodMs);
+
+            java.util.List<FactionRotationSlot> out = new java.util.ArrayList<>(n);
+
+            for (int i = 0; i < n; i++) {
+                long slot = currentSlot + i;
+                int idx = (int) Math.floorMod(slot, ordered.size());
+
+                var def = ordered.get(idx);
+                long start = slot * periodMs;
+                long end = (slot + 1L) * periodMs;
+
+                out.add(new FactionRotationSlot(
+                        def.id(),
+                        def.displayName(),
+                        start,
+                        end,
+                        Math.max(0L, start - nowMs),
+                        Math.max(0L, end - nowMs),
+                        i == 0
+                ));
+            }
+
+            return java.util.List.copyOf(out);
+
+        } catch (Throwable ignored) {
+            return java.util.List.of();
+        }
+    }
+
+
+
 
 
 

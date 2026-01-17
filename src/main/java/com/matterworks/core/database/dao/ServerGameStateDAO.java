@@ -1,12 +1,14 @@
 package com.matterworks.core.database.dao;
 
 import com.matterworks.core.database.DatabaseManager;
+import com.matterworks.core.database.dao.SqlCompat;
 import com.matterworks.core.ui.ServerConfig;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.Locale;
 
 public class ServerGameStateDAO {
 
@@ -14,6 +16,116 @@ public class ServerGameStateDAO {
 
     public ServerGameStateDAO(DatabaseManager db) {
         this.db = db;
+    }
+
+    // ==========================================================
+    // FACTION ROTATION / ACTIVE FACTION
+    // ==========================================================
+    public int getActiveFactionId() {
+
+        try (Connection conn = db.getConnection()) {
+
+            // Support legacy column names too
+            String col = SqlCompat.firstExistingColumn(conn, "server_gamestate",
+                    "active_faction_id", "active_factionid", "active_faction_code");
+            if (col == null) return 1;
+
+            String sql = "SELECT " + col + " FROM server_gamestate WHERE id = 1";
+            try (PreparedStatement ps = conn.prepareStatement(sql);
+                 ResultSet rs = ps.executeQuery()) {
+
+                if (!rs.next()) return 1;
+
+                String raw = rs.getString(1);
+                if (raw == null) return 1;
+
+                String v = raw.trim();
+                if (v.isEmpty()) return 1;
+
+                // If numeric -> use it directly
+                Integer asInt = tryParseInt(v);
+                if (asInt != null) return Math.max(1, asInt);
+
+                // Otherwise treat as faction CODE (legacy like "KWEEBEC") and resolve from DB
+                int resolved = resolveFactionIdByCodeOrName(conn, v);
+                return (resolved > 0) ? resolved : 1;
+            }
+
+        } catch (SQLException e) {
+            // If column missing etc. fallback safely
+            if (!SqlCompat.isUnknownColumn(e)) e.printStackTrace();
+        }
+
+        return 1;
+    }
+
+    public void setActiveFactionId(int factionId) {
+
+        int v = Math.max(1, factionId);
+
+        try (Connection conn = db.getConnection()) {
+
+            String col = SqlCompat.firstExistingColumn(conn, "server_gamestate",
+                    "active_faction_id", "active_factionid", "active_faction_code");
+            if (col == null) return;
+
+            String sql = "UPDATE server_gamestate SET " + col + " = ? WHERE id = 1";
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                // write as String to support both VARCHAR and INT columns safely
+                ps.setString(1, String.valueOf(v));
+                ps.executeUpdate();
+            }
+
+        } catch (SQLException e) {
+            if (!SqlCompat.isUnknownColumn(e)) e.printStackTrace();
+        }
+    }
+
+    private static Integer tryParseInt(String v) {
+        try {
+            return Integer.parseInt(v);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static int resolveFactionIdByCodeOrName(Connection conn, String token) {
+        if (token == null) return -1;
+        String t = token.trim();
+        if (t.isEmpty()) return -1;
+
+        // 1) match by code (case-insensitive)
+        String sqlCode = "SELECT id FROM factions WHERE UPPER(code) = UPPER(?) LIMIT 1";
+        try (PreparedStatement ps = conn.prepareStatement(sqlCode)) {
+            ps.setString(1, t);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return rs.getInt(1);
+            }
+        } catch (SQLException ignored) {}
+
+        // 2) fallback: match by display_name containing token (case-insensitive)
+        // Works for legacy values like "KWEEBEC" with display_name = "Kweebec Grove Council"
+        String sqlName = "SELECT id FROM factions WHERE UPPER(display_name) LIKE CONCAT('%', UPPER(?), '%') LIMIT 1";
+        try (PreparedStatement ps = conn.prepareStatement(sqlName)) {
+            ps.setString(1, t);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return rs.getInt(1);
+            }
+        } catch (SQLException ignored) {}
+
+        // 3) extra fallback: common normalization (KWEEBEC -> Kweebec)
+        String normalized = t.toLowerCase(Locale.ROOT);
+        if (normalized.length() > 1) {
+            normalized = Character.toUpperCase(normalized.charAt(0)) + normalized.substring(1);
+            try (PreparedStatement ps = conn.prepareStatement(sqlName)) {
+                ps.setString(1, normalized);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) return rs.getInt(1);
+                }
+            } catch (SQLException ignored) {}
+        }
+
+        return -1;
     }
 
     public int getDefaultItemPlacedOnPlotCap() {
@@ -231,59 +343,41 @@ public class ServerGameStateDAO {
         );
     }
 
-
     public int getVoidPlotItemBreakerIncreased() {
         String sql = "SELECT void_plotitembreaker_increased FROM server_gamestate LIMIT 1";
         try (Connection conn = db.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql);
              ResultSet rs = ps.executeQuery()) {
             if (rs.next()) return Math.max(0, rs.getInt(1));
-        } catch (SQLException e) {
-            e.printStackTrace();
-        }
+        } catch (SQLException ignored) {}
         return 0;
     }
 
     public int addVoidPlotItemBreakerIncreased(int delta) {
-        delta = Math.max(0, delta);
-        if (delta <= 0) return getVoidPlotItemBreakerIncreased();
-
-        String up = "UPDATE server_gamestate SET void_plotitembreaker_increased = GREATEST(0, void_plotitembreaker_increased + ?)";
-        String sel = "SELECT void_plotitembreaker_increased FROM server_gamestate LIMIT 1";
-
-        try (Connection conn = db.getConnection()) {
-            conn.setAutoCommit(false);
-
-            try (PreparedStatement ps = conn.prepareStatement(up)) {
-                ps.setInt(1, delta);
-                ps.executeUpdate();
-            }
-
-            int out = 0;
-            try (PreparedStatement ps = conn.prepareStatement(sel);
-                 ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) out = Math.max(0, rs.getInt(1));
-            }
-
-            conn.commit();
-            return out;
-        } catch (SQLException e) {
-            e.printStackTrace();
-        }
+        int d = delta;
+        if (d == 0) return getVoidPlotItemBreakerIncreased();
+        String sql = "UPDATE server_gamestate SET void_plotitembreaker_increased = GREATEST(0, void_plotitembreaker_increased + ?) ";
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, d);
+            ps.executeUpdate();
+        } catch (SQLException ignored) {}
         return getVoidPlotItemBreakerIncreased();
     }
 
     // ==========================================================
     // GLOBAL OVERCLOCK (server-wide, real-time)
     // ==========================================================
-
     public long getGlobalOverclockEndEpochMs() {
         String sql = "SELECT global_overclock_end_ms FROM server_gamestate WHERE id = 1";
         try (Connection conn = db.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql);
              ResultSet rs = ps.executeQuery()) {
 
-            if (rs.next()) return Math.max(0L, rs.getLong(1));
+            if (rs.next()) {
+                long v = rs.getLong("global_overclock_end_ms");
+                return Math.max(0L, v);
+            }
         } catch (SQLException e) {
             if (!SqlCompat.isUnknownColumn(e)) e.printStackTrace();
         }
@@ -297,7 +391,7 @@ public class ServerGameStateDAO {
              ResultSet rs = ps.executeQuery()) {
 
             if (rs.next()) {
-                double v = rs.getDouble(1);
+                double v = rs.getDouble("global_overclock_multiplier");
                 if (Double.isNaN(v) || Double.isInfinite(v) || v <= 0.0) return 1.0;
                 return v;
             }
@@ -313,7 +407,10 @@ public class ServerGameStateDAO {
              PreparedStatement ps = conn.prepareStatement(sql);
              ResultSet rs = ps.executeQuery()) {
 
-            if (rs.next()) return Math.max(0L, rs.getLong(1));
+            if (rs.next()) {
+                long v = rs.getLong("global_overclock_last_duration_seconds");
+                return Math.max(0L, v);
+            }
         } catch (SQLException e) {
             if (!SqlCompat.isUnknownColumn(e)) e.printStackTrace();
         }
@@ -321,23 +418,38 @@ public class ServerGameStateDAO {
     }
 
     public void setGlobalOverclockState(long endEpochMs, double multiplier, long lastDurationSeconds) {
-        long endMs = Math.max(0L, endEpochMs);
+        String sql = "UPDATE server_gamestate SET global_overclock_end_ms = ?, global_overclock_multiplier = ?, global_overclock_last_duration_seconds = ? WHERE id = 1";
+
+        long end = Math.max(0L, endEpochMs);
         double mult = multiplier;
         if (Double.isNaN(mult) || Double.isInfinite(mult) || mult <= 0.0) mult = 1.0;
 
-        long lastDur = Math.max(0L, lastDurationSeconds);
+        long dur = Math.max(0L, lastDurationSeconds);
 
-        String sql = "UPDATE server_gamestate SET global_overclock_end_ms = ?, global_overclock_multiplier = ?, global_overclock_last_duration_seconds = ? WHERE id = 1";
         try (Connection conn = db.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
 
-            ps.setLong(1, endMs);
+            ps.setLong(1, end);
             ps.setDouble(2, mult);
-            ps.setLong(3, lastDur);
+            ps.setLong(3, dur);
             ps.executeUpdate();
 
         } catch (SQLException e) {
             if (!SqlCompat.isUnknownColumn(e)) e.printStackTrace();
         }
     }
+
+    public int getFactionRotationHours() {
+        String sql = "SELECT faction_rotation_hours FROM server_gamestate WHERE id = 1";
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+
+            if (rs.next()) return Math.max(0, rs.getInt(1));
+        } catch (SQLException e) {
+            if (!SqlCompat.isUnknownColumn(e)) e.printStackTrace();
+        }
+        return 0;
+    }
+
 }
