@@ -48,62 +48,6 @@ public class MarketManager {
         basePrices.put(MatterColor.WHITE, 100.0);
     }
 
-    public void sellItem(MatterPayload item, UUID sellerId) {
-        if (item == null || sellerId == null) return;
-
-        double value = calculateBaseValue(item);
-
-        // 0) Faction multiplier (DATA-DRIVEN: DB -> active_faction_id + rules)
-        FactionPricingRule appliedRule = null;
-        double factionMult = 1.0;
-        try {
-            refreshFactionCacheIfNeeded();
-            appliedRule = findBestMatchingRule(item, cachedRulesForActiveFaction);
-            factionMult = (appliedRule != null ? appliedRule.multiplier() : 1.0);
-        } catch (Throwable ignored) {}
-
-        factionMult = sanitizeMultiplier(factionMult);
-        value = value * factionMult;
-
-        // 1) Prestige multiplier
-        value = applyPrestigeSellMultiplier(value, sellerId);
-
-        // 2) Nexus tech tier multiplier (Tier 2/3)
-        value = applyNexusTechSellMultiplier(value, sellerId);
-
-        gridManager.addMoney(
-                sellerId,
-                value,
-                "MATTER_SELL",
-                item.shape() != null ? item.shape().name() : "COLOR"
-        );
-
-        // Telemetry: final money earned at nexus (already includes multipliers)
-        try {
-            if (gridManager.getProductionTelemetry() != null) {
-                gridManager.getProductionTelemetry().recordSold(sellerId, item, 1L, value);
-            }
-        } catch (Throwable ignored) {}
-
-        // Debug log
-        String shapeTxt = (item.shape() != null ? item.shape().name() : "COLOR");
-        String colorTxt = (item.color() != null ? item.color().name() : "RAW");
-        String effTxt = formatEffects(item);
-
-        String factionTxt = (cachedActiveFaction != null)
-                ? (cachedActiveFaction.displayName() + " #" + cachedActiveFaction.id())
-                : ("Faction #" + Math.max(1, cachedActiveFactionId));
-
-        String ruleTxt = (appliedRule != null)
-                ? ("ruleId=" + appliedRule.id() + " x" + String.format(Locale.US, "%.3f", factionMult)
-                + (appliedRule.note() != null && !appliedRule.note().isBlank() ? " (" + appliedRule.note() + ")" : ""))
-                : "no_rule x1.000";
-
-        System.out.println("💰 MARKET: Sold " + shapeTxt + " (" + colorTxt + ") " + effTxt
-                + " | " + factionTxt + " | " + ruleTxt
-                + " -> $" + String.format(Locale.US, "%.2f", value));
-    }
-
     // ==========================================================
     // FACTION PRICING (Opzione B: best-match wins)
     // ==========================================================
@@ -229,6 +173,66 @@ public class MarketManager {
         String joined = item.effects().stream().map(Enum::name).collect(Collectors.joining("+"));
         return "[" + joined + "]";
     }
+
+
+    public void sellItem(MatterPayload item, UUID sellerId) {
+        if (item == null || sellerId == null) return;
+
+        double value = calculateBaseValue(item);
+
+        // 0) Faction multiplier (DATA-DRIVEN: DB -> active_faction_id + rules)
+        FactionPricingRule appliedRule = null;
+        double factionMult = 1.0;
+        try {
+            refreshFactionCacheIfNeeded();
+            appliedRule = findBestMatchingRule(item, cachedRulesForActiveFaction);
+            factionMult = (appliedRule != null ? appliedRule.multiplier() : 1.0);
+        } catch (Throwable ignored) {}
+
+        factionMult = sanitizeMultiplier(factionMult);
+        value = value * factionMult;
+
+        // 1) Prestige multiplier
+        value = applyPrestigeSellMultiplier(value, sellerId);
+
+        // 2) Nexus tech tier multiplier (Tier 2/3)
+        value = applyNexusTechSellMultiplier(value, sellerId);
+
+        gridManager.addMoney(
+                sellerId,
+                value,
+                "MATTER_SELL",
+                item.shape() != null ? item.shape().name() : "COLOR",
+                cachedActiveFactionId  // ✅ buyer attivo (fazione attiva ora)
+        );
+
+        // Telemetry: final money earned at nexus (already includes multipliers)
+        try {
+            if (gridManager.getProductionTelemetry() != null) {
+                gridManager.getProductionTelemetry().recordSold(sellerId, item, 1L, value);
+            }
+        } catch (Throwable ignored) {}
+
+        // Debug log (unchanged)
+        String shapeTxt = (item.shape() != null ? item.shape().name() : "COLOR");
+        String colorTxt = (item.color() != null ? item.color().name() : "RAW");
+        String effTxt = formatEffects(item);
+
+        String factionTxt = (cachedActiveFaction != null)
+                ? (cachedActiveFaction.displayName() + " #" + cachedActiveFaction.id())
+                : ("Faction #" + Math.max(1, cachedActiveFactionId));
+
+        String ruleTxt = (appliedRule != null)
+                ? ("ruleId=" + appliedRule.id() + " x" + String.format(Locale.US, "%.3f", factionMult)
+                + (appliedRule.note() != null && !appliedRule.note().isBlank() ? " (" + appliedRule.note() + ")" : ""))
+                : "no_rule x1.000";
+
+        System.out.println("💰 MARKET: Sold " + shapeTxt + " (" + colorTxt + ") " + effTxt
+                + " | " + factionTxt + " | " + ruleTxt
+                + " -> $" + String.format(Locale.US, "%.2f", value));
+    }
+
+
 
     private double calculateBaseValue(MatterPayload item) {
         double base = basePrices.getOrDefault(item.color(), 0.5);

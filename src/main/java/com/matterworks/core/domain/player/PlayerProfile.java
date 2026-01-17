@@ -15,6 +15,9 @@ public class PlayerProfile {
     private int prestigeLevel;
     private PlayerRank rank;
 
+    // Nullable: not used by gameplay yet (requested scaffold)
+    private Integer chosenFactionId;
+
     private Set<String> unlockedTechs = new HashSet<>();
 
     // ==========================================================
@@ -53,6 +56,21 @@ public class PlayerProfile {
     public int getPrestigeLevel() { return prestigeLevel; }
     public void setPrestigeLevel(int prestigeLevel) { this.prestigeLevel = prestigeLevel; }
 
+    // ==========================================================
+    // CHOSEN FACTION (profile-only, nullable)
+    // ==========================================================
+    public Integer getChosenFactionId() {
+        return chosenFactionId;
+    }
+
+    public void setChosenFactionId(Integer chosenFactionId) {
+        if (chosenFactionId == null || chosenFactionId <= 0) {
+            this.chosenFactionId = null;
+        } else {
+            this.chosenFactionId = chosenFactionId;
+        }
+    }
+
     public Set<String> getUnlockedTechs() { return unlockedTechs; }
 
     public void addTech(String techId) {
@@ -89,51 +107,21 @@ public class PlayerProfile {
         return Math.max(0L, remaining);
     }
 
+    public long getOverclockStartPlaytimeSeconds() { return overclockStartPlaytimeSeconds; }
+    public void setOverclockStartPlaytimeSeconds(long v) { this.overclockStartPlaytimeSeconds = Math.max(0L, v); }
 
-    // ==========================================================
-// OVERCLOCK getters/setters (required by DAO + GridManager)
-// ==========================================================
+    public long getOverclockDurationSeconds() { return overclockDurationSeconds; }
+    public void setOverclockDurationSeconds(long v) { this.overclockDurationSeconds = v; }
 
-
-
-// ==========================================================
-// OVERCLOCK getters/setters (required by DAO + GridManager)
-// ==========================================================
-
-    public long getOverclockStartPlaytimeSeconds() {
-        return overclockStartPlaytimeSeconds;
-    }
-
-    public void setOverclockStartPlaytimeSeconds(long v) {
-        this.overclockStartPlaytimeSeconds = Math.max(0L, v);
-    }
-
-    public long getOverclockDurationSeconds() {
-        return overclockDurationSeconds;
-    }
-
-    public void setOverclockDurationSeconds(long v) {
-        this.overclockDurationSeconds = v;
-    }
-
-    public double getOverclockMultiplier() {
-        return overclockMultiplier;
-    }
-
+    public double getOverclockMultiplier() { return overclockMultiplier; }
     public void setOverclockMultiplier(double v) {
-        if (Double.isNaN(v) || Double.isInfinite(v) || v <= 0.0) {
-            this.overclockMultiplier = 1.0;
-        } else {
-            this.overclockMultiplier = v;
-        }
+        if (Double.isNaN(v) || Double.isInfinite(v) || v <= 0.0) this.overclockMultiplier = 1.0;
+        else this.overclockMultiplier = v;
     }
 
     public boolean isOverclockActive(long currentTotalPlaytimeSeconds) {
         if (overclockMultiplier <= 1.0) return false;
-
-        // lifetime
-        if (overclockDurationSeconds == -1) return true;
-
+        if (overclockDurationSeconds == -1) return true; // lifetime
         if (overclockDurationSeconds <= 0) return false;
 
         long elapsed = Math.max(0L, currentTotalPlaytimeSeconds - overclockStartPlaytimeSeconds);
@@ -143,9 +131,6 @@ public class PlayerProfile {
     public double getActiveOverclockMultiplier(long currentTotalPlaytimeSeconds) {
         return isOverclockActive(currentTotalPlaytimeSeconds) ? overclockMultiplier : 1.0;
     }
-
-
-
 
     public void clearOverclock() {
         this.overclockStartPlaytimeSeconds = 0L;

@@ -780,6 +780,10 @@ public double getEffectiveMachineSpeedMultiplier(UUID ownerId, String machineTyp
             return java.util.List.of();
         }
     }
+    public void addMoney(UUID playerId, double amount, String actionType, String itemId, Integer factionId) {
+        economy.addMoney(playerId, amount, actionType, itemId, factionId, amount);
+    }
+
 
 
 

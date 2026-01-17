@@ -165,9 +165,6 @@ public class MariaDBAdapter {
     // ==========================================================
     // TRANSACTIONS
     // ==========================================================
-    public void logTransaction(PlayerProfile player, String actionType, String currency, double amount, String itemId) {
-        transactionDAO.logTransaction(player, actionType, currency, BigDecimal.valueOf(amount), itemId);
-    }
 
     // ==========================================================
     // CONFIG
@@ -259,6 +256,29 @@ public class MariaDBAdapter {
         try { return serverGameStateDAO.getFactionRotationHours(); }
         catch (Throwable ignored) { return 0; }
     }
+
+    // ==========================================================
+// TRANSACTIONS
+// ==========================================================
+    public void logTransaction(PlayerProfile player, String actionType, String currency, double amount, String itemId) {
+        logTransaction(player, actionType, currency, amount, itemId, null, null);
+    }
+
+    public void logTransaction(
+            PlayerProfile player,
+            String actionType,
+            String currency,
+            double amount,
+            String itemId,
+            Integer factionId,
+            Double value
+    ) {
+        java.math.BigDecimal bdAmount = java.math.BigDecimal.valueOf(amount);
+        java.math.BigDecimal bdValue = (value != null ? java.math.BigDecimal.valueOf(value) : null);
+
+        transactionDAO.logTransaction(player, actionType, currency, bdAmount, itemId, factionId, bdValue);
+    }
+
 
 
     // ==========================================================

@@ -306,14 +306,30 @@ final class GridEconomyService {
     // ==========================================================
     // PROFILES / MONEY
     // ==========================================================
+// ==========================================================
+// PROFILES / MONEY
+// ==========================================================
     void addMoney(UUID playerId, double amount, String actionType, String itemId) {
+        addMoney(playerId, amount, actionType, itemId, null, null);
+    }
+
+    void addMoney(UUID playerId, double amount, String actionType, String itemId, Integer factionId, Double value) {
         PlayerProfile p = state.getCachedProfile(playerId);
         if (p == null) return;
+
         p.modifyMoney(amount);
         repository.savePlayerProfile(p);
-        repository.logTransaction(p, actionType, "MONEY", amount, itemId);
+
+        // If caller didn't provide value, default to "amount" for MATTER_SELL (your request: "quanto valeva")
+        Double valueToLog = value;
+        if (valueToLog == null && "MATTER_SELL".equals(actionType)) {
+            valueToLog = amount;
+        }
+
+        repository.logTransaction(p, actionType, "MONEY", amount, itemId, factionId, valueToLog);
         state.activeProfileCache.put(playerId, p);
     }
+
 
     // ==========================================================
     // SHOP / ECONOMY
