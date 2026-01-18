@@ -5,6 +5,9 @@ import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.domain.machines.base.PlacedMachine;
 import com.matterworks.core.domain.machines.inspection.MachineInspectionInfo;
 import com.matterworks.core.domain.machines.inspection.MachineInspector;
+import com.matterworks.core.domain.machines.logistics.ConveyorBelt;
+import com.matterworks.core.domain.machines.logistics.Merger;
+import com.matterworks.core.domain.machines.logistics.Splitter;
 import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.managers.GridManager;
 
@@ -30,13 +33,6 @@ final class FactoryPanelController {
     private final ScheduledExecutorService refreshExec;
     private final ExecutorService commandExec;
 
-    // Tooltip cache (EDT hot path)
-    private volatile PlacedMachine lastTooltipMachine = null;
-    private volatile String lastTooltipHtml = null;
-    private volatile long lastTooltipAtNanos = 0L;
-    private static final long TOOLTIP_TTL_NANOS = 250_000_000L; // 250ms
-
-
     // Tooltip work must never block EDT
     private final ScheduledExecutorService tooltipExec;
 
@@ -51,17 +47,19 @@ final class FactoryPanelController {
     // Cache PlotAreaInfo computed in background (never call GridManager from EDT)
     private volatile GridManager.PlotAreaInfo plotAreaInfoSnapshot = null;
 
+    // Meta cache used by renderer (EDT must be read-only)
     private final IdentityHashMap<PlacedMachine, JsonObject> metaCache = new IdentityHashMap<>();
     private final IdentityHashMap<PlacedMachine, Long> metaCacheNanos = new IdentityHashMap<>();
 
-    private static final long META_CACHE_TTL_NANOS = 500_000_000L; // 0.5s
+    private static final long META_CACHE_TTL_NANOS = 600_000_000L; // 0.6s
+    private static final long META_REFRESH_BUDGET_NANOS = 3_000_000L; // 3ms per refresh tick
 
     private volatile boolean repaintQueued = false;
-    private static final int VISUAL_REPAINT_MS = 250;
+    private static final int VISUAL_REPAINT_MS = 120;
 
-    // Tooltip cache/debounce
+    // Tooltip cache/debounce (cached-only on EDT)
     private static final int TOOLTIP_DEBOUNCE_MS = 120;
-    private static final long TOOLTIP_CACHE_TTL_NANOS = 1_000_000_000L; // 1.0s
+    private static final long TOOLTIP_CACHE_TTL_NANOS = 1_000_000_000L; // 1s
 
     private final AtomicLong tooltipSeq = new AtomicLong(0);
     private volatile ScheduledFuture<?> pendingTooltipTask = null;
@@ -110,7 +108,7 @@ final class FactoryPanelController {
         hookInputListeners();
 
         // Structural snapshot refresh (machines/resources/plot area)
-        refreshExec.scheduleWithFixedDelay(this::refreshCacheLoop, 0, 180, TimeUnit.MILLISECONDS);
+        refreshExec.scheduleWithFixedDelay(this::refreshCacheLoop, 0, 120, TimeUnit.MILLISECONDS);
     }
 
     void dispose() {
@@ -149,22 +147,14 @@ final class FactoryPanelController {
         return plotAreaInfoSnapshot;
     }
 
+    /**
+     * EDT-SAFE: cached-only.
+     * NEVER serializes machines here. Background refresh fills this cache.
+     */
     JsonObject getMetaCached(PlacedMachine m) {
         if (m == null) return null;
-
-        long now = System.nanoTime();
         synchronized (metaCache) {
-            Long last = metaCacheNanos.get(m);
-            if (last != null && (now - last) <= META_CACHE_TTL_NANOS) {
-                return metaCache.get(m);
-            }
-
-            JsonObject meta;
-            try { meta = m.serialize(); } catch (Throwable ex) { meta = null; }
-
-            metaCache.put(m, meta);
-            metaCacheNanos.put(m, now);
-            return meta;
+            return metaCache.get(m);
         }
     }
 
@@ -176,7 +166,6 @@ final class FactoryPanelController {
             metaCacheNanos.clear();
         }
 
-        // Also invalidate tooltip cache (it depends on snapshot + tier info)
         invalidateTooltipCache();
 
         refreshOnce(true);
@@ -223,11 +212,13 @@ final class FactoryPanelController {
             sb.append("-<br/>");
             return;
         }
-        for (String s : lines) sb.append(esc(s)).append("<br/>");
+        for (String l : lines) {
+            sb.append(esc(l)).append("<br/>");
+        }
     }
 
     private static String safe(String s) {
-        return (s == null || s.isBlank()) ? "Unknown" : s;
+        return (s == null) ? "" : s;
     }
 
     private static String esc(String s) {
@@ -324,7 +315,6 @@ final class FactoryPanelController {
 
         if (state.mouseHoverPos != null) {
             state.clearHover();
-            // Invalidate tooltip when leaving the grid
             invalidateTooltipCache();
             return true;
         }
@@ -359,7 +349,6 @@ final class FactoryPanelController {
         state.lastHoverGX = target.x();
         state.lastHoverGZ = target.z();
 
-        // Precompute tooltip for the clicked cell too
         requestTooltipAsync(target);
 
         repaintCoalesced();
@@ -425,10 +414,11 @@ final class FactoryPanelController {
             areaInfo = null;
         }
 
+        // Always refresh meta-cache in background (EDT reads only)
+        refreshMetaCache(machines);
+
         long fp = fingerprint(machines, resources);
         if (!forceRepaint && fp == lastFingerprint) {
-            // No need to push a repaint here: VISUAL_REPAINT_MS timer keeps it smooth.
-            // However, we still update plotAreaInfoSnapshot if it changed.
             plotAreaInfoSnapshot = areaInfo;
             return;
         }
@@ -437,10 +427,64 @@ final class FactoryPanelController {
         snapshot = new Snapshot(machines, resources);
         plotAreaInfoSnapshot = areaInfo;
 
-        // Snapshot changed => tooltip may be stale
         invalidateTooltipCache();
 
         if (forceRepaint) repaintCoalesced();
+    }
+
+    private boolean needsMeta(PlacedMachine m) {
+        if (m == null) return false;
+        if (m instanceof ConveyorBelt) return true;
+        if (m instanceof Splitter) return true;
+        if (m instanceof Merger) return true;
+
+        String id = m.getTypeId();
+        return "STRUCTURE_GENERIC".equals(id);
+    }
+
+    /**
+     * Background-only: refresh meta-cache with a tight time budget and without holding the lock
+     * while serializing (prevents EDT stalls).
+     */
+    private void refreshMetaCache(Map<GridPosition, PlacedMachine> machines) {
+        if (disposed) return;
+        if (machines == null || machines.isEmpty()) return;
+
+        final long now = System.nanoTime();
+        final long deadline = now + META_REFRESH_BUDGET_NANOS;
+
+        // De-duplicate instances
+        IdentityHashMap<PlacedMachine, Boolean> seen = new IdentityHashMap<>();
+
+        for (PlacedMachine m : machines.values()) {
+            if (System.nanoTime() > deadline) break;
+            if (m == null) continue;
+            if (!needsMeta(m)) continue;
+            if (seen.put(m, Boolean.TRUE) != null) continue;
+
+            boolean shouldRebuild;
+            synchronized (metaCache) {
+                Long last = metaCacheNanos.get(m);
+                shouldRebuild = (last == null) || ((now - last) > META_CACHE_TTL_NANOS);
+                if (shouldRebuild) {
+                    // Stampede guard
+                    metaCacheNanos.put(m, now);
+                }
+            }
+            if (!shouldRebuild) continue;
+
+            JsonObject meta;
+            try {
+                meta = m.serialize();
+            } catch (Throwable ex) {
+                meta = null;
+            }
+
+            synchronized (metaCache) {
+                metaCache.put(m, meta);
+                metaCacheNanos.put(m, now);
+            }
+        }
     }
 
     private long fingerprint(Map<GridPosition, PlacedMachine> machines, Map<GridPosition, MatterColor> resources) {
@@ -489,8 +533,8 @@ final class FactoryPanelController {
     }
 
     /**
-     * EDT-safe: returns only cached tooltip html.
-     * If missing/stale, it schedules an async computation (debounced) and returns null.
+     * EDT-safe: cached-only tooltip.
+     * If missing/stale, schedules an async computation and returns null.
      */
     String getInspectionTooltipHtml(int mouseX, int mouseY) {
         if (disposed) return null;
@@ -498,48 +542,24 @@ final class FactoryPanelController {
         GridPosition p = gridPosFromMouse(mouseX, mouseY);
         if (p == null) return null;
 
-        Snapshot snap = snapshot;
-        if (snap == null || snap.machines() == null) return null;
-
-        PlacedMachine m = snap.machines().get(p);
-        if (m == null) return null;
-
-        // Fast path cache (same machine hovered frequently)
+        // Cached value for the cell + current snapshot fingerprint
         long now = System.nanoTime();
-        if (m == lastTooltipMachine && lastTooltipHtml != null && (now - lastTooltipAtNanos) <= TOOLTIP_TTL_NANOS) {
-            return lastTooltipHtml;
+        GridPosition cp = tooltipPos;
+        if (cp != null && cp.equals(p) && tooltipFingerprint == lastFingerprint && tooltipHtml != null) {
+            if ((now - tooltipCreatedNanos) <= TOOLTIP_CACHE_TTL_NANOS) {
+                return tooltipHtml;
+            }
         }
 
-        MachineInspectionInfo info;
-        try {
-            info = MachineInspector.inspect(m);
-        } catch (Throwable t) {
-            return null;
-        }
-
-        if (info == null || !info.showInUi()) return null;
-
-        int tier = 1;
-        try {
-            UUID owner = state.playerUuid;
-            tier = gridManager.getUnlockedMachineTier(owner, m.getTypeId());
-        } catch (Throwable ignored) {}
-
-        String html = buildTooltipHtml(info, tier);
-
-        lastTooltipMachine = m;
-        lastTooltipHtml = html;
-        lastTooltipAtNanos = now;
-
-        return html;
+        // Schedule async rebuild; EDT returns immediately
+        requestTooltipAsync(p);
+        return null;
     }
-
 
     private void requestTooltipAsync(GridPosition p) {
         if (disposed) return;
         if (p == null) return;
 
-        // If already cached and fresh for this cell + fingerprint, don't reschedule
         long now = System.nanoTime();
         GridPosition cp = tooltipPos;
         if (cp != null && cp.equals(p) && tooltipFingerprint == lastFingerprint && tooltipHtml != null) {
@@ -558,11 +578,8 @@ final class FactoryPanelController {
 
     private void computeTooltip(long requestId, GridPosition p) {
         if (disposed) return;
-
-        // Only the latest request should win
         if (requestId != tooltipSeq.get()) return;
 
-        // If hover moved away, skip
         GridPosition hover = state.mouseHoverPos;
         if (hover == null || !hover.equals(p)) return;
 
