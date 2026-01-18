@@ -90,7 +90,7 @@ public class GridManager {
         this.world = new GridWorldService(this, repository, worldAdapter, blockRegistry, techManager, ioExecutor, state);
         this.economy = new GridEconomyService(this, repository, blockRegistry, techManager, ioExecutor, state, world);
 
-        this.marketManager = new MarketManager(this, repository);
+        this.marketManager = new MarketManager(this, repository, ioExecutor);
         this.economyWriter = new AsyncEconomyWriter(repository);
 
         refreshGlobalOverclockCache(true);
@@ -251,24 +251,33 @@ public class GridManager {
 
     public void tick(long t) {
 
-        // Check rotation every 5 seconds (20 TPS * 5 = 100 ticks).
-        // Rotation is based on real-world time (System.currentTimeMillis), not on uptime.
-        if (t % 100 == 0) {
+        // Safety refresh for global overclock cache:
+        // - NEVER do DB work in getEffectiveMachineSpeedMultiplier (hot path).
+        // - Do a very rare refresh here to heal cache after restarts / external DB edits.
+        // 5 minutes @ 20 TPS = 6000 ticks
+        if (t % 6000 == 0) {
+            try {
+                refreshGlobalOverclockCache(false);
+            } catch (Throwable ignored) {}
+        }
+
+        // Rotation check throttled to reduce DB spikes.
+        // 20 TPS -> 2400 ticks ~= 2 minutes.
+        if (t % 2400 == 0) {
             try {
                 int hours = repository.getFactionRotationHours();
                 if (hours > 0) {
 
                     var factions = repository.loadFactions();
-                    if (factions != null && !factions.isEmpty()) {
+                    if (factions != null && factions.size() > 1) {
 
-                        // Ensure deterministic ordering: sort_order, then id
                         factions = new ArrayList<>(factions);
                         factions.sort(Comparator
                                 .comparingInt((com.matterworks.core.domain.factions.FactionDefinition f) -> f.sortOrder())
                                 .thenComparingInt(com.matterworks.core.domain.factions.FactionDefinition::id));
 
                         long periodMs = (long) hours * 3600_000L;
-                        if (periodMs <= 0L) periodMs = 3600_000L; // safety fallback
+                        if (periodMs <= 0L) periodMs = 3600_000L;
 
                         long nowMs = System.currentTimeMillis();
                         long slot = Math.floorDiv(nowMs, periodMs);
@@ -288,13 +297,13 @@ public class GridManager {
                         }
                     }
                 }
-            } catch (Throwable ignored) {
-                // Never break the tick loop because of rotation.
-            }
+            } catch (Throwable ignored) {}
         }
 
         world.tick(t);
     }
+
+
 
 
     public boolean placeStructure(UUID ownerId, GridPosition pos, String nativeBlockId) { return world.placeStructure(ownerId, pos, nativeBlockId); }
@@ -480,7 +489,10 @@ public double getEffectiveMachineSpeedMultiplier(UUID ownerId, String machineTyp
     long playtime = state.getPlaytimeSecondsCached(ownerId);
     double ocPlayer = p.getActiveOverclockMultiplier(playtime);
 
-    refreshGlobalOverclockCache(false);
+    // IMPORTANT:
+    // Do NOT call refreshGlobalOverclockCache() here.
+    // This method is in the hot path (called per machine per tick via scheduleAfter/computeAcceleratedTicks).
+    // Global overclock cache is refreshed on startup and when an activation happens.
     double ocGlobal = getGlobalOverclockMultiplierNow();
 
     double techMult = 1.0;
@@ -494,6 +506,7 @@ public double getEffectiveMachineSpeedMultiplier(UUID ownerId, String machineTyp
 
     return out;
 }
+
 
 
     // ==========================================================

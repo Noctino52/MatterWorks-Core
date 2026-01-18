@@ -255,32 +255,59 @@ final class GridWorldService {
     void tick(long t) {
         state.sweepInactivePlayers(t);
 
+        // Sample 1 tick per second (20 TPS -> every 20 ticks)
+        boolean sample = (t % 20L == 0L);
+        WorldTickProfiler.Sample prof = sample ? WorldTickProfiler.beginSample(t) : null;
+
         long startNs = System.nanoTime();
 
-        PlacedMachine[] toTick = state.tickingMachines.keySet().toArray(new PlacedMachine[0]);
-        for (PlacedMachine m : toTick) {
+        // Avoid per-tick allocations (toArray) -> iterate CHM keySet
+        int machineCountApprox = state.tickingMachines.size();
+
+        for (PlacedMachine m : state.tickingMachines.keySet()) {
             if (m == null) continue;
-            try {
-                m.tick(t);
-                if (m.getDbId() != null && m.isDirty()) {
-                    gridManager.markPlotDirty(m.getOwnerId());
+
+            if (sample) {
+                long ms = System.nanoTime();
+                try {
+                    m.tick(t);
+                    if (m.getDbId() != null && m.isDirty()) {
+                        gridManager.markPlotDirty(m.getOwnerId());
+                    }
+                } catch (Throwable ignored) {
+                } finally {
+                    long dt = System.nanoTime() - ms;
+                    prof.record(m.getClass(), dt);
                 }
-            } catch (Throwable ignored) {
-                // keep ticking even if a machine throws
+            } else {
+                try {
+                    m.tick(t);
+                    if (m.getDbId() != null && m.isDirty()) {
+                        gridManager.markPlotDirty(m.getOwnerId());
+                    }
+                } catch (Throwable ignored) {
+                }
             }
         }
 
-        long elapsedMs = (System.nanoTime() - startNs) / 1_000_000L;
+        long elapsedNs = System.nanoTime() - startNs;
+        long elapsedMs = elapsedNs / 1_000_000L;
 
-        // Log once per second if tick is heavy
+        if (sample) {
+            prof.end(elapsedNs, machineCountApprox);
+        }
+
+        // Existing perf log (once per second max)
         if (elapsedMs > 40) {
             long now = System.currentTimeMillis();
             if (now - lastTickPerfLogMs > 1000L) {
                 lastTickPerfLogMs = now;
-                System.out.println("[PERF] world.tick=" + elapsedMs + "ms | machines=" + toTick.length);
+                System.out.println("[PERF] world.tick=" + elapsedMs + "ms | machines=" + machineCountApprox);
             }
         }
     }
+
+
 
 
     // ==========================================================

@@ -14,36 +14,45 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 public class MarketManager {
 
     // IMPORTANT:
-    // This must be tick-safe: sellItem() is called from Nexus.tick() at 20 TPS.
-    // Therefore: NO DB calls per sell.
+    // sellItem() is called from Nexus.tick() at 20 TPS.
+    // Therefore: NO DB calls in sellItem(). Cache refresh MUST be async.
 
     private static final boolean DEBUG_MARKET_LOG = false;
 
     private static final long FACTION_CACHE_TTL_MS = 30_000L; // 30s
+    private static final long FACTION_CACHE_FAIL_BACKOFF_MS = 5_000L; // avoid retry spam on DB issues
+
     private static final double MIN_SELL_MULT = 0.10;
     private static final double MAX_SELL_MULT = 10.0;
 
     private final GridManager gridManager;
     private final MariaDBAdapter repository;
-    private final Map<MatterColor, Double> basePrices;
+    private final ExecutorService ioExecutor;
 
-    // Cached faction/rules for active faction
-    private volatile long factionCacheLoadedAtMs = 0L;
-    private volatile int cachedActiveFactionId = -1;
-    private volatile List<FactionDefinition> cachedFactions = List.of();
-    private volatile List<FactionPricingRule> cachedRulesForActiveFaction = List.of();
-    private volatile FactionDefinition cachedActiveFaction = null;
+    private final Map<MatterColor, Double> basePrices = new HashMap<>();
 
-    public MarketManager(GridManager gridManager, MariaDBAdapter repository) {
+    private final AtomicReference<Cache> cacheRef = new AtomicReference<>(Cache.empty());
+    private final AtomicBoolean refreshInFlight = new AtomicBoolean(false);
+    private volatile long nextRefreshAttemptAtMs = 0L;
+
+    public MarketManager(GridManager gridManager, MariaDBAdapter repository, ExecutorService ioExecutor) {
         this.gridManager = gridManager;
         this.repository = repository;
-        this.basePrices = new HashMap<>();
+        this.ioExecutor = ioExecutor;
+
         initializePrices();
+
+        // Kick an initial async refresh (non-blocking)
+        maybeTriggerFactionCacheRefreshAsync(System.currentTimeMillis(), true);
     }
 
     private void initializePrices() {
@@ -58,34 +67,52 @@ public class MarketManager {
     }
 
     // ==========================================================
-    // CACHE REFRESH (DB ONLY ON TTL)
+    // ASYNC FACTION CACHE REFRESH (DB OUTSIDE TICK THREAD)
     // ==========================================================
 
-    private void refreshFactionCacheIfNeeded() {
-        long now = System.currentTimeMillis();
+    private void maybeTriggerFactionCacheRefreshAsync(long nowMs, boolean force) {
+        if (nowMs < nextRefreshAttemptAtMs) return;
 
-        // CRITICAL FIX:
-        // Do NOT query DB each sell to check active faction.
-        // We refresh only when TTL expired.
-        if ((now - factionCacheLoadedAtMs) <= FACTION_CACHE_TTL_MS) return;
+        Cache current = cacheRef.get();
+        boolean expired = (nowMs - current.loadedAtMs) > FACTION_CACHE_TTL_MS;
 
-        int activeFactionId = 1;
-        try { activeFactionId = Math.max(1, repository.getActiveFactionId()); }
-        catch (Throwable ignored) {}
+        if (!force && !expired) return;
 
-        List<FactionDefinition> factions = List.of();
-        try { factions = repository.loadFactions(); }
-        catch (Throwable ignored) {}
+        if (!refreshInFlight.compareAndSet(false, true)) return;
 
-        List<FactionPricingRule> rules = List.of();
-        try { rules = repository.loadFactionRules(activeFactionId); }
-        catch (Throwable ignored) {}
+        ioExecutor.submit(() -> {
+            try {
+                int activeFactionId = 1;
+                try { activeFactionId = Math.max(1, repository.getActiveFactionId()); }
+                catch (Throwable ignored) {}
 
-        this.cachedFactions = (factions != null ? factions : List.of());
-        this.cachedActiveFactionId = activeFactionId;
-        this.cachedRulesForActiveFaction = (rules != null ? rules : List.of());
-        this.cachedActiveFaction = findFactionById(activeFactionId, this.cachedFactions);
-        this.factionCacheLoadedAtMs = now;
+                List<FactionDefinition> factions = List.of();
+                try { factions = repository.loadFactions(); }
+                catch (Throwable ignored) {}
+
+                List<FactionPricingRule> rules = List.of();
+                try { rules = repository.loadFactionRules(activeFactionId); }
+                catch (Throwable ignored) {}
+
+                FactionDefinition activeFaction = findFactionById(activeFactionId, factions);
+
+                Cache updated = new Cache(
+                        nowMs,
+                        activeFactionId,
+                        activeFaction,
+                        (rules != null ? rules : List.of())
+                );
+
+                cacheRef.set(updated);
+                nextRefreshAttemptAtMs = nowMs + FACTION_CACHE_TTL_MS;
+
+            } catch (Throwable t) {
+                // Backoff on failure
+                nextRefreshAttemptAtMs = System.currentTimeMillis() + FACTION_CACHE_FAIL_BACKOFF_MS;
+            } finally {
+                refreshInFlight.set(false);
+            }
+        });
     }
 
     private FactionDefinition findFactionById(int id, List<FactionDefinition> list) {
@@ -149,7 +176,6 @@ public class MarketManager {
         int prestige = (p != null ? Math.max(0, p.getPrestigeLevel()) : 0);
         if (prestige <= 0) return value;
 
-        // IMPORTANT: do not load config from DB here. Use cached config from GridManager.
         ServerConfig cfg = gridManager.getServerConfig();
         double k = (cfg != null ? Math.max(0.0, cfg.prestigeSellK()) : 0.0);
         if (k <= 0.0) return value;
@@ -176,7 +202,6 @@ public class MarketManager {
     private String formatEffects(MatterPayload item) {
         if (item.effects() == null || item.effects().isEmpty()) return "[NO_EFFECT]";
 
-        // Avoid streams/Collectors in hot path
         StringBuilder sb = new StringBuilder(64);
         sb.append('[');
         for (int i = 0; i < item.effects().size(); i++) {
@@ -188,14 +213,16 @@ public class MarketManager {
     }
 
     // ==========================================================
-    // SELL
+    // SELL (TICK SAFE)
     // ==========================================================
 
     public void sellItem(MatterPayload item, UUID sellerId) {
         if (item == null || sellerId == null) return;
 
-        // Refresh cache only on TTL (DB happens here only every 30s)
-        refreshFactionCacheIfNeeded();
+        long nowMs = System.currentTimeMillis();
+        maybeTriggerFactionCacheRefreshAsync(nowMs, false);
+
+        Cache cache = cacheRef.get();
 
         double value = calculateBaseValue(item);
 
@@ -203,7 +230,7 @@ public class MarketManager {
         FactionPricingRule appliedRule = null;
         double factionMult = 1.0;
         try {
-            appliedRule = findBestMatchingRule(item, cachedRulesForActiveFaction);
+            appliedRule = findBestMatchingRule(item, cache.rulesForActiveFaction);
             factionMult = (appliedRule != null ? appliedRule.multiplier() : 1.0);
         } catch (Throwable ignored) {}
 
@@ -222,7 +249,7 @@ public class MarketManager {
                 value,
                 "MATTER_SELL",
                 (item.shape() != null ? item.shape().name() : "COLOR"),
-                cachedActiveFactionId
+                cache.activeFactionId
         );
 
         // Telemetry (in-memory)
@@ -237,9 +264,9 @@ public class MarketManager {
             String colorTxt = (item.color() != null ? item.color().name() : "RAW");
             String effTxt = formatEffects(item);
 
-            String factionTxt = (cachedActiveFaction != null)
-                    ? (cachedActiveFaction.displayName() + " #" + cachedActiveFaction.id())
-                    : ("Faction #" + Math.max(1, cachedActiveFactionId));
+            String factionTxt = (cache.activeFaction != null)
+                    ? (cache.activeFaction.displayName() + " #" + cache.activeFaction.id())
+                    : ("Faction #" + Math.max(1, cache.activeFactionId));
 
             String ruleTxt = (appliedRule != null)
                     ? ("ruleId=" + appliedRule.id()
@@ -267,5 +294,23 @@ public class MarketManager {
         if (item.isComplex()) multiplier *= 1.2;
 
         return base * multiplier;
+    }
+
+    private static final class Cache {
+        final long loadedAtMs;
+        final int activeFactionId;
+        final FactionDefinition activeFaction;
+        final List<FactionPricingRule> rulesForActiveFaction;
+
+        Cache(long loadedAtMs, int activeFactionId, FactionDefinition activeFaction, List<FactionPricingRule> rules) {
+            this.loadedAtMs = loadedAtMs;
+            this.activeFactionId = activeFactionId;
+            this.activeFaction = activeFaction;
+            this.rulesForActiveFaction = (rules != null ? rules : List.of());
+        }
+
+        static Cache empty() {
+            return new Cache(0L, 1, null, List.of());
+        }
     }
 }

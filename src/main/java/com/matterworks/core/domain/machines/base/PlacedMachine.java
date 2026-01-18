@@ -24,6 +24,12 @@ public abstract class PlacedMachine implements IGridComponent {
     protected GridManager gridManager;
     protected boolean isDirty = false;
 
+    // Speed multiplier cache (hot path: belts/logistics call scheduleAfter a lot)
+    // Use time-based TTL to keep method signatures backward compatible.
+    private transient long speedCacheValidUntilMs = 0L;
+    private transient double speedCacheMultiplier = 1.0;
+    private static final long SPEED_CACHE_TTL_MS = 1000L; // refresh at most once per second
+
     public PlacedMachine(Long dbId, UUID ownerId, String typeId, GridPosition pos, JsonObject metadata) {
         this.dbId = dbId;
         this.ownerId = ownerId;
@@ -90,7 +96,12 @@ public abstract class PlacedMachine implements IGridComponent {
     public Long getDbId() { return dbId; }
     public void setDbId(Long id) { this.dbId = id; }
 
-    public void setGridContext(GridManager gm) { this.gridManager = gm; }
+    public void setGridContext(GridManager gm) {
+        this.gridManager = gm;
+        // Reset cache when context changes
+        this.speedCacheValidUntilMs = 0L;
+        this.speedCacheMultiplier = 1.0;
+    }
 
     public void markDirty() { this.isDirty = true; }
     public boolean isDirty() { return isDirty; }
@@ -122,21 +133,38 @@ public abstract class PlacedMachine implements IGridComponent {
     }
 
     // ==========================================================
-    // SPEED HELPERS (Machine speed + Overclock)
+    // SPEED HELPERS (Machine speed + Overclock)  --- HOT PATH
     // ==========================================================
 
+    /**
+     * Backward-compatible signature.
+     * Cached to avoid doing GridManager computation for every scheduleAfter() call.
+     */
     protected double getEffectiveSpeedMultiplier() {
         if (gridManager == null) return 1.0;
 
-        try {
-            double v = gridManager.getEffectiveMachineSpeedMultiplier(ownerId, typeId);
-            if (Double.isNaN(v) || Double.isInfinite(v) || v <= 0.0) return 1.0;
-            return v;
-        } catch (Throwable ignored) {
-            return 1.0;
+        long nowMs = System.currentTimeMillis();
+        if (nowMs < speedCacheValidUntilMs) {
+            return speedCacheMultiplier;
         }
+
+        double v = 1.0;
+        try {
+            v = gridManager.getEffectiveMachineSpeedMultiplier(ownerId, typeId);
+        } catch (Throwable ignored) {
+            v = 1.0;
+        }
+
+        if (Double.isNaN(v) || Double.isInfinite(v) || v <= 0.0) v = 1.0;
+
+        speedCacheMultiplier = v;
+        speedCacheValidUntilMs = nowMs + SPEED_CACHE_TTL_MS;
+        return v;
     }
 
+    /**
+     * Backward-compatible signature used by many machines.
+     */
     protected long computeAcceleratedTicks(long baseTicks) {
         if (baseTicks <= 1) return Math.max(1L, baseTicks);
 
@@ -149,19 +177,6 @@ public abstract class PlacedMachine implements IGridComponent {
 
     protected long scheduleAfter(long currentTick, long baseTicks, String reasonForLog) {
         long effectiveTicks = computeAcceleratedTicks(baseTicks);
-
-        if (effectiveTicks != baseTicks) {
-            /*
-            System.out.println("[OVERCLOCK] " + (reasonForLog == null ? "SCHEDULE" : reasonForLog)
-                    + " machine=" + typeId
-                    + " owner=" + ownerId
-                    + " baseTicks=" + baseTicks
-                    + " effectiveTicks=" + effectiveTicks
-                    + " mult=" + String.format(Locale.US, "%.2f", getEffectiveSpeedMultiplier()));
-
-             */
-        }
-
         return currentTick + effectiveTicks;
     }
 }

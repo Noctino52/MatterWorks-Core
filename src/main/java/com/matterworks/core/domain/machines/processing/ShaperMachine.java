@@ -71,7 +71,6 @@ public class ShaperMachine extends ProcessorMachine {
         MatterPayload in = inputBuffer.getItemInSlot(0);
         if (in == null || in.shape() != MatterShape.CUBE) return;
 
-        // ✅ consume + telemetry
         consumeInput(0, 1, in);
 
         MatterPayload out = new MatterPayload(MatterShape.SPHERE, in.color(), in.effects());

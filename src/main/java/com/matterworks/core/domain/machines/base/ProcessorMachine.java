@@ -23,6 +23,9 @@ public abstract class ProcessorMachine extends PlacedMachine {
 
     protected final int maxStackPerSlot;
 
+    // If output is blocked, do not attempt ejection every tick
+    private long nextEjectAttemptTick = 0;
+
     public ProcessorMachine(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata) {
         this(dbId, ownerId, pos, typeId, metadata, 64);
     }
@@ -54,10 +57,6 @@ public abstract class ProcessorMachine extends PlacedMachine {
         return false;
     }
 
-    /**
-     * Consume items from an input slot and register telemetry as "consumed".
-     * Caller should pass the item they decided to consume (usually itemInSlot before decreasing).
-     */
     protected void consumeInput(int slotIndex, int amount, MatterPayload consumedItem) {
         if (amount <= 0) return;
         inputBuffer.decreaseSlot(slotIndex, amount);
@@ -76,7 +75,6 @@ public abstract class ProcessorMachine extends PlacedMachine {
         if (out == null) return;
 
         if (outputBuffer.insert(out)) {
-            // ✅ Telemetry: produced (output of recipe)
             try {
                 if (gridManager != null && gridManager.getProductionTelemetry() != null) {
                     gridManager.getProductionTelemetry().recordProduced(getOwnerId(), out, 1L);
@@ -89,43 +87,70 @@ public abstract class ProcessorMachine extends PlacedMachine {
         }
     }
 
+    /**
+     * HOT PATH optimization:
+     * - Backoff if output is blocked (avoid retrying every tick)
+     * - No debug metadata writes per tick
+     * - No saveState() unless something actually changed
+     */
     protected void tryEjectItem(long currentTick) {
         if (outputBuffer.isEmpty() || gridManager == null) return;
 
+        if (currentTick < nextEjectAttemptTick) return;
+
         GridPosition targetPos = getOutputPosition();
         PlacedMachine neighbor = getNeighborAt(targetPos);
+        if (neighbor == null) {
+            // small backoff when no neighbor (reduces useless lookups in empty setups)
+            nextEjectAttemptTick = scheduleAfter(currentTick, 4, "EJECT_RETRY");
+            return;
+        }
 
-        metadata.addProperty("ejectTarget", String.valueOf(targetPos));
-        metadata.addProperty("ejectNeighbor", neighbor == null ? "null" : neighbor.getClass().getSimpleName() + "/" + neighbor.getTypeId());
+        boolean moved = false;
 
         if (neighbor instanceof ConveyorBelt belt) {
             MatterPayload item = outputBuffer.extractFirst();
-            if (item != null) {
-                if (belt.insertItem(item, currentTick)) {
-                    metadata.addProperty("ejectResult", "OK->BELT");
-                    saveState();
-                } else {
-                    outputBuffer.insert(item);
-                    metadata.addProperty("ejectResult", "BELT_FULL");
-                    saveState();
-                }
+            if (item == null) return;
+
+            try {
+                moved = belt.insertItem(item, currentTick);
+            } catch (Throwable ignored) {
+                moved = false;
             }
-        } else if (neighbor instanceof NexusMachine nexus) {
-            MatterPayload item = outputBuffer.extractFirst();
-            if (item != null) {
-                if (nexus.insertItem(item, this.pos)) {
-                    metadata.addProperty("ejectResult", "OK->NEXUS");
-                    saveState();
-                } else {
-                    outputBuffer.insert(item);
-                    metadata.addProperty("ejectResult", "NEXUS_REJECT");
-                    saveState();
-                }
+
+            if (moved) {
+                nextEjectAttemptTick = 0;
+                saveState();
+            } else {
+                outputBuffer.insert(item);
+                // backoff on failure (line blocked)
+                nextEjectAttemptTick = scheduleAfter(currentTick, 2, "EJECT_RETRY");
             }
-        } else {
-            metadata.addProperty("ejectResult", "NO_VALID_TARGET");
-            markDirty();
+            return;
         }
+
+        if (neighbor instanceof NexusMachine nexus) {
+            MatterPayload item = outputBuffer.extractFirst();
+            if (item == null) return;
+
+            try {
+                moved = nexus.insertItem(item, this.pos);
+            } catch (Throwable ignored) {
+                moved = false;
+            }
+
+            if (moved) {
+                nextEjectAttemptTick = 0;
+                saveState();
+            } else {
+                outputBuffer.insert(item);
+                nextEjectAttemptTick = scheduleAfter(currentTick, 2, "EJECT_RETRY");
+            }
+            return;
+        }
+
+        // Unknown neighbor -> don't hammer every tick
+        nextEjectAttemptTick = scheduleAfter(currentTick, 6, "EJECT_RETRY");
     }
 
     protected void saveState() {

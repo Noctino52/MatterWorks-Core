@@ -72,7 +72,6 @@ public class CuttingMachine extends ProcessorMachine {
         MatterPayload in = inputBuffer.getItemInSlot(0);
         if (in == null || in.shape() != MatterShape.SPHERE) return;
 
-        // ✅ consume + telemetry
         consumeInput(0, 1, in);
 
         MatterPayload out = new MatterPayload(MatterShape.PYRAMID, in.color(), in.effects());
