@@ -55,6 +55,26 @@ public class MatterWorksGUI extends JFrame {
         return t;
     });
 
+    private final AtomicBoolean economyUpdateInFlight = new AtomicBoolean(false);
+    private volatile EconomyUiState lastEconomyUiState = null;
+
+    private record EconomyUiState(
+            boolean prestigeEnabled,
+            String prestigeTooltip,
+            boolean instantPrestigeEnabled,
+            String moneyText,
+            String roleText,
+            String voidText,
+            String prestigeText,
+            String plotIdText,
+            String plotItemsText,
+            String plotAreaText,
+            boolean plotMinusEnabled,
+            boolean plotPlusEnabled,
+            boolean itemCapPlusEnabled
+    ) {}
+
+
     private UUID currentPlayerUuid;
     private List<PlayerProfile> cachedPlayerList = new ArrayList<>();
 
@@ -181,13 +201,15 @@ public class MatterWorksGUI extends JFrame {
         add(rightTabbedPane, BorderLayout.EAST);
         add(statusBar, BorderLayout.SOUTH);
 
-        economyTimer = new Timer(600, e -> updateEconomyLabelsIfChanged());
+        economyTimer = new Timer(600, e -> requestEconomyRefreshAsync());
         heartbeatTimer = new Timer(10_000, e -> {
             UUID u = currentPlayerUuid;
             if (u != null) gridManager.touchPlayer(u);
         });
 
+
         economyTimer.start();
+        requestEconomyRefreshAsync();
         heartbeatTimer.start();
 
         addWindowListener(new WindowAdapter() {
@@ -244,6 +266,180 @@ public class MatterWorksGUI extends JFrame {
                 JOptionPane.INFORMATION_MESSAGE
         );
     }
+
+    private void requestEconomyRefreshAsync() {
+        if (currentPlayerUuid == null) {
+            // Apply "empty" state fast on EDT
+            SwingUtilities.invokeLater(this::applyEmptyEconomyUi);
+            return;
+        }
+
+        // Avoid piling up background tasks
+        if (!economyUpdateInFlight.compareAndSet(false, true)) return;
+
+        runOffEdt(() -> {
+            try {
+                EconomyUiState s = computeEconomyUiState(currentPlayerUuid);
+                lastEconomyUiState = s;
+
+                SwingUtilities.invokeLater(() -> {
+                    try {
+                        applyEconomyUiState(s);
+                    } catch (Throwable t) {
+                        t.printStackTrace();
+                    }
+                });
+
+            } finally {
+                economyUpdateInFlight.set(false);
+            }
+        });
+    }
+
+    private EconomyUiState computeEconomyUiState(UUID u) {
+
+        PlayerProfile p = gridManager.getCachedProfile(u);
+        if (p == null) return null;
+
+        boolean techUnlocked = gridManager.getTechManager().isPrestigeUnlocked(p);
+        boolean canPrestige = gridManager.canPerformPrestige(u);
+        double cost = gridManager.getPrestigeActionCost(u);
+
+        boolean prestigeEnabled = canPrestige;
+        String prestigeTooltip;
+
+        if (!techUnlocked) {
+            prestigeTooltip = "Unlock the 'Prestige' tech node first.";
+        } else if (p.isAdmin()) {
+            prestigeTooltip = "Prestige unlocked (ADMIN: no fee).";
+        } else {
+            int fee = (int) Math.round(cost);
+            if (!canPrestige) prestigeTooltip = "Prestige fee: $" + fee + " (not enough money).";
+            else prestigeTooltip = "Prestige fee: $" + fee;
+        }
+
+        boolean instantEnabled = gridManager.canInstantPrestige(u);
+
+        double money = p.getMoney();
+        String rank = String.valueOf(p.getRank());
+        boolean isAdmin = p.isAdmin();
+        int voidCoins = p.getVoidCoins();
+        int prestige = Math.max(0, p.getPrestigeLevel());
+
+        Long pid = cachedPlotId;
+
+        int placed = computePlacedItemsIncludingStructures(u);
+
+        int effectiveCap;
+        try {
+            effectiveCap = gridManager.getEffectiveItemPlacedOnPlotCap(u);
+        } catch (Throwable t) {
+            int baseCap = safeGetDefaultItemCap();
+            int step = safeGetItemCapStep();
+            int maxCap = safeGetMaxItemCap();
+            effectiveCap = computeEffectiveCap(baseCap, step, maxCap, prestige);
+        }
+
+        int voidStep = cachedVoidItemCapStep;
+
+        boolean itemCapPlusEnabled = (voidStep > 0) && (isAdmin || cachedBlockCapBreakerOwned > 0);
+        boolean plotPlusEnabled = isAdmin || cachedPlotSizeBreakerOwned > 0;
+        boolean plotMinusEnabled = isAdmin;
+
+        String plotAreaStr = "---";
+        try {
+            GridManager.PlotAreaInfo info = gridManager.getPlotAreaInfo(u);
+            if (info != null) {
+                plotAreaStr = info.unlockedX() + "x" + info.unlockedY()
+                        + " (+" + info.extraX() + "/+" + info.extraY() + ")"
+                        + " MAX " + info.maxX() + "x" + info.maxY()
+                        + " INC " + info.increaseX() + "x" + info.increaseY();
+            }
+        } catch (Throwable ignored) {}
+
+        String plotIdText = "PLOT ID: " + (pid == null ? "---" : pid);
+        String plotItemsText = "ITEMS: " + placed + " / " + effectiveCap;
+        String plotAreaText = "AREA: " + plotAreaStr;
+
+        return new EconomyUiState(
+                prestigeEnabled,
+                prestigeTooltip,
+                instantEnabled,
+                "MONEY: $" + (int) Math.round(money),
+                "[" + rank + "]",
+                "VOID: " + voidCoins,
+                "PRESTIGE: " + prestige,
+                plotIdText,
+                plotItemsText,
+                plotAreaText,
+                plotMinusEnabled,
+                plotPlusEnabled,
+                itemCapPlusEnabled
+        );
+    }
+
+
+    private void applyEmptyEconomyUi() {
+        topBar.setPrestigeButtonEnabled(false);
+        topBar.setInstantPrestigeButtonEnabled(false);
+
+        topBar.getMoneyLabel().setText("MONEY: $---");
+        topBar.getRoleLabel().setText("[---]");
+        topBar.getVoidCoinsLabel().setText("VOID: ---");
+        topBar.getPrestigeLabel().setText("PRESTIGE: ---");
+
+        statusBar.setPlotId("PLOT ID: ---");
+        statusBar.setPlotItemsUnknown();
+        statusBar.setPlotAreaUnknown();
+        statusBar.setPlotMinusEnabled(false);
+        statusBar.setPlotPlusEnabled(false);
+        statusBar.setItemCapIncreaseEnabled(false);
+    }
+
+    private void applyEconomyUiState(EconomyUiState s) {
+        if (s == null) return;
+
+        topBar.setPrestigeButtonEnabled(s.prestigeEnabled());
+        topBar.setPrestigeButtonToolTip(s.prestigeTooltip());
+        topBar.setInstantPrestigeButtonEnabled(s.instantPrestigeEnabled());
+
+        topBar.getMoneyLabel().setText(s.moneyText());
+        topBar.getRoleLabel().setText(s.roleText());
+        topBar.getVoidCoinsLabel().setText(s.voidText());
+        topBar.getPrestigeLabel().setText(s.prestigeText());
+
+        statusBar.setPlotId(s.plotIdText());
+
+        // StatusBarPanel API:
+        // - setPlotItems(int placed, int cap)
+        int placed = 0;
+        int cap = 0;
+        try {
+            // computeEconomyUiState creates: "ITEMS: <placed> / <cap>"
+            String t = s.plotItemsText();
+            int idxColon = t.indexOf(':');
+            int idxSlash = t.indexOf('/');
+            if (idxColon >= 0 && idxSlash >= 0) {
+                String left = t.substring(idxColon + 1, idxSlash).trim();
+                String right = t.substring(idxSlash + 1).trim();
+                placed = Integer.parseInt(left);
+                cap = Integer.parseInt(right);
+            }
+        } catch (Throwable ignored) {}
+
+        statusBar.setPlotItems(placed, cap);
+
+        // StatusBarPanel API:
+        // - setPlotAreaText(String)
+        statusBar.setPlotAreaText(s.plotAreaText());
+
+        statusBar.setPlotMinusEnabled(s.plotMinusEnabled());
+        statusBar.setPlotPlusEnabled(s.plotPlusEnabled());
+        statusBar.setItemCapIncreaseEnabled(s.itemCapPlusEnabled());
+    }
+
+
+
 
     private String formatRemainingSeconds(long seconds) {
         if (seconds < 0) return "LIFETIME";
@@ -931,6 +1127,8 @@ public class MatterWorksGUI extends JFrame {
             statusBar.setPlotPlusEnabled(false);
             statusBar.setItemCapIncreaseEnabled(false);
 
+            requestEconomyRefreshAsync();
+
             statusBar.setToolTipText(null);
             return;
         }
@@ -1077,18 +1275,25 @@ public class MatterWorksGUI extends JFrame {
 
     private int computePlacedItemsIncludingStructures(UUID ownerId) {
         try {
-            // Snapshot contains both machines and StructuralBlock (typeId=STRUCTURE_GENERIC).
             var snap = gridManager.getSnapshot(ownerId);
             if (snap != null && !snap.isEmpty()) {
-                return (int) snap.values().stream()
-                        .filter(Objects::nonNull)
-                        .distinct()
-                        .count();
+                IdentityHashMap<Object, Boolean> seen = new IdentityHashMap<>();
+                for (PlacedMachine m : snap.values()) {
+                    if (m == null) continue;
+                    seen.put(m, Boolean.TRUE);
+                }
+                return seen.size();
             }
         } catch (Throwable ignored) {}
-        // fallback: DB (may not include structures depending on your persistence rules)
-        return repository.getPlotItemsPlaced(ownerId);
+
+        // fallback: DB (background now)
+        try {
+            return repository.getPlotItemsPlaced(ownerId);
+        } catch (Throwable ignored) {
+            return 0;
+        }
     }
+
 
     private void updateLabels() {
         String t = factoryPanel.getCurrentToolName();
