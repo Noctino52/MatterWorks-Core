@@ -35,7 +35,8 @@ public class BlockRegistry {
                     + " pm=" + s.prestigeCostMult()
                     + " cat=" + s.category()
                     + " model=" + s.modelId()
-                    + " speed=" + s.speed());
+                    + " speed=" + s.speed()
+                    + " shopOrder=" + s.shopOrder());
         }
     }
 
@@ -46,7 +47,6 @@ public class BlockRegistry {
         MachineStats s = statsCache.get(id);
         if (s != null) return s;
 
-        // If asked for legacy id but drill exists in DB, return drill stats.
         if ("drill".equals(blockId)) {
             MachineStats drill = statsCache.get("drill");
             if (drill != null) return drill;
@@ -60,11 +60,23 @@ public class BlockRegistry {
                 .filter(Objects::nonNull)
                 .filter(s -> s.category() != null && s.category().equalsIgnoreCase("MACHINE"))
                 .sorted(Comparator
-                        .comparingInt(MachineStats::tier)
+                        .comparingInt(BlockRegistry::shopSortKey)
+                        .thenComparingInt(MachineStats::tier)
                         .thenComparing(MachineStats::id))
                 .map(MachineStats::id)
                 .distinct()
                 .collect(Collectors.toList());
+    }
+
+    private static int shopSortKey(MachineStats s) {
+        if (s == null) return Integer.MAX_VALUE;
+
+        int order = s.shopOrder();
+        if (order > 0) return order;
+
+        // Fallback: preserve old behavior when shop_order is missing/not set
+        int tier = Math.max(0, s.tier());
+        return 1_000_000 + (tier * 1000);
     }
 
     public Vector3Int getDimensions(String blockId) {
@@ -111,7 +123,6 @@ public class BlockRegistry {
 
     private String normalizeId(String id) {
         if (id == null) return null;
-        // Hard rename: drill -> drill
         if ("drill".equals(id)) return "drill";
         return id;
     }

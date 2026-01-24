@@ -75,6 +75,23 @@ public class GridManager {
     private volatile long globalOverclockLastDurationSeconds = 0L;
     private volatile long globalOverclockLastFetchMs = 0L;
 
+    // Speed multiplier cache (shared across machines)
+    private final java.util.concurrent.ConcurrentHashMap<UUID, PlayerSpeedCache> speedCache = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static final class PlayerSpeedCache {
+        final java.util.concurrent.ConcurrentHashMap<String, SpeedEntry> byType = new java.util.concurrent.ConcurrentHashMap<>();
+    }
+
+    private static final class SpeedEntry {
+        final double value;
+        final long validUntilMs;
+        SpeedEntry(double value, long validUntilMs) {
+            this.value = value;
+            this.validUntilMs = validUntilMs;
+        }
+    }
+
+
     private final ProductionTelemetry productionTelemetry = new InMemoryProductionTelemetry();
 
 
@@ -303,6 +320,16 @@ public class GridManager {
         world.tick(t);
     }
 
+    // Returns a direct view of the player's grid map (ConcurrentHashMap).
+// Used by the async saver to avoid allocating a full copy (HashMap) every autosave.
+// Safe to iterate because the underlying map is concurrent.
+    public Map<GridPosition, PlacedMachine> getUnsafeGridView(UUID ownerId) {
+        if (ownerId == null) return Collections.emptyMap();
+        Map<GridPosition, PlacedMachine> g = state.playerGrids.get(ownerId);
+        return g != null ? g : Collections.emptyMap();
+    }
+
+
 
 
 
@@ -481,7 +508,15 @@ public double getEffectiveMachineSpeedMultiplier(UUID ownerId, String machineTyp
         machineSpeed = 1.0;
     }
 
-    if (ownerId == null) return machineSpeed;
+    if (ownerId == null || machineTypeId == null) return machineSpeed;
+
+    // Shared cache across all machines of same player+type
+    long nowMs = System.currentTimeMillis();
+    PlayerSpeedCache psc = speedCache.computeIfAbsent(ownerId, _id -> new PlayerSpeedCache());
+    SpeedEntry cached = psc.byType.get(machineTypeId);
+    if (cached != null && nowMs < cached.validUntilMs) {
+        return cached.value;
+    }
 
     var p = state.getCachedProfile(ownerId);
     if (p == null) return machineSpeed;
@@ -489,10 +524,6 @@ public double getEffectiveMachineSpeedMultiplier(UUID ownerId, String machineTyp
     long playtime = state.getPlaytimeSecondsCached(ownerId);
     double ocPlayer = p.getActiveOverclockMultiplier(playtime);
 
-    // IMPORTANT:
-    // Do NOT call refreshGlobalOverclockCache() here.
-    // This method is in the hot path (called per machine per tick via scheduleAfter/computeAcceleratedTicks).
-    // Global overclock cache is refreshed on startup and when an activation happens.
     double ocGlobal = getGlobalOverclockMultiplierNow();
 
     double techMult = 1.0;
@@ -502,10 +533,16 @@ public double getEffectiveMachineSpeedMultiplier(UUID ownerId, String machineTyp
     if (Double.isNaN(techMult) || Double.isInfinite(techMult) || techMult <= 0.0) techMult = 1.0;
 
     double out = machineSpeed * ocPlayer * ocGlobal * techMult;
-    if (Double.isNaN(out) || Double.isInfinite(out) || out <= 0.0) return 1.0;
+    if (Double.isNaN(out) || Double.isInfinite(out) || out <= 0.0) out = 1.0;
 
+    // 1s TTL + small deterministic jitter to avoid stampede
+    long jitter = (machineTypeId.hashCode() & 0xFFL); // 0..255ms
+    long validUntil = nowMs + 1000L + jitter;
+
+    psc.byType.put(machineTypeId, new SpeedEntry(out, validUntil));
     return out;
 }
+
 
 
 

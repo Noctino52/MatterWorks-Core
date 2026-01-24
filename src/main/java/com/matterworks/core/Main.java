@@ -25,6 +25,12 @@ public class Main {
         System.out.println("🍄 MatterWorks Core Starting...");
         CoreConfig.load();
 
+        Runtime rt = Runtime.getRuntime();
+        System.out.println("[JVM] maxMemory=" + (rt.maxMemory() / (1024*1024)) + "MB"
+                + " total=" + (rt.totalMemory() / (1024*1024)) + "MB"
+                + " free=" + (rt.freeMemory() / (1024*1024)) + "MB");
+
+
         String url = "jdbc:mariadb://dev.matterworks.org:3306/matterworks_core?allowPublicKeyRetrieval=true&useSSL=false";
         DatabaseManager dbManager = new DatabaseManager(url, "Noctino52", "Yy72s7mRnVs3");
 

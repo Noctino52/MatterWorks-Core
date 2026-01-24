@@ -20,17 +20,14 @@ public class DrillMachine extends PlacedMachine {
 
     private final int tierLevel;
     private final float productionSpeed;
-
     private final int maxStackSize;
 
     // Runtime state (NO JSON churn per tick)
     private int outputCount = 0;
     private MatterColor resourceToMine = MatterColor.RAW;
 
-    // Cached produced payload (MatterPayload is immutable)
     private transient MatterPayload cachedOutputPayload;
 
-    // Cached output direction/position + neighbor cache
     private transient Vector3Int cachedDir;
     private transient GridPosition cachedOutPos;
 
@@ -38,7 +35,7 @@ public class DrillMachine extends PlacedMachine {
     private transient PlacedMachine cachedNeighbor = null;
     private static final long NEIGHBOR_CACHE_TTL_TICKS = 20L;
 
-    // Small spread to avoid all drills spawning on the exact same tick
+    // Small spread to avoid all drills spawning on the exact same tick (ONLY for initial schedule)
     private final int spawnPhaseSeed;
 
     public DrillMachine(Long dbId,
@@ -55,7 +52,6 @@ public class DrillMachine extends PlacedMachine {
 
         this.maxStackSize = Math.max(1, maxStackPerSlot);
 
-        // Load resource (prefer explicit field)
         if (this.metadata != null && this.metadata.has("mining_resource")) {
             try {
                 this.resourceToMine = MatterColor.valueOf(this.metadata.get("mining_resource").getAsString());
@@ -64,7 +60,6 @@ public class DrillMachine extends PlacedMachine {
             }
         }
 
-        // Load outputCount from legacy "items" format if present
         if (this.metadata != null && this.metadata.has("items") && this.metadata.get("items").isJsonArray()) {
             try {
                 JsonArray arr = this.metadata.getAsJsonArray("items");
@@ -73,7 +68,6 @@ public class DrillMachine extends PlacedMachine {
                     int c = slot0.has("count") ? slot0.get("count").getAsInt() : 0;
                     this.outputCount = Math.max(0, Math.min(c, this.maxStackSize));
 
-                    // If mining_resource missing, try derive from slot color
                     if ((this.metadata == null || !this.metadata.has("mining_resource")) && slot0.has("color")) {
                         try {
                             this.resourceToMine = MatterColor.valueOf(slot0.get("color").getAsString());
@@ -140,8 +134,6 @@ public class DrillMachine extends PlacedMachine {
 
         this.resourceToMine = c;
         refreshCachedPayload();
-
-        // Mark dirty, but do NOT touch metadata here (avoid JSON churn)
         markDirty();
     }
 
@@ -150,6 +142,7 @@ public class DrillMachine extends PlacedMachine {
         long baseInterval = (long) (20 / productionSpeed);
         if (baseInterval < 1) baseInterval = 1;
 
+        // Phase offset ONLY once (initial schedule), not every spawn
         if (nextSpawnTick == -1) {
             nextSpawnTick = scheduleAfter(currentTick, baseInterval, "PROD_SPAWN") + phaseForInterval(baseInterval);
         }
@@ -158,7 +151,6 @@ public class DrillMachine extends PlacedMachine {
             if (outputCount < maxStackSize) {
                 outputCount++;
 
-                // Telemetry (best effort)
                 try {
                     if (gridManager != null && gridManager.getProductionTelemetry() != null) {
                         gridManager.getProductionTelemetry().recordProduced(getOwnerId(), cachedOutputPayload, 1L);
@@ -167,7 +159,9 @@ public class DrillMachine extends PlacedMachine {
 
                 markDirty();
             }
-            nextSpawnTick = scheduleAfter(currentTick, baseInterval, "PROD_SPAWN") + phaseForInterval(baseInterval);
+
+            // Next cycles: no phase add (keep stable cadence)
+            nextSpawnTick = scheduleAfter(currentTick, baseInterval, "PROD_SPAWN");
         }
 
         tryEjectItem(currentTick);
@@ -202,8 +196,6 @@ public class DrillMachine extends PlacedMachine {
 
     @Override
     public JsonObject serialize() {
-        // Materialize runtime state into metadata ONLY on save/serialize.
-        // This keeps ticks allocation-free and reduces GC spikes.
         if (metadata == null) metadata = new JsonObject();
 
         metadata.addProperty("mining_resource", resourceToMine.name());
@@ -219,6 +211,6 @@ public class DrillMachine extends PlacedMachine {
         }
         metadata.add("items", items);
 
-        return super.serialize(); // also writes orientation
+        return super.serialize();
     }
 }

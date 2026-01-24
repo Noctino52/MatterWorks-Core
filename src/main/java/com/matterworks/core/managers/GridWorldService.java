@@ -250,22 +250,30 @@ final class GridWorldService {
     }
 
     // ==========================================================
-    // SIMULATION LOOP
-    // ==========================================================
+// SIMULATION LOOP
+// ==========================================================
     void tick(long t) {
         state.sweepInactivePlayers(t);
 
-        // Sample 1 tick per second (20 TPS -> every 20 ticks)
-        boolean sample = (t % 20L == 0L);
+        boolean sample = WorldTickProfiler.shouldSample(t);
         WorldTickProfiler.Sample prof = sample ? WorldTickProfiler.beginSample(t) : null;
 
         long startNs = System.nanoTime();
 
-        // Avoid per-tick allocations (toArray) -> iterate CHM keySet
         int machineCountApprox = state.tickingMachines.size();
 
+        // PASS 1: Logistics movers (move items forward first)
         for (PlacedMachine m : state.tickingMachines.keySet()) {
             if (m == null) continue;
+
+            boolean isLogistics =
+                    (m instanceof com.matterworks.core.domain.machines.logistics.ConveyorBelt) ||
+                            (m instanceof com.matterworks.core.domain.machines.logistics.Splitter) ||
+                            (m instanceof com.matterworks.core.domain.machines.logistics.Merger) ||
+                            (m instanceof com.matterworks.core.domain.machines.logistics.LiftMachine) ||
+                            (m instanceof com.matterworks.core.domain.machines.logistics.DropperMachine);
+
+            if (!isLogistics) continue;
 
             if (sample) {
                 long ms = System.nanoTime();
@@ -276,8 +284,42 @@ final class GridWorldService {
                     }
                 } catch (Throwable ignored) {
                 } finally {
-                    long dt = System.nanoTime() - ms;
-                    prof.record(m.getClass(), dt);
+                    prof.record(m.getClass(), System.nanoTime() - ms);
+                }
+            } else {
+                try {
+                    m.tick(t);
+                    if (m.getDbId() != null && m.isDirty()) {
+                        gridManager.markPlotDirty(m.getOwnerId());
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+
+        // PASS 2: Everything else (producers/processors/nexus/etc)
+        for (PlacedMachine m : state.tickingMachines.keySet()) {
+            if (m == null) continue;
+
+            boolean isLogistics =
+                    (m instanceof com.matterworks.core.domain.machines.logistics.ConveyorBelt) ||
+                            (m instanceof com.matterworks.core.domain.machines.logistics.Splitter) ||
+                            (m instanceof com.matterworks.core.domain.machines.logistics.Merger) ||
+                            (m instanceof com.matterworks.core.domain.machines.logistics.LiftMachine) ||
+                            (m instanceof com.matterworks.core.domain.machines.logistics.DropperMachine);
+
+            if (isLogistics) continue;
+
+            if (sample) {
+                long ms = System.nanoTime();
+                try {
+                    m.tick(t);
+                    if (m.getDbId() != null && m.isDirty()) {
+                        gridManager.markPlotDirty(m.getOwnerId());
+                    }
+                } catch (Throwable ignored) {
+                } finally {
+                    prof.record(m.getClass(), System.nanoTime() - ms);
                 }
             } else {
                 try {
@@ -293,11 +335,15 @@ final class GridWorldService {
         long elapsedNs = System.nanoTime() - startNs;
         long elapsedMs = elapsedNs / 1_000_000L;
 
+        // Arm a profiling window when over budget (so we catch offenders reliably)
+        if (elapsedMs > 50) {
+            WorldTickProfiler.triggerWindow(t, 40);
+        }
+
         if (sample) {
             prof.end(elapsedNs, machineCountApprox);
         }
 
-        // Existing perf log (once per second max)
         if (elapsedMs > 40) {
             long now = System.currentTimeMillis();
             if (now - lastTickPerfLogMs > 1000L) {
@@ -306,6 +352,8 @@ final class GridWorldService {
             }
         }
     }
+
+
 
 
 

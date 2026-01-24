@@ -11,10 +11,16 @@ import com.matterworks.core.domain.matter.MatterPayload;
 
 import java.util.UUID;
 
+/**
+ * PERFORMANCE FIX:
+ * - No MatterPayload.serialize() in insertItem() (hot path).
+ * - Metadata is updated only in serialize().
+ * - Neighbor cache remains.
+ */
 public class ConveyorBelt extends PlacedMachine {
 
     private MatterPayload currentItem;
-    private JsonObject currentItemJson; // cached for UI rendering (no dirty)
+    private transient JsonObject currentItemJsonCache; // lazily built for UI/save
     private long arrivalTick = -1;
 
     private static final int TRANSPORT_TIME = 20;
@@ -24,8 +30,7 @@ public class ConveyorBelt extends PlacedMachine {
     private static final int MAX_BLOCKED_STREAK = 5; // 2^5 => 32 ticks
 
     /**
-     * IMPORTANT: spread across the full transport window.
-     * This is the key to remove "burst ticks" where many belts push together.
+     * Spread pushes across the full transport window to reduce burst ticks.
      * Range: 0..TRANSPORT_TIME-1
      */
     private final int phaseOffsetTicks;
@@ -37,13 +42,12 @@ public class ConveyorBelt extends PlacedMachine {
     // Neighbor cache
     private transient long neighborCacheValidUntilTick = Long.MIN_VALUE;
     private transient PlacedMachine cachedNeighbor = null;
-    private static final long NEIGHBOR_CACHE_TTL_TICKS = 20L; // longer is fine, output pos is stable
+    private static final long NEIGHBOR_CACHE_TTL_TICKS = 20L;
 
     public ConveyorBelt(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata) {
         super(dbId, ownerId, typeId, pos, metadata);
         this.dimensions = Vector3Int.one();
 
-        // Full spread: 0..19
         int mixed = mixPos(pos);
         int phase = mixed % TRANSPORT_TIME;
         if (phase < 0) phase += TRANSPORT_TIME;
@@ -51,17 +55,16 @@ public class ConveyorBelt extends PlacedMachine {
 
         recomputeCachedOutput();
 
-        // Backward compatibility: if an old save contains currentItem, show it in UI (no dirty)
+        // Backward compatibility: if old save contains currentItem, restore it (no dirty)
         if (this.metadata != null && this.metadata.has("currentItem") && this.metadata.get("currentItem").isJsonObject()) {
             try {
-                this.currentItemJson = this.metadata.getAsJsonObject("currentItem");
-                this.currentItem = MatterPayload.fromJson(this.currentItemJson);
-
-                // reschedule soon but keep phase
+                JsonObject obj = this.metadata.getAsJsonObject("currentItem");
+                this.currentItem = MatterPayload.fromJson(obj);
+                this.currentItemJsonCache = obj; // reuse
                 this.arrivalTick = phaseOffsetTicks;
             } catch (Throwable ignored) {
                 this.currentItem = null;
-                this.currentItemJson = null;
+                this.currentItemJsonCache = null;
                 this.metadata.remove("currentItem");
             }
         }
@@ -103,7 +106,6 @@ public class ConveyorBelt extends PlacedMachine {
         if (currentItem == null) return;
 
         if (arrivalTick == -1) {
-            // IMPORTANT: phaseOffset over full window
             arrivalTick = scheduleAfter(currentTick, TRANSPORT_TIME, "BELT_MOVE") + phaseOffsetTicks;
         }
 
@@ -117,20 +119,13 @@ public class ConveyorBelt extends PlacedMachine {
         if (this.currentItem != null) return false;
 
         this.currentItem = item;
+        this.currentItemJsonCache = null; // invalidate cache
         this.blockedStreak = 0;
 
-        // IMPORTANT: phaseOffset over full window
+        // phase spread
         this.arrivalTick = scheduleAfter(currentTick, TRANSPORT_TIME, "BELT_MOVE") + phaseOffsetTicks;
 
-        // UI: store once on insert (no dirty)
-        try {
-            this.currentItemJson = item.serialize();
-            this.metadata.add("currentItem", this.currentItemJson);
-        } catch (Throwable ignored) {
-            this.currentItemJson = null;
-            this.metadata.remove("currentItem");
-        }
-
+        // IMPORTANT: no json serialization here (hot path)
         return true;
     }
 
@@ -153,8 +148,6 @@ public class ConveyorBelt extends PlacedMachine {
         }
 
         boolean moved;
-
-        // No reflection in hot path
         if (neighbor instanceof ConveyorBelt nextBelt) moved = nextBelt.insertItem(currentItem, currentTick);
         else if (neighbor instanceof NexusMachine nexus) moved = nexus.insertItem(currentItem, this.pos);
         else if (neighbor instanceof ProcessorMachine processor) moved = processor.insertItem(currentItem, this.pos);
@@ -166,10 +159,10 @@ public class ConveyorBelt extends PlacedMachine {
 
         if (moved) {
             this.currentItem = null;
-            this.currentItemJson = null;
+            this.currentItemJsonCache = null;
             this.arrivalTick = -1;
             this.blockedStreak = 0;
-            this.metadata.remove("currentItem"); // UI
+            // metadata updated lazily in serialize()
         } else {
             scheduleBlockedRetry(currentTick);
         }
@@ -182,15 +175,26 @@ public class ConveyorBelt extends PlacedMachine {
         if (delay < 2L) delay = 2L;
         if (delay > 32L) delay = 32L;
 
-        // Keep phaseOffset so retries also stay distributed
         this.arrivalTick = currentTick + delay + phaseOffsetTicks;
     }
 
     @Override
     public JsonObject serialize() {
-        // Ensure UI sees currentItem; autosave remains unaffected because we never markDirty for it
-        if (currentItemJson != null) this.metadata.add("currentItem", currentItemJson);
-        else this.metadata.remove("currentItem");
+        // UI/save: include currentItem only here (lazy)
+        if (currentItem != null) {
+            if (currentItemJsonCache == null) {
+                try {
+                    currentItemJsonCache = currentItem.serialize();
+                } catch (Throwable ignored) {
+                    currentItemJsonCache = null;
+                }
+            }
+            if (currentItemJsonCache != null) metadata.add("currentItem", currentItemJsonCache);
+            else metadata.remove("currentItem");
+        } else {
+            metadata.remove("currentItem");
+        }
+
         return super.serialize();
     }
 }

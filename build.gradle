@@ -1,9 +1,11 @@
 plugins {
     id 'java'
+    id 'application'
 }
 
-group = 'com.matterworks'
-version = '1.0-SNAPSHOT'
+application {
+    mainClass = 'com.matterworks.core.Main'
+}
 
 java {
     toolchain {
@@ -21,15 +23,24 @@ dependencies {
     implementation 'com.google.code.gson:gson:2.10.1'
     implementation 'org.slf4j:slf4j-simple:2.0.12'
 
-
     testImplementation platform('org.junit:junit-bom:5.10.2')
     testImplementation 'org.junit.jupiter:junit-jupiter'
 }
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
-    // Abilita feature sperimentali (utile per StructuredTaskScope di Java 25)
     options.compilerArgs.add('--enable-preview')
+}
+
+tasks.named('run', JavaExec) {
+    // IMPORTANT: set esplicito (non "append") così non viene sovrascritto/mescolato
+    jvmArgs = [
+            '--enable-preview',
+            '-Xms2g',
+            '-Xmx6g',
+            '-XX:+UseZGC',
+            '-XX:SoftMaxHeapSize=2g'
+    ]
 }
 
 test {

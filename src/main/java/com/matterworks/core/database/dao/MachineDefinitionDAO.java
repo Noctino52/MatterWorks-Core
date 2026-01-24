@@ -23,6 +23,7 @@ public class MachineDefinitionDAO {
 
             boolean hasPrestigeMult = columnExists(conn, "item_definitions", "prestigecostmultiplier");
             boolean hasSpeed = columnExists(conn, "machine_definitions", "speed");
+            boolean hasShopOrder = columnExists(conn, "item_definitions", "shop_order");
 
             String sql = """
                 SELECT
@@ -32,6 +33,7 @@ public class MachineDefinitionDAO {
                     %s AS prestige_cost_mult,
                     i.tier,
                     i.model_id,
+                    %s AS shop_order,
                     m.width,
                     m.height,
                     m.depth,
@@ -40,6 +42,7 @@ public class MachineDefinitionDAO {
                 JOIN machine_definitions m ON i.id = m.type_id
             """.formatted(
                     hasPrestigeMult ? "i.prestigecostmultiplier" : "0.0",
+                    hasShopOrder ? "i.shop_order" : "0",
                     hasSpeed ? "m.speed" : "1.0"
             );
 
@@ -54,6 +57,14 @@ public class MachineDefinitionDAO {
                     int tier = rs.getInt("tier");
                     String modelId = rs.getString("model_id");
 
+                    int shopOrder = 0;
+                    try {
+                        shopOrder = rs.getInt("shop_order");
+                        if (rs.wasNull()) shopOrder = 0;
+                    } catch (SQLException ignored) {
+                        shopOrder = 0;
+                    }
+
                     Vector3Int dim = new Vector3Int(
                             rs.getInt("width"),
                             rs.getInt("height"),
@@ -63,7 +74,10 @@ public class MachineDefinitionDAO {
                     double speed = rs.getDouble("speed");
                     if (Double.isNaN(speed) || Double.isInfinite(speed) || speed <= 0.0) speed = 1.0;
 
-                    statsMap.put(id, new MachineStats(id, dim, price, prestigeCostMult, tier, modelId, category, speed));
+                    statsMap.put(
+                            id,
+                            new MachineStats(id, dim, price, prestigeCostMult, tier, modelId, category, speed, shopOrder)
+                    );
                 }
             }
 

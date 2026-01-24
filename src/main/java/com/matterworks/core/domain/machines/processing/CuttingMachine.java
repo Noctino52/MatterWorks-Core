@@ -1,20 +1,32 @@
 package com.matterworks.core.domain.machines.processing;
 
 import com.google.gson.JsonObject;
+import com.matterworks.core.common.Direction;
 import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.domain.machines.base.PlacedMachine;
 import com.matterworks.core.domain.machines.base.ProcessorMachine;
 import com.matterworks.core.domain.matter.MatterPayload;
 import com.matterworks.core.domain.matter.MatterShape;
-import com.matterworks.core.domain.matter.Recipe;
 
-import java.util.List;
 import java.util.UUID;
 
+/**
+ * CuttingMachine:
+ * - Input: SPHERE
+ * - Output: PYRAMID (same color/effects)
+ *
+ * PERFORMANCE:
+ * - Cached input/output port positions (no per-tick GridPosition allocations)
+ * - No Recipe/List allocations per job
+ */
 public class CuttingMachine extends ProcessorMachine {
 
     private static final long PROCESS_TICKS = 40;
+
+    private transient Direction cachedOrientation;
+    private transient GridPosition cachedInputPos;
+    private transient GridPosition cachedOutputPos;
 
     public CuttingMachine(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata) {
         this(dbId, ownerId, pos, typeId, metadata, 64);
@@ -23,6 +35,25 @@ public class CuttingMachine extends ProcessorMachine {
     public CuttingMachine(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata, int maxStackPerSlot) {
         super(dbId, ownerId, pos, typeId, metadata, maxStackPerSlot);
         this.dimensions = new Vector3Int(2, 1, 1);
+        recomputePorts();
+    }
+
+    @Override
+    public void setOrientation(Direction orientation) {
+        super.setOrientation(orientation);
+        recomputePorts();
+    }
+
+    @Override
+    public void setOrientation(String orientation) {
+        super.setOrientation(orientation);
+        recomputePorts();
+    }
+
+    private void ensurePorts() {
+        if (cachedOrientation != orientation || cachedInputPos == null || cachedOutputPos == null) {
+            recomputePorts();
+        }
     }
 
     private GridPosition stepOutOfSelf(GridPosition start, Vector3Int step) {
@@ -35,18 +66,23 @@ public class CuttingMachine extends ProcessorMachine {
         return p;
     }
 
-    private GridPosition getInputPortPosition() {
+    private void recomputePorts() {
         Vector3Int f = orientationToVector();
         Vector3Int back = new Vector3Int(-f.x(), -f.y(), -f.z());
-        GridPosition start = new GridPosition(pos.x() + back.x(), pos.y() + back.y(), pos.z() + back.z());
-        return stepOutOfSelf(start, back);
+
+        GridPosition inStart = new GridPosition(pos.x() + back.x(), pos.y() + back.y(), pos.z() + back.z());
+        GridPosition outStart = new GridPosition(pos.x() + f.x(), pos.y() + f.y(), pos.z() + f.z());
+
+        cachedInputPos = stepOutOfSelf(inStart, back);
+        cachedOutputPos = stepOutOfSelf(outStart, f);
+
+        cachedOrientation = orientation;
     }
 
     @Override
     protected GridPosition getOutputPosition() {
-        Vector3Int f = orientationToVector();
-        GridPosition start = new GridPosition(pos.x() + f.x(), pos.y() + f.y(), pos.z() + f.z());
-        return stepOutOfSelf(start, f);
+        ensurePorts();
+        return cachedOutputPos;
     }
 
     @Override
@@ -54,14 +90,15 @@ public class CuttingMachine extends ProcessorMachine {
         if (item == null || fromPos == null) return false;
         if (item.shape() != MatterShape.SPHERE) return false;
 
-        return fromPos.equals(getInputPortPosition()) && insertIntoBuffer(0, item);
+        ensurePorts();
+        return fromPos.equals(cachedInputPos) && insertIntoBuffer(0, item);
     }
 
     @Override
     public void tick(long currentTick) {
         super.tryEjectItem(currentTick);
 
-        if (currentRecipe != null) {
+        if (isProcessing()) {
             if (currentTick >= finishTick) completeProcessing();
             return;
         }
@@ -75,9 +112,6 @@ public class CuttingMachine extends ProcessorMachine {
         consumeInput(0, 1, in);
 
         MatterPayload out = new MatterPayload(MatterShape.PYRAMID, in.color(), in.effects());
-        this.currentRecipe = new Recipe("cutting_sphere_to_pyramid", List.of(in), out, 2.0f, 0);
-
-        this.finishTick = scheduleAfter(currentTick, PROCESS_TICKS, "PROCESS_START");
-        saveState();
+        startProcessing(out, currentTick, PROCESS_TICKS, "PROCESS_START");
     }
 }

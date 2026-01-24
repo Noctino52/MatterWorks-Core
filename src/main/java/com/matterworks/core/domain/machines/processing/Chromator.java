@@ -7,20 +7,20 @@ import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.domain.machines.base.ProcessorMachine;
 import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.matter.MatterPayload;
-import com.matterworks.core.domain.matter.Recipe;
+import com.matterworks.core.domain.matter.MatterShape;
 
-import java.util.List;
 import java.util.UUID;
 
 /**
- * Chromator (original behavior):
+ * Chromator:
  * - Slot 0: base matter (NOT a dye -> color == RAW)
- * - Slot 1: dye (color != RAW)
- * Output: base shape recolored with dye color.
+ * - Slot 1: dye (color != RAW and shape == null)
+ * Output: base shape recolored with dye color (effects not copied).
  *
- * Optimized:
- * - Cached input/output port positions (no GridPosition allocations per insert/tick)
- * - No extra metadata churn
+ * PERFORMANCE:
+ * - No Recipe/List allocations per job.
+ * - Cached ports.
+ * - Cached output MatterPayload by (shape,color).
  */
 public class Chromator extends ProcessorMachine {
 
@@ -31,6 +31,10 @@ public class Chromator extends ProcessorMachine {
     private transient GridPosition cachedSlot0Pos;
     private transient GridPosition cachedSlot1Pos;
     private transient GridPosition cachedOutputPos;
+
+    // Output cache [shapeOrdinal][colorOrdinal]
+    private static final MatterPayload[][] OUT_CACHE =
+            new MatterPayload[MatterShape.values().length][MatterColor.values().length];
 
     public Chromator(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata) {
         this(dbId, ownerId, pos, typeId, metadata, 64);
@@ -69,10 +73,8 @@ public class Chromator extends ProcessorMachine {
 
         switch (orientation) {
             case NORTH -> {
-                // Inputs behind the machine (south side)
                 s0 = new GridPosition(x,     y, z + 1);
                 s1 = new GridPosition(x + 1, y, z + 1);
-                // Output in front (north)
                 out = new GridPosition(x, y, z - 1);
             }
             case SOUTH -> {
@@ -112,14 +114,16 @@ public class Chromator extends ProcessorMachine {
         int targetSlot = -1;
         if (fromPos.equals(cachedSlot0Pos)) targetSlot = 0;
         else if (fromPos.equals(cachedSlot1Pos)) targetSlot = 1;
-
         if (targetSlot == -1) return false;
 
         boolean isDye = (item.color() != null && item.color() != MatterColor.RAW);
 
-        // Slot constraints (original logic)
+        // Slot constraints
         if (targetSlot == 0 && isDye) return false;
         if (targetSlot == 1 && !isDye) return false;
+
+        // Extra constraint: dye must be "only color" (no shape)
+        if (targetSlot == 1 && item.shape() != null) return false;
 
         return insertIntoBuffer(targetSlot, item);
     }
@@ -134,7 +138,7 @@ public class Chromator extends ProcessorMachine {
     public void tick(long currentTick) {
         super.tryEjectItem(currentTick);
 
-        if (currentRecipe != null) {
+        if (isProcessing()) {
             if (currentTick >= finishTick) completeProcessing();
             return;
         }
@@ -148,19 +152,29 @@ public class Chromator extends ProcessorMachine {
         MatterPayload dye  = inputBuffer.getItemInSlot(1);
         if (base == null || dye == null) return;
 
-        // Defensive: dye must be a color != RAW, base must NOT be dye
+        // dye must be a color != RAW, base must be RAW-colored
         if (dye.color() == null || dye.color() == MatterColor.RAW) return;
         if (base.color() != null && base.color() != MatterColor.RAW) return;
+        if (base.shape() == null) return;
 
-        // Consume inputs
         consumeInput(0, 1, base);
         consumeInput(1, 1, dye);
 
-        // Output: base shape recolored with dye color (effects intentionally NOT copied: original behavior)
-        MatterPayload result = new MatterPayload(base.shape(), dye.color());
+        MatterPayload out = cachedOutput(base.shape(), dye.color());
+        startProcessing(out, currentTick, PROCESS_TICKS, "PROCESS_START");
+    }
 
-        this.currentRecipe = new Recipe("chroma_working", List.of(base, dye), result, 1.5f, 0);
-        this.finishTick = scheduleAfter(currentTick, PROCESS_TICKS, "PROCESS_START");
-        saveState();
+    private static MatterPayload cachedOutput(MatterShape shape, MatterColor color) {
+        if (shape == null || color == null) return new MatterPayload(shape, color);
+
+        int si = shape.ordinal();
+        int ci = color.ordinal();
+
+        MatterPayload p = OUT_CACHE[si][ci];
+        if (p == null) {
+            p = new MatterPayload(shape, color);
+            OUT_CACHE[si][ci] = p;
+        }
+        return p;
     }
 }

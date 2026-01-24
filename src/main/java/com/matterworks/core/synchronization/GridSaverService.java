@@ -5,8 +5,6 @@ import com.matterworks.core.domain.machines.base.PlacedMachine;
 import com.matterworks.core.managers.GridManager;
 import com.matterworks.core.ui.MariaDBAdapter;
 
-
-
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -19,10 +17,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * Incremental, write-behind autosaver.
  *
  * Key properties:
- * - Never scans all players from DB.
  * - Never performs DB I/O on the simulation tick thread.
  * - Saves only plots marked dirty (deduped).
  * - Applies retry backoff on failures.
+ *
+ * PERFORMANCE FIX:
+ * - Avoids allocating a full HashMap snapshot of the grid (no new HashMap<>(g)).
+ * - Reuses IdentityHashMap + ArrayList buffers to reduce GC pressure.
  */
 public class GridSaverService implements AutoCloseable {
 
@@ -51,6 +52,10 @@ public class GridSaverService implements AutoCloseable {
 
     // (optional) some telemetry
     private volatile long lastLogMs = 0L;
+
+    // Reusable buffers (single saver thread => safe)
+    private final IdentityHashMap<PlacedMachine, Boolean> seen = new IdentityHashMap<>(512);
+    private final ArrayList<PlacedMachine> dirty = new ArrayList<>(256);
 
     public GridSaverService(GridManager gridManager, MariaDBAdapter repository) {
         this.gridManager = gridManager;
@@ -165,24 +170,28 @@ public class GridSaverService implements AutoCloseable {
 
         rs.nextRetryAtMs = nowMs + delay;
 
-        // Requeue if still dirty and not already queued a lot
+        // Requeue if still dirty
         dirtyQueue.add(ownerId);
     }
 
     private SaveResult saveOwnerPlot(UUID ownerId) {
-        Map<GridPosition, PlacedMachine> snapshot = gridManager.getSnapshot(ownerId);
-        if (snapshot == null || snapshot.isEmpty()) {
+        // PERFORMANCE FIX:
+        // Do NOT allocate HashMap snapshots (new HashMap<>(g)).
+        // Iterate directly on the concurrent map view.
+        Map<GridPosition, PlacedMachine> grid = gridManager.getUnsafeGridView(ownerId);
+        if (grid == null || grid.isEmpty()) {
             return SaveResult.SKIPPED_EMPTY_OR_NOT_LOADED;
         }
 
-        // IMPORTANT: snapshot has lots of duplicates (multi-cell occupancy).
-        // Deduplicate by identity to avoid huge dirty lists and heavy DB updates.
-        IdentityHashMap<PlacedMachine, Boolean> seen = new IdentityHashMap<>();
-        List<PlacedMachine> dirty = new ArrayList<>();
+        // Reuse buffers to avoid GC spikes
+        seen.clear();
+        dirty.clear();
 
-        for (PlacedMachine m : snapshot.values()) {
+        // IMPORTANT: grid has lots of duplicates (multi-cell occupancy).
+        // Deduplicate by identity to avoid huge dirty lists and heavy DB updates.
+        for (PlacedMachine m : grid.values()) {
             if (m == null) continue;
-            if (m.getDbId() == null) continue;     // not persisted yet (or structural)
+            if (m.getDbId() == null) continue; // not persisted yet (or structural)
             if (!m.isDirty()) continue;
 
             if (seen.put(m, Boolean.TRUE) == null) {

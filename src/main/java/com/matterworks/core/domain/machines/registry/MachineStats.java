@@ -10,9 +10,20 @@ public record MachineStats(
         int tier,
         String modelId,
         String category,
-        double speed
+        double speed,
+        int shopOrder
 ) {
     public static MachineStats fallback(String id) {
-        return new MachineStats(id, Vector3Int.one(), 0.0, 0.0, 1, "model_missing", "UNKNOWN", 1.0);
+        return new MachineStats(
+                id,
+                Vector3Int.one(),
+                0.0,
+                0.0,
+                1,
+                "model_missing",
+                "UNKNOWN",
+                1.0,
+                0
+        );
     }
 }

@@ -20,6 +20,9 @@ public class FactoryLoop {
     // light telemetry
     private volatile long lastWarnMs = 0L;
 
+    // NEW: pause/GC monitor
+    private final TickHealthMonitor healthMonitor;
+
     public FactoryLoop(GridManager gridManager) {
         this.gridManager = gridManager;
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -33,27 +36,32 @@ public class FactoryLoop {
 
             return t;
         });
+
+        // Consider a pause anything larger than ~2 ticks.
+        // You can tune this (e.g. 120ms, 150ms, 200ms).
+        this.healthMonitor = new TickHealthMonitor(TICK_MS, 120L);
     }
 
     public void start() {
         if (running) return;
         running = true;
 
-        // CRITICAL FIX:
         // scheduleWithFixedDelay does NOT try to "catch up" if a tick is slow.
-        // This prevents CPU saturation and UI starvation when a tick spikes.
         scheduler.scheduleWithFixedDelay(() -> {
             if (!running) return;
 
+            long tick = currentTick.incrementAndGet();
+            healthMonitor.onTickStart(tick);
+
             long startNs = System.nanoTime();
             try {
-                long tick = currentTick.incrementAndGet();
                 gridManager.tick(tick);
             } catch (Throwable t) {
                 System.err.println("CRITICAL: Exception in Factory Loop!");
                 t.printStackTrace();
             } finally {
                 long elapsedMs = (System.nanoTime() - startNs) / 1_000_000L;
+                healthMonitor.onTickEnd(tick, elapsedMs);
 
                 // Warn if tick is taking too long (once per second max)
                 if (elapsedMs > TICK_MS) {

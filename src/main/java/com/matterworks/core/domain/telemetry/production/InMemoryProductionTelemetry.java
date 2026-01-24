@@ -13,9 +13,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * - bucketSizeSeconds: 5 seconds
  * - retention: 10 minutes (covers 1m/5m/10m)
  *
- * Snapshot returns only keys with non-zero values in the requested window:
- * - Appears when used/produced/sold
- * - Disappears when it falls out of the time window
+ * PERFORMANCE NOTES:
+ * - record*() is in the simulation hot path -> must be allocation-light.
+ * - Avoid Instant allocations: use clock.millis() / 1000
+ * - Avoid Long boxing: use MutableLong counters in buckets
  */
 public final class InMemoryProductionTelemetry implements ProductionTelemetry {
 
@@ -55,34 +56,37 @@ public final class InMemoryProductionTelemetry implements ProductionTelemetry {
     @Override
     public ProductionStatsSnapshot getSnapshot(UUID playerId, ProductionTimeWindow window) {
         if (playerId == null || window == null) {
-            return new ProductionStatsSnapshot(
-                    ProductionTimeWindow.ONE_MINUTE,
-                    Map.of(), Map.of(),
-                    Map.of(), Map.of(),
-                    Map.of(), Map.of(),
-                    0L, 0L, 0L, 0.0
-            );
+            return emptySnapshot(window != null ? window : ProductionTimeWindow.ONE_MINUTE);
         }
 
         PlayerBuffer buffer = buffers.get(playerId);
         if (buffer == null) {
-            return new ProductionStatsSnapshot(window,
-                    Map.of(), Map.of(),
-                    Map.of(), Map.of(),
-                    Map.of(), Map.of(),
-                    0L, 0L, 0L, 0.0
-            );
+            return emptySnapshot(window);
         }
 
         return buffer.snapshot(nowEpochSeconds(), window);
     }
 
-    private PlayerBuffer getOrCreate(UUID playerId) {
-        return buffers.computeIfAbsent(playerId, ignored -> new PlayerBuffer());
+    private ProductionStatsSnapshot emptySnapshot(ProductionTimeWindow window) {
+        return new ProductionStatsSnapshot(
+                window,
+                Map.of(), Map.of(),
+                Map.of(), Map.of(),
+                Map.of(), Map.of(),
+                0L, 0L, 0L, 0.0
+        );
     }
 
+    private PlayerBuffer getOrCreate(UUID playerId) {
+        return buffers.computeIfAbsent(playerId, _ignored -> new PlayerBuffer());
+    }
+
+    /**
+     * Allocation-free epoch seconds:
+     * - Clock.instant() allocates an Instant, which is too heavy in hot path.
+     */
     private long nowEpochSeconds() {
-        return clock.instant().getEpochSecond();
+        return clock.millis() / 1000L;
     }
 
     private static int windowBuckets(ProductionTimeWindow window) {
@@ -99,6 +103,16 @@ public final class InMemoryProductionTelemetry implements ProductionTelemetry {
         return (epochSeconds / BUCKET_SIZE_SECONDS) * BUCKET_SIZE_SECONDS;
     }
 
+    /**
+     * Minimal mutable long to avoid boxing in hot path.
+     */
+    private static final class MutableLong {
+        long v;
+        MutableLong(long v) { this.v = v; }
+        void add(long x) { this.v += x; }
+        long get() { return v; }
+    }
+
     private static final class PlayerBuffer {
         private final Bucket[] buckets = new Bucket[BUCKET_COUNT];
 
@@ -108,14 +122,14 @@ public final class InMemoryProductionTelemetry implements ProductionTelemetry {
 
         void recordProduced(long nowSec, MatterPayload payload, long qty) {
             Bucket b = rotateAndGet(nowSec);
-            b.producedByColor.merge(MatterTelemetryKeys.colorKey(payload), qty, Long::sum);
-            b.producedByMatter.merge(MatterTelemetryKeys.matterKey(payload), qty, Long::sum);
+            inc(b.producedByColor, MatterTelemetryKeys.colorKey(payload), qty);
+            inc(b.producedByMatter, MatterTelemetryKeys.matterKey(payload), qty);
         }
 
         void recordConsumed(long nowSec, MatterPayload payload, long qty) {
             Bucket b = rotateAndGet(nowSec);
-            b.consumedByColor.merge(MatterTelemetryKeys.colorKey(payload), qty, Long::sum);
-            b.consumedByMatter.merge(MatterTelemetryKeys.matterKey(payload), qty, Long::sum);
+            inc(b.consumedByColor, MatterTelemetryKeys.colorKey(payload), qty);
+            inc(b.consumedByMatter, MatterTelemetryKeys.matterKey(payload), qty);
         }
 
         void recordSold(long nowSec, MatterPayload payload, long qty, double money) {
@@ -124,8 +138,8 @@ public final class InMemoryProductionTelemetry implements ProductionTelemetry {
             String ck = MatterTelemetryKeys.colorKey(payload);
             String mk = MatterTelemetryKeys.matterKey(payload);
 
-            b.soldByColor.computeIfAbsent(ck, ignored -> new SoldStats()).add(qty, money);
-            b.soldByMatter.computeIfAbsent(mk, ignored -> new SoldStats()).add(qty, money);
+            b.soldByColor.computeIfAbsent(ck, _ignored -> new SoldStats()).add(qty, money);
+            b.soldByMatter.computeIfAbsent(mk, _ignored -> new SoldStats()).add(qty, money);
         }
 
         ProductionStatsSnapshot snapshot(long nowSec, ProductionTimeWindow window) {
@@ -145,47 +159,52 @@ public final class InMemoryProductionTelemetry implements ProductionTelemetry {
             long totalConsumed = 0L;
 
             long cursor = bucketStartSeconds(nowSec);
+            long minCursor = bucketStartSeconds(windowStartSec);
+
             for (int i = 0; i < wBuckets; i++) {
-                if (cursor < bucketStartSeconds(windowStartSec)) break;
+                if (cursor < minCursor) break;
 
                 int idx = bucketIndex(cursor);
                 Bucket b = buckets[idx];
 
                 if (b.bucketStartSeconds == cursor) {
+                    // Produced
                     for (var e : b.producedByColor.entrySet()) {
-                        long v = e.getValue();
+                        long v = e.getValue().get();
                         if (v <= 0) continue;
                         producedColor.merge(e.getKey(), v, Long::sum);
                         totalProduced += v;
                     }
                     for (var e : b.producedByMatter.entrySet()) {
-                        long v = e.getValue();
+                        long v = e.getValue().get();
                         if (v <= 0) continue;
                         producedMatter.merge(e.getKey(), v, Long::sum);
                     }
 
+                    // Consumed
                     for (var e : b.consumedByColor.entrySet()) {
-                        long v = e.getValue();
+                        long v = e.getValue().get();
                         if (v <= 0) continue;
                         consumedColor.merge(e.getKey(), v, Long::sum);
                         totalConsumed += v;
                     }
                     for (var e : b.consumedByMatter.entrySet()) {
-                        long v = e.getValue();
+                        long v = e.getValue().get();
                         if (v <= 0) continue;
                         consumedMatter.merge(e.getKey(), v, Long::sum);
                     }
 
+                    // Sold
                     for (var e : b.soldByColor.entrySet()) {
                         SoldStats s = e.getValue();
                         if (s == null || s.getQuantity() <= 0) continue;
-                        soldColor.computeIfAbsent(e.getKey(), ignored -> new SoldStats())
+                        soldColor.computeIfAbsent(e.getKey(), _ignored -> new SoldStats())
                                 .add(s.getQuantity(), s.getMoneyEarned());
                     }
                     for (var e : b.soldByMatter.entrySet()) {
                         SoldStats s = e.getValue();
                         if (s == null || s.getQuantity() <= 0) continue;
-                        soldMatter.computeIfAbsent(e.getKey(), ignored -> new SoldStats())
+                        soldMatter.computeIfAbsent(e.getKey(), _ignored -> new SoldStats())
                                 .add(s.getQuantity(), s.getMoneyEarned());
                     }
                 }
@@ -195,7 +214,7 @@ public final class InMemoryProductionTelemetry implements ProductionTelemetry {
 
             long totalSoldQty = 0L;
             double totalMoney = 0.0;
-            for (SoldStats s : soldMatter.values()) { // matter is the primary view for sales
+            for (SoldStats s : soldMatter.values()) {
                 totalSoldQty += s.getQuantity();
                 totalMoney += s.getMoneyEarned();
             }
@@ -212,6 +231,10 @@ public final class InMemoryProductionTelemetry implements ProductionTelemetry {
             );
         }
 
+        /**
+         * Rotates the ring buffer bucket for current time.
+         * Synchronized per-player; hot path must remain small.
+         */
         private synchronized Bucket rotateAndGet(long nowSec) {
             long start = bucketStartSeconds(nowSec);
             int idx = bucketIndex(start);
@@ -231,16 +254,27 @@ public final class InMemoryProductionTelemetry implements ProductionTelemetry {
             }
             return b;
         }
+
+        private static void inc(Map<String, MutableLong> map, String key, long qty) {
+            if (qty <= 0) return;
+            MutableLong c = map.get(key);
+            if (c == null) {
+                c = new MutableLong(qty);
+                map.put(key, c);
+            } else {
+                c.add(qty);
+            }
+        }
     }
 
     private static final class Bucket {
         long bucketStartSeconds = Long.MIN_VALUE;
 
-        final Map<String, Long> producedByColor = new HashMap<>();
-        final Map<String, Long> producedByMatter = new HashMap<>();
+        final Map<String, MutableLong> producedByColor = new HashMap<>();
+        final Map<String, MutableLong> producedByMatter = new HashMap<>();
 
-        final Map<String, Long> consumedByColor = new HashMap<>();
-        final Map<String, Long> consumedByMatter = new HashMap<>();
+        final Map<String, MutableLong> consumedByColor = new HashMap<>();
+        final Map<String, MutableLong> consumedByMatter = new HashMap<>();
 
         final Map<String, SoldStats> soldByColor = new HashMap<>();
         final Map<String, SoldStats> soldByMatter = new HashMap<>();
