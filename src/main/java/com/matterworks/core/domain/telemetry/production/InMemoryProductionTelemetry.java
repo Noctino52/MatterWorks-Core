@@ -17,7 +17,6 @@ import java.util.concurrent.ConcurrentHashMap;
  * - record*() is in the simulation hot path -> must be allocation-light.
  * - Avoid Instant allocations: use clock.millis() / 1000
  * - Avoid Long boxing: use MutableLong counters in buckets
- * - Avoid lambdas in hot path (computeIfAbsent/merge with method refs)
  *
  * THREADING NOTES:
  * - UI may call getSnapshot() concurrently with simulation record*().
@@ -62,14 +61,11 @@ public final class InMemoryProductionTelemetry implements ProductionTelemetry {
     @Override
     public ProductionStatsSnapshot getSnapshot(UUID playerId, ProductionTimeWindow window) {
         ProductionTimeWindow w = (window != null) ? window : ProductionTimeWindow.ONE_MINUTE;
-        if (playerId == null) {
-            return emptySnapshot(w);
-        }
+
+        if (playerId == null) return emptySnapshot(w);
 
         PlayerBuffer buffer = buffers.get(playerId);
-        if (buffer == null) {
-            return emptySnapshot(w);
-        }
+        if (buffer == null) return emptySnapshot(w);
 
         return buffer.snapshot(nowEpochSeconds(), w);
     }
@@ -97,11 +93,6 @@ public final class InMemoryProductionTelemetry implements ProductionTelemetry {
         return clock.millis() / 1000L;
     }
 
-    private static int windowBuckets(ProductionTimeWindow window) {
-        int seconds = window.getSeconds();
-        return Math.max(1, seconds / BUCKET_SIZE_SECONDS);
-    }
-
     private static int bucketIndex(long bucketStartSeconds) {
         long bucket = (bucketStartSeconds / BUCKET_SIZE_SECONDS);
         return (int) (bucket % BUCKET_COUNT);
@@ -109,6 +100,74 @@ public final class InMemoryProductionTelemetry implements ProductionTelemetry {
 
     private static long bucketStartSeconds(long epochSeconds) {
         return (epochSeconds / BUCKET_SIZE_SECONDS) * BUCKET_SIZE_SECONDS;
+    }
+
+    private static double overlapFraction(long bucketStart, long windowStart, long windowEndExclusive) {
+        long bucketEnd = bucketStart + BUCKET_SIZE_SECONDS;
+
+        long a = Math.max(bucketStart, windowStart);
+        long b = Math.min(bucketEnd, windowEndExclusive);
+
+        long overlap = b - a;
+        if (overlap <= 0) return 0.0;
+
+        if (overlap >= BUCKET_SIZE_SECONDS) return 1.0;
+        return overlap / (double) BUCKET_SIZE_SECONDS;
+    }
+
+    private static void addScaledLongMap(Map<String, MutableLong> src, Map<String, Double> dst, double factor) {
+        if (factor <= 0.0) return;
+        for (Map.Entry<String, MutableLong> e : src.entrySet()) {
+            long v = e.getValue().get();
+            if (v <= 0) continue;
+            dst.put(e.getKey(), dst.getOrDefault(e.getKey(), 0.0) + (v * factor));
+        }
+    }
+
+    private static void addScaledSoldMap(Map<String, SoldStats> src, Map<String, SoldAcc> dst, double factor) {
+        if (factor <= 0.0) return;
+        for (Map.Entry<String, SoldStats> e : src.entrySet()) {
+            SoldStats s = e.getValue();
+            if (s == null) continue;
+
+            long q = s.getQuantity();
+            double m = s.getMoneyEarned();
+            if (q <= 0 && m <= 0.0) continue;
+
+            SoldAcc acc = dst.get(e.getKey());
+            if (acc == null) {
+                acc = new SoldAcc();
+                dst.put(e.getKey(), acc);
+            }
+            acc.qty += q * factor;
+            acc.money += m * factor;
+        }
+    }
+
+    private static Map<String, Long> toRoundedLongMap(Map<String, Double> src) {
+        Map<String, Long> out = new HashMap<>();
+        for (Map.Entry<String, Double> e : src.entrySet()) {
+            double d = e.getValue();
+            if (d <= 0.0) continue;
+            long v = Math.round(d);
+            if (v > 0) out.put(e.getKey(), v);
+        }
+        return out;
+    }
+
+    private static Map<String, SoldStats> toRoundedSoldMap(Map<String, SoldAcc> src) {
+        Map<String, SoldStats> out = new HashMap<>();
+        for (Map.Entry<String, SoldAcc> e : src.entrySet()) {
+            SoldAcc a = e.getValue();
+            if (a == null) continue;
+
+            long q = Math.round(a.qty);
+            double m = a.money;
+
+            if (q <= 0 && m <= 0.0) continue;
+            out.put(e.getKey(), new SoldStats(Math.max(0L, q), Math.max(0.0, m)));
+        }
+        return out;
     }
 
     /**
@@ -119,6 +178,11 @@ public final class InMemoryProductionTelemetry implements ProductionTelemetry {
         MutableLong(long v) { this.v = v; }
         void add(long x) { this.v += x; }
         long get() { return v; }
+    }
+
+    private static final class SoldAcc {
+        double qty;
+        double money;
     }
 
     private static final class PlayerBuffer {
@@ -155,88 +219,66 @@ public final class InMemoryProductionTelemetry implements ProductionTelemetry {
 
         /**
          * Snapshot is called by UI. Keep it synchronized per-player to avoid CME and keep data consistent.
+         *
+         * IMPORTANT:
+         * We compute "per window" using partial overlap on the first/last bucket,
+         * otherwise a 60s window with 5s buckets may systematically under/over report
+         * depending on alignment.
          */
         synchronized ProductionStatsSnapshot snapshot(long nowSec, ProductionTimeWindow window) {
-            int wBuckets = windowBuckets(window);
-            long windowStartSec = nowSec - window.getSeconds();
+            long windowEnd = nowSec; // exclusive-ish at second precision
+            long windowStart = nowSec - Math.max(0, window.getSeconds());
+            if (windowStart > windowEnd) windowStart = windowEnd;
 
-            Map<String, Long> producedColor = new HashMap<>();
-            Map<String, Long> producedMatter = new HashMap<>();
+            Map<String, Double> producedColorD = new HashMap<>();
+            Map<String, Double> producedMatterD = new HashMap<>();
 
-            Map<String, Long> consumedColor = new HashMap<>();
-            Map<String, Long> consumedMatter = new HashMap<>();
+            Map<String, Double> consumedColorD = new HashMap<>();
+            Map<String, Double> consumedMatterD = new HashMap<>();
 
-            Map<String, SoldStats> soldColor = new HashMap<>();
-            Map<String, SoldStats> soldMatter = new HashMap<>();
+            Map<String, SoldAcc> soldColorD = new HashMap<>();
+            Map<String, SoldAcc> soldMatterD = new HashMap<>();
 
-            long totalProduced = 0L;
-            long totalConsumed = 0L;
+            long cursor = bucketStartSeconds(windowEnd);
+            long minCursor = bucketStartSeconds(windowStart);
 
-            long cursor = bucketStartSeconds(nowSec);
-            long minCursor = bucketStartSeconds(windowStartSec);
-
-            for (int i = 0; i < wBuckets; i++) {
-                if (cursor < minCursor) break;
-
-                int idx = bucketIndex(cursor);
-                Bucket b = buckets[idx];
-
+            while (cursor >= minCursor) {
+                Bucket b = buckets[bucketIndex(cursor)];
                 if (b.bucketStartSeconds == cursor) {
-                    // Produced
-                    for (Map.Entry<String, MutableLong> e : b.producedByColor.entrySet()) {
-                        long v = e.getValue().get();
-                        if (v <= 0) continue;
-                        producedColor.put(e.getKey(), producedColor.getOrDefault(e.getKey(), 0L) + v);
-                        totalProduced += v;
-                    }
-                    for (Map.Entry<String, MutableLong> e : b.producedByMatter.entrySet()) {
-                        long v = e.getValue().get();
-                        if (v <= 0) continue;
-                        producedMatter.put(e.getKey(), producedMatter.getOrDefault(e.getKey(), 0L) + v);
-                    }
+                    double frac = overlapFraction(cursor, windowStart, windowEnd);
+                    if (frac > 0.0) {
+                        addScaledLongMap(b.producedByColor, producedColorD, frac);
+                        addScaledLongMap(b.producedByMatter, producedMatterD, frac);
 
-                    // Consumed
-                    for (Map.Entry<String, MutableLong> e : b.consumedByColor.entrySet()) {
-                        long v = e.getValue().get();
-                        if (v <= 0) continue;
-                        consumedColor.put(e.getKey(), consumedColor.getOrDefault(e.getKey(), 0L) + v);
-                        totalConsumed += v;
-                    }
-                    for (Map.Entry<String, MutableLong> e : b.consumedByMatter.entrySet()) {
-                        long v = e.getValue().get();
-                        if (v <= 0) continue;
-                        consumedMatter.put(e.getKey(), consumedMatter.getOrDefault(e.getKey(), 0L) + v);
-                    }
+                        addScaledLongMap(b.consumedByColor, consumedColorD, frac);
+                        addScaledLongMap(b.consumedByMatter, consumedMatterD, frac);
 
-                    // Sold
-                    for (Map.Entry<String, SoldStats> e : b.soldByColor.entrySet()) {
-                        SoldStats s = e.getValue();
-                        if (s == null || s.getQuantity() <= 0) continue;
-                        SoldStats acc = soldColor.get(e.getKey());
-                        if (acc == null) {
-                            acc = new SoldStats();
-                            soldColor.put(e.getKey(), acc);
-                        }
-                        acc.add(s.getQuantity(), s.getMoneyEarned());
-                    }
-                    for (Map.Entry<String, SoldStats> e : b.soldByMatter.entrySet()) {
-                        SoldStats s = e.getValue();
-                        if (s == null || s.getQuantity() <= 0) continue;
-                        SoldStats acc = soldMatter.get(e.getKey());
-                        if (acc == null) {
-                            acc = new SoldStats();
-                            soldMatter.put(e.getKey(), acc);
-                        }
-                        acc.add(s.getQuantity(), s.getMoneyEarned());
+                        addScaledSoldMap(b.soldByColor, soldColorD, frac);
+                        addScaledSoldMap(b.soldByMatter, soldMatterD, frac);
                     }
                 }
-
                 cursor -= BUCKET_SIZE_SECONDS;
             }
+
+            Map<String, Long> producedColor = toRoundedLongMap(producedColorD);
+            Map<String, Long> producedMatter = toRoundedLongMap(producedMatterD);
+
+            Map<String, Long> consumedColor = toRoundedLongMap(consumedColorD);
+            Map<String, Long> consumedMatter = toRoundedLongMap(consumedMatterD);
+
+            Map<String, SoldStats> soldColor = toRoundedSoldMap(soldColorD);
+            Map<String, SoldStats> soldMatter = toRoundedSoldMap(soldMatterD);
+
+            long totalProduced = 0L;
+            for (long v : producedColor.values()) totalProduced += v;
+
+            long totalConsumed = 0L;
+            for (long v : consumedColor.values()) totalConsumed += v;
 
             long totalSoldQty = 0L;
             double totalMoney = 0.0;
             for (SoldStats s : soldMatter.values()) {
+                if (s == null) continue;
                 totalSoldQty += s.getQuantity();
                 totalMoney += s.getMoneyEarned();
             }

@@ -11,21 +11,30 @@ import com.matterworks.core.domain.machines.logistics.ConveyorBelt;
 import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.matter.MatterPayload;
 import com.matterworks.core.domain.matter.MatterShape;
+import com.matterworks.core.synchronization.SimulationTime;
 
 import java.util.UUID;
 
+/**
+ * Drill is data-driven:
+ * - Machine typeId is always "drill"
+ * - Upgrades (DB speed, tech tree, overclocks) are applied via getEffectiveSpeedMultiplier()
+ *
+ * Baseline: speedMult=1.0 => 1 item/sec => 60 items/min.
+ */
 public class DrillMachine extends PlacedMachine {
 
-    private long nextSpawnTick = -1;
+    private static final double BASE_ITEMS_PER_SECOND = 1.0;
 
-    private final int tierLevel;
-    private final float productionSpeed;
     private final int maxStackSize;
 
-    // Runtime state (NO JSON churn per tick)
-    private int outputCount = 0;
-    private MatterColor resourceToMine = MatterColor.RAW;
+    // dt-based accumulator in "items"
+    private double spawnAccumulator = 0.0;
 
+    // Output buffer (single slot with count)
+    private int outputCount = 0;
+
+    private MatterColor resourceToMine = MatterColor.RAW;
     private transient MatterPayload cachedOutputPayload;
 
     private transient Vector3Int cachedDir;
@@ -35,20 +44,16 @@ public class DrillMachine extends PlacedMachine {
     private transient PlacedMachine cachedNeighbor = null;
     private static final long NEIGHBOR_CACHE_TTL_TICKS = 20L;
 
-    // Small spread to avoid all drills spawning on the exact same tick (ONLY for initial schedule)
-    private final int spawnPhaseSeed;
-
     public DrillMachine(Long dbId,
                         UUID ownerId,
                         GridPosition pos,
                         String typeId,
                         JsonObject metadata,
-                        int tierLevel,
                         int maxStackPerSlot) {
         super(dbId, ownerId, typeId, pos, metadata);
 
-        this.dimensions = Vector3Int.one();
-        this.tierLevel = tierLevel;
+        // Drill is 1x2x1
+        this.dimensions = new Vector3Int(1, 2, 1);
 
         this.maxStackSize = Math.max(1, maxStackPerSlot);
 
@@ -60,6 +65,18 @@ public class DrillMachine extends PlacedMachine {
             }
         }
 
+        if (this.metadata != null && this.metadata.has("spawn_acc") && this.metadata.get("spawn_acc").isJsonPrimitive()) {
+            try {
+                this.spawnAccumulator = this.metadata.get("spawn_acc").getAsDouble();
+                if (Double.isNaN(this.spawnAccumulator) || Double.isInfinite(this.spawnAccumulator) || this.spawnAccumulator < 0.0) {
+                    this.spawnAccumulator = 0.0;
+                }
+                if (this.spawnAccumulator > 5.0) this.spawnAccumulator = 5.0;
+            } catch (Throwable ignored) {
+                this.spawnAccumulator = 0.0;
+            }
+        }
+
         if (this.metadata != null && this.metadata.has("items") && this.metadata.get("items").isJsonArray()) {
             try {
                 JsonArray arr = this.metadata.getAsJsonArray("items");
@@ -68,7 +85,7 @@ public class DrillMachine extends PlacedMachine {
                     int c = slot0.has("count") ? slot0.get("count").getAsInt() : 0;
                     this.outputCount = Math.max(0, Math.min(c, this.maxStackSize));
 
-                    if ((this.metadata == null || !this.metadata.has("mining_resource")) && slot0.has("color")) {
+                    if ((!this.metadata.has("mining_resource")) && slot0.has("color")) {
                         try {
                             this.resourceToMine = MatterColor.valueOf(slot0.get("color").getAsString());
                         } catch (Throwable ignored) {}
@@ -79,24 +96,8 @@ public class DrillMachine extends PlacedMachine {
             }
         }
 
-        this.productionSpeed = switch (tierLevel) {
-            case 1 -> 1.0f;
-            case 2 -> 2.0f;
-            case 3 -> 4.0f;
-            default -> 1.0f;
-        };
-
-        this.spawnPhaseSeed = mixPos(pos);
-
         refreshCachedPayload();
         recomputeCachedOutput();
-    }
-
-    private static int mixPos(GridPosition p) {
-        int x = p.x() * 73856093;
-        int y = p.y() * 19349663;
-        int z = p.z() * 83492791;
-        return x ^ y ^ z;
     }
 
     private void refreshCachedPayload() {
@@ -139,38 +140,37 @@ public class DrillMachine extends PlacedMachine {
 
     @Override
     public void tick(long currentTick) {
-        long baseInterval = (long) (20 / productionSpeed);
-        if (baseInterval < 1) baseInterval = 1;
+        double dt = SimulationTime.getDtSeconds();
+        if (dt <= 0.0) dt = 0.05;
 
-        // Phase offset ONLY once (initial schedule), not every spawn
-        if (nextSpawnTick == -1) {
-            nextSpawnTick = scheduleAfter(currentTick, baseInterval, "PROD_SPAWN") + phaseForInterval(baseInterval);
+        double speedMult = getEffectiveSpeedMultiplier();
+        if (speedMult <= 0.0) speedMult = 1.0;
+
+        double rate = BASE_ITEMS_PER_SECOND * speedMult;
+        spawnAccumulator += dt * rate;
+
+        final int MAX_BURST_PER_TICK = 8;
+
+        int produced = 0;
+        while (spawnAccumulator >= 1.0 && produced < MAX_BURST_PER_TICK && outputCount < maxStackSize) {
+            outputCount++;
+            spawnAccumulator -= 1.0;
+            produced++;
+
+            try {
+                if (gridManager != null && gridManager.getProductionTelemetry() != null) {
+                    gridManager.getProductionTelemetry().recordProduced(getOwnerId(), cachedOutputPayload, 1L);
+                }
+            } catch (Throwable ignored) {}
+
+            markDirty();
         }
 
-        if (currentTick >= nextSpawnTick) {
-            if (outputCount < maxStackSize) {
-                outputCount++;
-
-                try {
-                    if (gridManager != null && gridManager.getProductionTelemetry() != null) {
-                        gridManager.getProductionTelemetry().recordProduced(getOwnerId(), cachedOutputPayload, 1L);
-                    }
-                } catch (Throwable ignored) {}
-
-                markDirty();
-            }
-
-            // Next cycles: no phase add (keep stable cadence)
-            nextSpawnTick = scheduleAfter(currentTick, baseInterval, "PROD_SPAWN");
+        if (outputCount >= maxStackSize && spawnAccumulator > 2.0) {
+            spawnAccumulator = 2.0;
         }
 
         tryEjectItem(currentTick);
-    }
-
-    private int phaseForInterval(long interval) {
-        if (interval <= 1) return 0;
-        int m = (spawnPhaseSeed & 0x7fffffff) % (int) interval;
-        return (m < 0) ? 0 : m;
     }
 
     private PlacedMachine getNeighborCached(long currentTick) {
@@ -200,6 +200,7 @@ public class DrillMachine extends PlacedMachine {
 
         metadata.addProperty("mining_resource", resourceToMine.name());
         metadata.addProperty("capacity", 1);
+        metadata.addProperty("spawn_acc", Math.max(0.0, Math.min(spawnAccumulator, 5.0)));
 
         JsonArray items = new JsonArray();
         if (outputCount > 0) {

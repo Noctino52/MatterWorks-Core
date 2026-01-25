@@ -262,7 +262,7 @@ final class GridWorldService {
 
         int machineCountApprox = state.tickingMachines.size();
 
-        // PASS 1: Logistics movers (move items forward first)
+        // PASS 1: Logistics movers
         for (PlacedMachine m : state.tickingMachines.keySet()) {
             if (m == null) continue;
 
@@ -297,7 +297,21 @@ final class GridWorldService {
             }
         }
 
-        // PASS 2: Everything else (producers/processors/nexus/etc)
+        // PASS 1b: BELT RETRY PASS (order-independent handoff)
+        // This is critical because tickingMachines is a ConcurrentHashMap -> iteration order is not deterministic.
+        // Retry pass gives belts another chance to push after downstream belts have moved in PASS 1.
+        for (PlacedMachine m : state.tickingMachines.keySet()) {
+            if (!(m instanceof com.matterworks.core.domain.machines.logistics.ConveyorBelt)) continue;
+
+            try {
+                m.tick(t); // safe: ConveyorBelt advances progress only once per tick, retry-only otherwise
+                if (m.getDbId() != null && m.isDirty()) {
+                    gridManager.markPlotDirty(m.getOwnerId());
+                }
+            } catch (Throwable ignored) {}
+        }
+
+        // PASS 2: Everything else
         for (PlacedMachine m : state.tickingMachines.keySet()) {
             if (m == null) continue;
 
@@ -335,7 +349,6 @@ final class GridWorldService {
         long elapsedNs = System.nanoTime() - startNs;
         long elapsedMs = elapsedNs / 1_000_000L;
 
-        // Arm a profiling window when over budget (so we catch offenders reliably)
         if (elapsedMs > 50) {
             WorldTickProfiler.triggerWindow(t, 40);
         }

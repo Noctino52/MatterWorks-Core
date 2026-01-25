@@ -157,10 +157,14 @@ public abstract class PlacedMachine implements IGridComponent {
 
         if (Double.isNaN(v) || Double.isInfinite(v) || v <= 0.0) v = 1.0;
 
+        // DESIGN RULE: upgrades must never slow down machines
+        if (v < 1.0) v = 1.0;
+
         speedCacheMultiplier = v;
         speedCacheValidUntilMs = nowMs + SPEED_CACHE_TTL_MS;
         return v;
     }
+
 
     /**
      * Backward-compatible signature used by many machines.

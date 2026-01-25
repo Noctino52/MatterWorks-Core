@@ -9,6 +9,7 @@ import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.domain.machines.base.PlacedMachine;
 import com.matterworks.core.domain.matter.MatterPayload;
 import com.matterworks.core.domain.shop.MarketManager;
+import com.matterworks.core.synchronization.SimTime;
 
 import java.util.UUID;
 
@@ -16,7 +17,10 @@ import java.util.UUID;
  * PERFORMANCE FIX:
  * - Removes MachineInventory (which serialized ALL slots every insert/sale).
  * - Keeps a fixed-slot inventory with stacking and updates ONLY the changed slot in metadata.
- * - This makes Nexus tick stable even at high throughput.
+ *
+ * DT-BASED SELL:
+ * - Selling is driven by real seconds, not by currentTick.
+ * - Respects tech tree / overclock speed multiplier via getEffectiveSpeedMultiplier().
  */
 public class NexusMachine extends PlacedMachine {
 
@@ -29,8 +33,11 @@ public class NexusMachine extends PlacedMachine {
     // Metadata cache for UI/save (items array of length CAPACITY_SLOTS)
     private final JsonArray itemsJson = new JsonArray();
 
-    private long nextSaleTick = -1;
-    private static final int SALE_INTERVAL = 10;
+    // DT-based cooldown (seconds until next sale)
+    private transient double saleCooldownSeconds = -1.0;
+
+    // Legacy constant: 10 ticks at 20 TPS => 0.5 seconds (2 sales/sec)
+    private static final int SALE_INTERVAL_TICKS = 10;
 
     public NexusMachine(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata) {
         super(dbId, ownerId, typeId, pos, metadata);
@@ -47,13 +54,27 @@ public class NexusMachine extends PlacedMachine {
     public void tick(long currentTick) {
         if (isEmpty()) return;
 
-        if (nextSaleTick == -1) {
-            nextSaleTick = scheduleAfter(currentTick, SALE_INTERVAL, "NEXUS_SELL");
+        double dt = SimTime.deltaSeconds();
+        if (dt <= 0) dt = 0.05;
+
+        double mult = getEffectiveSpeedMultiplier();
+        if (mult <= 0) mult = 1.0;
+
+        // Base: 10 ticks * 50ms => 0.5 seconds
+        double baseIntervalSeconds = SALE_INTERVAL_TICKS * SimTime.baseTickSeconds();
+        // Faster nexus => shorter interval
+        double intervalSeconds = baseIntervalSeconds / mult;
+
+        if (saleCooldownSeconds < 0.0) {
+            saleCooldownSeconds = intervalSeconds;
         }
 
-        if (currentTick >= nextSaleTick) {
+        saleCooldownSeconds -= dt;
+
+        // catch-up (bounded by inventory)
+        while (saleCooldownSeconds <= 0.0 && !isEmpty()) {
             sellNextItem();
-            nextSaleTick = scheduleAfter(currentTick, SALE_INTERVAL, "NEXUS_SELL");
+            saleCooldownSeconds += intervalSeconds;
         }
     }
 
@@ -61,7 +82,7 @@ public class NexusMachine extends PlacedMachine {
         return false;
     }
 
-    public boolean insertItem(MatterPayload item, GridPosition fromPos) {
+    public synchronized boolean insertItem(MatterPayload item, GridPosition fromPos) {
         if (item == null) return false;
         if (item.shape() == null) return false; // nexus accepts only "matter"
         if (fromPos == null) return false;
@@ -136,7 +157,7 @@ public class NexusMachine extends PlacedMachine {
         return out;
     }
 
-    private void sellNextItem() {
+    private synchronized void sellNextItem() {
         if (gridManager == null) return;
         MarketManager market = gridManager.getMarketManager();
         if (market == null) return;

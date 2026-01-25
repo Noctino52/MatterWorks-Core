@@ -31,7 +31,7 @@ public class MachineFactory {
 
         return switch (typeId) {
             // non-logistics -> use maxStack from config
-            case "drill" -> new DrillMachine(dbId, ownerId, pos, typeId, metadata, 1, maxStack);
+            case "drill" -> new DrillMachine(dbId, ownerId, pos, typeId, metadata, maxStack);
 
             case "chromator" -> new Chromator(dbId, ownerId, pos, typeId, metadata, maxStack);
             case "color_mixer" -> new ColorMixer(dbId, ownerId, pos, typeId, metadata, maxStack);
@@ -42,7 +42,7 @@ public class MachineFactory {
             case "blazing_forge" -> new BlazingForgeMachine(dbId, ownerId, pos, typeId, metadata, maxStack);
             case "glitch_distorter" -> new GlitchDistorterMachine(dbId, ownerId, pos, typeId, metadata, maxStack);
 
-            // logistics -> unchanged
+            // logistics
             case "conveyor_belt" -> new ConveyorBelt(dbId, ownerId, pos, typeId, metadata);
             case "splitter" -> new Splitter(dbId, ownerId, pos, typeId, metadata);
             case "merger" -> new Merger(dbId, ownerId, pos, typeId, metadata);
@@ -61,7 +61,6 @@ public class MachineFactory {
 
     private static String normalizeTypeId(String typeId) {
         if (typeId == null) return null;
-        // Hard rename: drill -> drill
         if ("drill".equals(typeId)) return "drill";
         return typeId;
     }
