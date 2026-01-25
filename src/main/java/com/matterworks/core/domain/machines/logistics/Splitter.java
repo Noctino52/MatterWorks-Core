@@ -3,6 +3,7 @@ package com.matterworks.core.domain.machines.logistics;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
+import com.matterworks.core.common.Direction;
 import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.domain.machines.base.PlacedMachine;
@@ -18,17 +19,17 @@ import java.util.UUID;
  * - Holds at most 1 item
  * - After TRANSPORT_TIME ticks, tries to push to Output A / Output B alternately
  *
- * PERFORMANCE:
- * - No MachineInventory (no JSON serialization per move)
- * - Cached ports (no per-tick GridPosition allocations)
- * - saveState() is "lazy": only marks dirty. Serialization happens in serialize().
+ * PERFORMANCE FIX:
+ * - No MatterPayload.serialize() in insertItem() (hot path).
+ * - Cached ports, per-output neighbor caches (TTL).
+ * - Metadata updated only in serialize() when dirty.
  */
 public class Splitter extends PlacedMachine {
 
     private static final int TRANSPORT_TIME = 10;
 
     private MatterPayload currentItem;
-    private JsonObject currentItemJson;
+    private transient JsonObject currentItemJsonCache;
 
     private long availableToPushAtTick = -1;
     private long nextPushAttemptTick = -1;
@@ -40,13 +41,20 @@ public class Splitter extends PlacedMachine {
     private static final int MAX_BLOCKED_STREAK = 5;
 
     // Cached ports
+    private transient boolean portsValid = false;
     private transient GridPosition cachedInputPos;
     private transient GridPosition cachedOutA;
     private transient GridPosition cachedOutB;
     private transient GridPosition cachedSourceA;
     private transient GridPosition cachedSourceB;
-    private transient Vector3Int cachedFwd;
-    private transient boolean portsValid = false;
+    private transient GridPosition cachedExtensionPos;
+
+    // Neighbor cache per output
+    private transient long outACacheValidUntilTick = Long.MIN_VALUE;
+    private transient PlacedMachine cachedOutANeighbor = null;
+    private transient long outBCacheValidUntilTick = Long.MIN_VALUE;
+    private transient PlacedMachine cachedOutBNeighbor = null;
+    private static final long NEIGHBOR_CACHE_TTL_TICKS = 20L;
 
     // runtime dirty flag for metadata
     private boolean runtimeStateDirty = false;
@@ -61,15 +69,16 @@ public class Splitter extends PlacedMachine {
                 JsonArray arr = this.metadata.getAsJsonArray("items");
                 if (arr.size() > 0 && arr.get(0).isJsonObject()) {
                     JsonObject obj = arr.get(0).getAsJsonObject();
-                    this.currentItemJson = obj;
+                    this.currentItemJsonCache = obj;
                     this.currentItem = MatterPayload.fromJson(obj);
-                    // allow moving soon (we don't know original tick)
+
+                    // travel will be initialized on tick
                     this.availableToPushAtTick = 0;
                     this.nextPushAttemptTick = 0;
                 }
             } catch (Throwable ignored) {
                 this.currentItem = null;
-                this.currentItemJson = null;
+                this.currentItemJsonCache = null;
             }
         }
 
@@ -82,45 +91,62 @@ public class Splitter extends PlacedMachine {
         }
     }
 
-    private void ensurePorts() {
-        if (!portsValid) recomputePorts();
-    }
-
-    private void recomputePorts() {
-        Vector3Int f = orientationToVector();
-        Vector3Int back = new Vector3Int(-f.x(), -f.y(), -f.z());
-
-        // input is behind the main block
-        cachedInputPos = pos.add(back.x(), back.y(), back.z());
-
-        // extension block (2nd block)
-        GridPosition extensionPos = getExtensionPosition();
-
-        // outputs are in front of each block
-        cachedOutA = pos.add(f.x(), f.y(), f.z());
-        cachedOutB = extensionPos.add(f.x(), f.y(), f.z());
-
-        // source positions used when inserting into processors/nexus
-        cachedSourceA = pos;
-        cachedSourceB = extensionPos;
-
-        cachedFwd = f;
-        portsValid = true;
+    @Override
+    public void setOrientation(Direction orientation) {
+        super.setOrientation(orientation);
+        portsValid = false;
+        invalidateNeighborCaches();
+        saveStateLazy();
     }
 
     @Override
     public void setOrientation(String orientation) {
         super.setOrientation(orientation);
         portsValid = false;
-        saveState();
+        invalidateNeighborCaches();
+        saveStateLazy();
+    }
+
+    private void invalidateNeighborCaches() {
+        outACacheValidUntilTick = Long.MIN_VALUE;
+        cachedOutANeighbor = null;
+        outBCacheValidUntilTick = Long.MIN_VALUE;
+        cachedOutBNeighbor = null;
+    }
+
+    private void ensurePorts() {
+        if (!portsValid) recomputePorts();
+    }
+
+    private void recomputePorts() {
+        Vector3Int fwd = orientationToVector();
+        Vector3Int back = new Vector3Int(-fwd.x(), -fwd.y(), -fwd.z());
+
+        cachedExtensionPos = getExtensionPosition();
+
+        // input is behind the main block
+        cachedInputPos = pos.add(back.x(), back.y(), back.z());
+
+        // outputs are in front of each block
+        cachedOutA = pos.add(fwd.x(), fwd.y(), fwd.z());
+        cachedOutB = cachedExtensionPos.add(fwd.x(), fwd.y(), fwd.z());
+
+        // source positions used when inserting into processors/nexus
+        cachedSourceA = pos;
+        cachedSourceB = cachedExtensionPos;
+
+        portsValid = true;
     }
 
     @Override
     public void tick(long currentTick) {
         if (currentItem == null) return;
 
-        if (nextPushAttemptTick == -1) {
-            nextPushAttemptTick = Math.max(currentTick, availableToPushAtTick);
+        // Initialize travel if needed (because insertItem does not know currentTick)
+        if (availableToPushAtTick == 0) {
+            availableToPushAtTick = scheduleAfter(currentTick, TRANSPORT_TIME, "SPLITTER_MOVE");
+            nextPushAttemptTick = availableToPushAtTick;
+            return;
         }
 
         if (currentTick < availableToPushAtTick) return;
@@ -142,71 +168,78 @@ public class Splitter extends PlacedMachine {
         if (!(sender instanceof ConveyorBelt)) return false;
 
         currentItem = item;
+        currentItemJsonCache = null; // invalidate cache
         blockedStreak = 0;
 
-        availableToPushAtTick = scheduleAfter(0, TRANSPORT_TIME, "SPLITTER_MOVE"); // placeholder if schedule uses current tick
-        // Better: use currentTick if you pass it (but signature doesn't). We use a safe fallback:
-        // We'll just allow push after TRANSPORT_TIME relative to "now" at first tick.
-        // So set to 0 sentinel and compute in tick:
+        // travel init on tick
         availableToPushAtTick = 0;
         nextPushAttemptTick = 0;
 
-        // cache for UI
-        try {
-            currentItemJson = item.serialize();
-        } catch (Throwable ignored) {
-            currentItemJson = null;
-        }
-
-        saveState();
+        saveStateLazy();
         return true;
     }
 
     private void attemptSmartPush(long currentTick) {
         ensurePorts();
 
-        // If inserted and not yet initialized, initialize travel-time now
-        if (availableToPushAtTick == 0) {
-            availableToPushAtTick = scheduleAfter(currentTick, TRANSPORT_TIME, "SPLITTER_MOVE");
-            nextPushAttemptTick = availableToPushAtTick;
-            return;
-        }
-
         int primary = outputIndex & 1; // 0/1
         int secondary = primary ^ 1;
 
-        boolean moved = false;
+        boolean moved;
 
         if (primary == 0) {
-            moved = pushTo(cachedOutA, cachedSourceA, currentTick);
+            moved = pushToA(currentTick);
             if (moved) outputIndex = 1;
-            else moved = pushTo(cachedOutB, cachedSourceB, currentTick);
+            else moved = pushToB(currentTick);
         } else {
-            moved = pushTo(cachedOutB, cachedSourceB, currentTick);
+            moved = pushToB(currentTick);
             if (moved) outputIndex = 0;
-            else moved = pushTo(cachedOutA, cachedSourceA, currentTick);
+            else moved = pushToA(currentTick);
         }
 
         if (moved) {
             currentItem = null;
-            currentItemJson = null;
+            currentItemJsonCache = null;
 
             availableToPushAtTick = -1;
             nextPushAttemptTick = -1;
             blockedStreak = 0;
 
-            saveState();
+            saveStateLazy();
         } else {
             scheduleBlockedRetry(currentTick);
         }
     }
 
-    private boolean pushTo(GridPosition targetPos, GridPosition sourcePos, long currentTick) {
-        if (currentItem == null) return false;
+    private boolean pushToA(long currentTick) {
+        PlacedMachine n = getOutANeighborCached(currentTick);
+        if (n == null || currentItem == null) return false;
+        return pushInto(n, cachedSourceA, currentTick);
+    }
 
-        PlacedMachine neighbor = getNeighborAt(targetPos);
-        if (neighbor == null) return false;
+    private boolean pushToB(long currentTick) {
+        PlacedMachine n = getOutBNeighborCached(currentTick);
+        if (n == null || currentItem == null) return false;
+        return pushInto(n, cachedSourceB, currentTick);
+    }
 
+    private PlacedMachine getOutANeighborCached(long currentTick) {
+        if (currentTick < outACacheValidUntilTick) return cachedOutANeighbor;
+        PlacedMachine n = getNeighborAt(cachedOutA);
+        cachedOutANeighbor = n;
+        outACacheValidUntilTick = currentTick + NEIGHBOR_CACHE_TTL_TICKS;
+        return n;
+    }
+
+    private PlacedMachine getOutBNeighborCached(long currentTick) {
+        if (currentTick < outBCacheValidUntilTick) return cachedOutBNeighbor;
+        PlacedMachine n = getNeighborAt(cachedOutB);
+        cachedOutBNeighbor = n;
+        outBCacheValidUntilTick = currentTick + NEIGHBOR_CACHE_TTL_TICKS;
+        return n;
+    }
+
+    private boolean pushInto(PlacedMachine neighbor, GridPosition sourcePos, long currentTick) {
         if (neighbor instanceof ConveyorBelt belt) {
             return belt.insertItem(currentItem, currentTick);
         } else if (neighbor instanceof NexusMachine nexus) {
@@ -222,7 +255,6 @@ public class Splitter extends PlacedMachine {
         } else if (neighbor instanceof DropperMachine dropper) {
             return dropper.insertItem(currentItem, sourcePos);
         }
-
         return false;
     }
 
@@ -244,7 +276,7 @@ public class Splitter extends PlacedMachine {
         };
     }
 
-    private void saveState() {
+    private void saveStateLazy() {
         runtimeStateDirty = true;
         markDirty();
     }
@@ -254,23 +286,34 @@ public class Splitter extends PlacedMachine {
         if (this.metadata == null) this.metadata = new JsonObject();
 
         if (runtimeStateDirty) {
-            // Keep legacy inventory format: items[0] = payload json (+count)
             JsonArray items = new JsonArray();
-            if (currentItemJson != null) {
-                JsonObject obj = currentItemJson.deepCopy();
-                obj.addProperty("count", 1);
-                items.add(obj);
+
+            if (currentItem != null) {
+                if (currentItemJsonCache == null) {
+                    try {
+                        currentItemJsonCache = currentItem.serialize();
+                    } catch (Throwable ignored) {
+                        currentItemJsonCache = null;
+                    }
+                }
+
+                if (currentItemJsonCache != null) {
+                    JsonObject obj = currentItemJsonCache.deepCopy();
+                    obj.addProperty("count", 1);
+                    items.add(obj);
+                } else {
+                    items.add(JsonNull.INSTANCE);
+                }
             } else {
                 items.add(JsonNull.INSTANCE);
             }
-            this.metadata.add("items", items);
 
+            this.metadata.add("items", items);
             this.metadata.addProperty("outputIndex", outputIndex);
             this.metadata.addProperty("orientation", this.orientation.name());
 
             runtimeStateDirty = false;
         } else {
-            // Ensure presence for older UI expectations
             if (!this.metadata.has("orientation")) this.metadata.addProperty("orientation", this.orientation.name());
             if (!this.metadata.has("outputIndex")) this.metadata.addProperty("outputIndex", outputIndex);
             if (!this.metadata.has("items")) {

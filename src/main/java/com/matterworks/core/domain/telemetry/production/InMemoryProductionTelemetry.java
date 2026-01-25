@@ -17,6 +17,11 @@ import java.util.concurrent.ConcurrentHashMap;
  * - record*() is in the simulation hot path -> must be allocation-light.
  * - Avoid Instant allocations: use clock.millis() / 1000
  * - Avoid Long boxing: use MutableLong counters in buckets
+ * - Avoid lambdas in hot path (computeIfAbsent/merge with method refs)
+ *
+ * THREADING NOTES:
+ * - UI may call getSnapshot() concurrently with simulation record*().
+ * - We synchronize per-player buffer to avoid ConcurrentModificationException.
  */
 public final class InMemoryProductionTelemetry implements ProductionTelemetry {
 
@@ -32,7 +37,7 @@ public final class InMemoryProductionTelemetry implements ProductionTelemetry {
     }
 
     public InMemoryProductionTelemetry(Clock clock) {
-        this.clock = clock;
+        this.clock = (clock != null) ? clock : Clock.systemUTC();
     }
 
     @Override
@@ -50,21 +55,23 @@ public final class InMemoryProductionTelemetry implements ProductionTelemetry {
     @Override
     public void recordSold(UUID playerId, MatterPayload payload, long quantity, double moneyEarned) {
         if (playerId == null || payload == null || quantity <= 0) return;
-        getOrCreate(playerId).recordSold(nowEpochSeconds(), payload, quantity, Math.max(0.0, moneyEarned));
+        double money = Math.max(0.0, moneyEarned);
+        getOrCreate(playerId).recordSold(nowEpochSeconds(), payload, quantity, money);
     }
 
     @Override
     public ProductionStatsSnapshot getSnapshot(UUID playerId, ProductionTimeWindow window) {
-        if (playerId == null || window == null) {
-            return emptySnapshot(window != null ? window : ProductionTimeWindow.ONE_MINUTE);
+        ProductionTimeWindow w = (window != null) ? window : ProductionTimeWindow.ONE_MINUTE;
+        if (playerId == null) {
+            return emptySnapshot(w);
         }
 
         PlayerBuffer buffer = buffers.get(playerId);
         if (buffer == null) {
-            return emptySnapshot(window);
+            return emptySnapshot(w);
         }
 
-        return buffer.snapshot(nowEpochSeconds(), window);
+        return buffer.snapshot(nowEpochSeconds(), w);
     }
 
     private ProductionStatsSnapshot emptySnapshot(ProductionTimeWindow window) {
@@ -78,12 +85,13 @@ public final class InMemoryProductionTelemetry implements ProductionTelemetry {
     }
 
     private PlayerBuffer getOrCreate(UUID playerId) {
+        // lambda here is not in the hot path (only first time per player)
         return buffers.computeIfAbsent(playerId, _ignored -> new PlayerBuffer());
     }
 
     /**
      * Allocation-free epoch seconds:
-     * - Clock.instant() allocates an Instant, which is too heavy in hot path.
+     * - Clock.instant() allocates an Instant, too heavy in hot path.
      */
     private long nowEpochSeconds() {
         return clock.millis() / 1000L;
@@ -104,7 +112,7 @@ public final class InMemoryProductionTelemetry implements ProductionTelemetry {
     }
 
     /**
-     * Minimal mutable long to avoid boxing in hot path.
+     * Minimal mutable long to avoid boxing.
      */
     private static final class MutableLong {
         long v;
@@ -120,29 +128,35 @@ public final class InMemoryProductionTelemetry implements ProductionTelemetry {
             for (int i = 0; i < buckets.length; i++) buckets[i] = new Bucket();
         }
 
-        void recordProduced(long nowSec, MatterPayload payload, long qty) {
-            Bucket b = rotateAndGet(nowSec);
+        /**
+         * Hot path: synchronized per-player to avoid snapshot() iterating while we mutate maps.
+         */
+        synchronized void recordProduced(long nowSec, MatterPayload payload, long qty) {
+            Bucket b = rotateAndGetLocked(nowSec);
             inc(b.producedByColor, MatterTelemetryKeys.colorKey(payload), qty);
             inc(b.producedByMatter, MatterTelemetryKeys.matterKey(payload), qty);
         }
 
-        void recordConsumed(long nowSec, MatterPayload payload, long qty) {
-            Bucket b = rotateAndGet(nowSec);
+        synchronized void recordConsumed(long nowSec, MatterPayload payload, long qty) {
+            Bucket b = rotateAndGetLocked(nowSec);
             inc(b.consumedByColor, MatterTelemetryKeys.colorKey(payload), qty);
             inc(b.consumedByMatter, MatterTelemetryKeys.matterKey(payload), qty);
         }
 
-        void recordSold(long nowSec, MatterPayload payload, long qty, double money) {
-            Bucket b = rotateAndGet(nowSec);
+        synchronized void recordSold(long nowSec, MatterPayload payload, long qty, double money) {
+            Bucket b = rotateAndGetLocked(nowSec);
 
             String ck = MatterTelemetryKeys.colorKey(payload);
             String mk = MatterTelemetryKeys.matterKey(payload);
 
-            b.soldByColor.computeIfAbsent(ck, _ignored -> new SoldStats()).add(qty, money);
-            b.soldByMatter.computeIfAbsent(mk, _ignored -> new SoldStats()).add(qty, money);
+            addSold(b.soldByColor, ck, qty, money);
+            addSold(b.soldByMatter, mk, qty, money);
         }
 
-        ProductionStatsSnapshot snapshot(long nowSec, ProductionTimeWindow window) {
+        /**
+         * Snapshot is called by UI. Keep it synchronized per-player to avoid CME and keep data consistent.
+         */
+        synchronized ProductionStatsSnapshot snapshot(long nowSec, ProductionTimeWindow window) {
             int wBuckets = windowBuckets(window);
             long windowStartSec = nowSec - window.getSeconds();
 
@@ -169,43 +183,51 @@ public final class InMemoryProductionTelemetry implements ProductionTelemetry {
 
                 if (b.bucketStartSeconds == cursor) {
                     // Produced
-                    for (var e : b.producedByColor.entrySet()) {
+                    for (Map.Entry<String, MutableLong> e : b.producedByColor.entrySet()) {
                         long v = e.getValue().get();
                         if (v <= 0) continue;
-                        producedColor.merge(e.getKey(), v, Long::sum);
+                        producedColor.put(e.getKey(), producedColor.getOrDefault(e.getKey(), 0L) + v);
                         totalProduced += v;
                     }
-                    for (var e : b.producedByMatter.entrySet()) {
+                    for (Map.Entry<String, MutableLong> e : b.producedByMatter.entrySet()) {
                         long v = e.getValue().get();
                         if (v <= 0) continue;
-                        producedMatter.merge(e.getKey(), v, Long::sum);
+                        producedMatter.put(e.getKey(), producedMatter.getOrDefault(e.getKey(), 0L) + v);
                     }
 
                     // Consumed
-                    for (var e : b.consumedByColor.entrySet()) {
+                    for (Map.Entry<String, MutableLong> e : b.consumedByColor.entrySet()) {
                         long v = e.getValue().get();
                         if (v <= 0) continue;
-                        consumedColor.merge(e.getKey(), v, Long::sum);
+                        consumedColor.put(e.getKey(), consumedColor.getOrDefault(e.getKey(), 0L) + v);
                         totalConsumed += v;
                     }
-                    for (var e : b.consumedByMatter.entrySet()) {
+                    for (Map.Entry<String, MutableLong> e : b.consumedByMatter.entrySet()) {
                         long v = e.getValue().get();
                         if (v <= 0) continue;
-                        consumedMatter.merge(e.getKey(), v, Long::sum);
+                        consumedMatter.put(e.getKey(), consumedMatter.getOrDefault(e.getKey(), 0L) + v);
                     }
 
                     // Sold
-                    for (var e : b.soldByColor.entrySet()) {
+                    for (Map.Entry<String, SoldStats> e : b.soldByColor.entrySet()) {
                         SoldStats s = e.getValue();
                         if (s == null || s.getQuantity() <= 0) continue;
-                        soldColor.computeIfAbsent(e.getKey(), _ignored -> new SoldStats())
-                                .add(s.getQuantity(), s.getMoneyEarned());
+                        SoldStats acc = soldColor.get(e.getKey());
+                        if (acc == null) {
+                            acc = new SoldStats();
+                            soldColor.put(e.getKey(), acc);
+                        }
+                        acc.add(s.getQuantity(), s.getMoneyEarned());
                     }
-                    for (var e : b.soldByMatter.entrySet()) {
+                    for (Map.Entry<String, SoldStats> e : b.soldByMatter.entrySet()) {
                         SoldStats s = e.getValue();
                         if (s == null || s.getQuantity() <= 0) continue;
-                        soldMatter.computeIfAbsent(e.getKey(), _ignored -> new SoldStats())
-                                .add(s.getQuantity(), s.getMoneyEarned());
+                        SoldStats acc = soldMatter.get(e.getKey());
+                        if (acc == null) {
+                            acc = new SoldStats();
+                            soldMatter.put(e.getKey(), acc);
+                        }
+                        acc.add(s.getQuantity(), s.getMoneyEarned());
                     }
                 }
 
@@ -232,10 +254,9 @@ public final class InMemoryProductionTelemetry implements ProductionTelemetry {
         }
 
         /**
-         * Rotates the ring buffer bucket for current time.
-         * Synchronized per-player; hot path must remain small.
+         * Must be called under "synchronized(this)".
          */
-        private synchronized Bucket rotateAndGet(long nowSec) {
+        private Bucket rotateAndGetLocked(long nowSec) {
             long start = bucketStartSeconds(nowSec);
             int idx = bucketIndex(start);
             Bucket b = buckets[idx];
@@ -259,11 +280,19 @@ public final class InMemoryProductionTelemetry implements ProductionTelemetry {
             if (qty <= 0) return;
             MutableLong c = map.get(key);
             if (c == null) {
-                c = new MutableLong(qty);
-                map.put(key, c);
+                map.put(key, new MutableLong(qty));
             } else {
                 c.add(qty);
             }
+        }
+
+        private static void addSold(Map<String, SoldStats> map, String key, long qty, double money) {
+            SoldStats s = map.get(key);
+            if (s == null) {
+                s = new SoldStats();
+                map.put(key, s);
+            }
+            s.add(qty, money);
         }
     }
 
