@@ -268,9 +268,9 @@ function Get-GroupKey([System.IO.FileInfo]$f) {
         $dir = Split-Path -Path $rel -Parent
         if (-not $dir) { return "java__root" }
 
-        $parts = $dir -split '[\\/]' | Where-Object { $_ -ne "" }
+        # Forziamo l'array per evitare errori su .Count
+        $parts = @($dir -split '[\\/]' | Where-Object { $_ -ne "" })
 
-        # Se path è com/matterworks/core/..., raggruppa per segmenti dopo core
         if ($parts.Count -ge 3 -and $parts[0] -eq "com" -and $parts[1] -eq "matterworks" -and $parts[2] -eq "core") {
             $afterCore = @()
             $start = 3
@@ -283,7 +283,6 @@ function Get-GroupKey([System.IO.FileInfo]$f) {
             return "java__core"
         }
 
-        # fallback: primi N segmenti della cartella
         $fallbackTake = [Math]::Min(4, $parts.Count)
         return "java__" + (($parts[0..($fallbackTake-1)]) -join ".")
     }
@@ -292,14 +291,14 @@ function Get-GroupKey([System.IO.FileInfo]$f) {
         $rel = Get-RelativePath $srcTestJava $full
         $dir = Split-Path -Path $rel -Parent
         if (-not $dir) { return "test__root" }
-        $parts = $dir -split '[\\/]' | Where-Object { $_ -ne "" }
+        $parts = @($dir -split '[\\/]' | Where-Object { $_ -ne "" })
         $take = [Math]::Min(4, $parts.Count)
         return "test__" + (($parts[0..($take-1)]) -join ".")
     }
 
     if (-not $NoResources -and $full -like "$srcMainRes*") {
         $rel = Get-RelativePath $srcMainRes $full
-        $parts = $rel -split '[\\/]' | Where-Object { $_ -ne "" }
+        $parts = @($rel -split '[\\/]' | Where-Object { $_ -ne "" })
         $bucket = if ($parts.Count -ge 1) { $parts[0] } else { "root" }
         return "resources__" + $bucket
     }

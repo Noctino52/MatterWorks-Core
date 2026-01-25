@@ -36,8 +36,8 @@ tasks.named('run', JavaExec) {
     // IMPORTANT: set esplicito (non "append") così non viene sovrascritto/mescolato
     jvmArgs = [
             '--enable-preview',
-            '-Xms2g',
-            '-Xmx6g',
+            '-Xms8g',
+            '-Xmx16g',
             '-XX:+UseZGC',
             '-XX:SoftMaxHeapSize=2g'
     ]
