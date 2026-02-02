@@ -391,6 +391,7 @@ final class FactoryPanelController {
         Map<GridPosition, PlacedMachine> machines;
         Map<GridPosition, MatterColor> resources;
         GridManager.PlotAreaInfo areaInfo;
+        int heightCap = 4;
 
         try {
             if (u == null) {
@@ -404,15 +405,30 @@ final class FactoryPanelController {
                 Map<GridPosition, MatterColor> res = gridManager.getTerrainResources(u);
                 resources = (res != null) ? new HashMap<>(res) : Map.of();
 
-                // IMPORTANT: computed off-EDT
                 areaInfo = gridManager.getPlotAreaInfo(u);
+
+                try {
+                    heightCap = gridManager.getPlotHeightCap(u);
+                } catch (Throwable ignored) {
+                    heightCap = 4;
+                }
             }
         } catch (Throwable ex) {
             ex.printStackTrace();
             machines = Map.of();
             resources = Map.of();
             areaInfo = null;
+            heightCap = 4;
         }
+
+        // Update vertical cap + clamp current layer
+        int safeCap = Math.max(1, heightCap);
+        state.maxBuildHeight = safeCap;
+
+        int maxLayer = safeCap - 1;
+        int cur = state.currentLayer;
+        if (cur < 0) state.currentLayer = 0;
+        else if (cur > maxLayer) state.currentLayer = maxLayer;
 
         // Always refresh meta-cache in background (EDT reads only)
         refreshMetaCache(machines);
@@ -431,6 +447,7 @@ final class FactoryPanelController {
 
         if (forceRepaint) repaintCoalesced();
     }
+
 
     private boolean needsMeta(PlacedMachine m) {
         if (m == null) return false;

@@ -16,14 +16,20 @@ public record ServerConfig(
         int plotIncreaseX,
         int plotIncreaseY,
 
+        // NEW: vertical build cap (Y positive only)
+        int plotHeightStart,
+        int plotHeightMax,
+        int plotHeightIncreasePerPrestige,
+
         int prestigeVoidCoinsAdd,
         int prestigePlotBonus,
         double prestigeSellK,
 
-        // NEW: prestige action fee (to actually perform prestige)
+        // prestige action fee (to actually perform prestige)
         double prestigeActionCostBase,
         double prestigeActionCostMult
 ) {
+    // Backward-friendly alias used in some services
     public double startMoney() {
         return playerStartMoney;
     }

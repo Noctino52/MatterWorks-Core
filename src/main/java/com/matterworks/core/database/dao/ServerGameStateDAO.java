@@ -239,11 +239,16 @@ public class ServerGameStateDAO {
         int plotMaxX = 50, plotMaxY = 50;
         int plotIncreaseX = 2, plotIncreaseY = 2;
 
+        // NEW: vertical cap defaults
+        int plotHeightStart = 4;
+        int plotHeightMax = 256;
+        int plotHeightIncreasePerPrestige = 1;
+
         int prestigeVoidCoinsAdd = 0;
         int prestigePlotBonus = 0;
         double prestigeSellK = 0.0;
 
-        // NEW defaults
+        // NEW defaults (prestige action fee)
         double prestigeActionCostBase = 0.0;
         double prestigeActionCostMult = 0.0;
 
@@ -265,12 +270,20 @@ public class ServerGameStateDAO {
             String colPlotIncY = SqlCompat.firstExistingColumn(conn, "server_gamestate",
                     "plot_increase_y", "Plot_IncreaseY", "Plot_Increase_Y", "plot_increasey");
 
+            // NEW: height columns (Y+ cap)
+            String colPlotHStart = SqlCompat.firstExistingColumn(conn, "server_gamestate",
+                    "plot_height_start", "Plot_Height_Start", "plotHeightStart");
+            String colPlotHMax = SqlCompat.firstExistingColumn(conn, "server_gamestate",
+                    "plot_height_max", "Plot_Height_Max", "plotHeightMax");
+            String colPlotHInc = SqlCompat.firstExistingColumn(conn, "server_gamestate",
+                    "plot_height_increase_per_prestige", "Plot_Height_Increase_Per_Prestige", "plotHeightIncreasePerPrestige");
+
             // prestige columns
             String colPrestigeVoid = SqlCompat.firstExistingColumn(conn, "server_gamestate", "prestige_void_coins_add");
             String colPrestigePlotBonus = SqlCompat.firstExistingColumn(conn, "server_gamestate", "prestige_plotbonus", "prestige_plot_bonus");
             String colPrestigeSellK = SqlCompat.firstExistingColumn(conn, "server_gamestate", "prestige_sell_k");
 
-            // NEW: prestige action fee columns
+            // prestige action fee columns
             String colPrestigeActionBase = SqlCompat.firstExistingColumn(conn, "server_gamestate", "prestige_action_cost_base");
             String colPrestigeActionMult = SqlCompat.firstExistingColumn(conn, "server_gamestate", "prestige_action_cost_mult");
 
@@ -286,6 +299,10 @@ public class ServerGameStateDAO {
             if (colPlotMaxY != null) sql.append(", ").append(colPlotMaxY).append(" AS plot_max_y");
             if (colPlotIncX != null) sql.append(", ").append(colPlotIncX).append(" AS plot_inc_x");
             if (colPlotIncY != null) sql.append(", ").append(colPlotIncY).append(" AS plot_inc_y");
+
+            if (colPlotHStart != null) sql.append(", ").append(colPlotHStart).append(" AS plot_height_start");
+            if (colPlotHMax != null) sql.append(", ").append(colPlotHMax).append(" AS plot_height_max");
+            if (colPlotHInc != null) sql.append(", ").append(colPlotHInc).append(" AS plot_height_inc");
 
             if (colPrestigeVoid != null) sql.append(", ").append(colPrestigeVoid).append(" AS prestige_void_coins_add");
             if (colPrestigePlotBonus != null) sql.append(", ").append(colPrestigePlotBonus).append(" AS prestige_plotbonus");
@@ -316,6 +333,11 @@ public class ServerGameStateDAO {
                     if (colPlotIncX != null) plotIncreaseX = Math.max(1, rs.getInt("plot_inc_x"));
                     if (colPlotIncY != null) plotIncreaseY = Math.max(1, rs.getInt("plot_inc_y"));
 
+                    // NEW: height values
+                    if (colPlotHStart != null) plotHeightStart = Math.max(1, rs.getInt("plot_height_start"));
+                    if (colPlotHMax != null) plotHeightMax = Math.max(plotHeightStart, rs.getInt("plot_height_max"));
+                    if (colPlotHInc != null) plotHeightIncreasePerPrestige = Math.max(0, rs.getInt("plot_height_inc"));
+
                     if (colPrestigeVoid != null) prestigeVoidCoinsAdd = Math.max(0, rs.getInt("prestige_void_coins_add"));
                     if (colPrestigePlotBonus != null) prestigePlotBonus = Math.max(0, rs.getInt("prestige_plotbonus"));
                     if (colPrestigeSellK != null) prestigeSellK = Math.max(0.0, rs.getDouble("prestige_sell_k"));
@@ -332,16 +354,24 @@ public class ServerGameStateDAO {
                 veinRaw, veinRed, veinBlue, veinYellow,
                 sosThreshold,
                 maxInventoryMachine,
+
                 plotStartingX, plotStartingY,
                 plotMaxX, plotMaxY,
                 plotIncreaseX, plotIncreaseY,
+
+                plotHeightStart,
+                plotHeightMax,
+                plotHeightIncreasePerPrestige,
+
                 prestigeVoidCoinsAdd,
                 prestigePlotBonus,
                 prestigeSellK,
+
                 prestigeActionCostBase,
                 prestigeActionCostMult
         );
     }
+
 
     public int getVoidPlotItemBreakerIncreased() {
         String sql = "SELECT void_plotitembreaker_increased FROM server_gamestate LIMIT 1";
@@ -451,5 +481,7 @@ public class ServerGameStateDAO {
         }
         return 0;
     }
+
+
 
 }

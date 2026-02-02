@@ -350,10 +350,16 @@ public class MatterWorksGUI extends JFrame {
         try {
             GridManager.PlotAreaInfo info = gridManager.getPlotAreaInfo(u);
             if (info != null) {
+                int hCap = 4;
+                try {
+                    hCap = gridManager.getPlotHeightCap(u);
+                } catch (Throwable ignored) {}
+
                 plotAreaStr = info.unlockedX() + "x" + info.unlockedY()
                         + " (+" + info.extraX() + "/+" + info.extraY() + ")"
                         + " MAX " + info.maxX() + "x" + info.maxY()
-                        + " INC " + info.increaseX() + "x" + info.increaseY();
+                        + " INC " + info.increaseX() + "x" + info.increaseY()
+                        + " | H " + hCap;
             }
         } catch (Throwable ignored) {}
 
@@ -377,6 +383,7 @@ public class MatterWorksGUI extends JFrame {
                 itemCapPlusEnabled
         );
     }
+
 
 
     private void applyEmptyEconomyUi() {
@@ -479,12 +486,17 @@ public class MatterWorksGUI extends JFrame {
 
     private void changeLayer(Integer delta) {
         int d = (delta != null ? delta : 0);
-        int newY = Math.max(0, factoryPanel.getCurrentLayer() + d);
-        factoryPanel.setLayer(newY);
-        topBar.setLayerValue(newY);
+
+        int desired = factoryPanel.getCurrentLayer() + d;
+        factoryPanel.setLayer(desired); // FactoryPanel will clamp based on current height cap
+
+        int actual = factoryPanel.getCurrentLayer();
+        topBar.setLayerValue(actual);
+
         factoryPanel.requestFocusInWindow();
         updateLabels();
     }
+
 
     private void handleSOS() {
         UUID u = currentPlayerUuid;

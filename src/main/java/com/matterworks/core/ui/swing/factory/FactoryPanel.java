@@ -57,10 +57,20 @@ public class FactoryPanel extends JPanel {
     }
 
     public void setLayer(int y) {
-        state.currentLayer = y;
+        int cap = Math.max(1, state.maxBuildHeight);
+        int maxLayer = cap - 1;
+
+        int clamped = y;
+        if (clamped < 0) clamped = 0;
+        if (clamped > maxLayer) clamped = maxLayer;
+
+        if (clamped == state.currentLayer) return;
+
+        state.currentLayer = clamped;
         state.clearHover();
         forceRefreshNow();
     }
+
 
     public int getCurrentLayer() {
         return state.currentLayer;

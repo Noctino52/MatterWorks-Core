@@ -27,6 +27,8 @@ final class FactoryPanelState {
     volatile Direction currentOrientation = Direction.NORTH;
     volatile int currentLayer = 0;
 
+    volatile int maxBuildHeight = 4;
+
     volatile GridPosition mouseHoverPos = null;
 
     volatile int lastHoverGX = Integer.MIN_VALUE;

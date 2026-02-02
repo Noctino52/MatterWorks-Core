@@ -101,20 +101,38 @@ final class GridWorldService {
                 && gz >= info.minZ() && gz < info.maxZExclusive();
     }
 
-    private boolean isWithinPlotBounds(UUID ownerId, GridPosition origin, Vector3Int size) {
-        if (origin == null || size == null) return false;
-        GridManager.PlotAreaInfo info = getPlotAreaInfo(ownerId);
+    public int getPlotHeightCap(UUID ownerId) {
+        // Admin rule: can access all layers (bounded to keep UI sane).
+        PlayerProfile p = state.getCachedProfile(ownerId);
+        if (p != null && p.isAdmin()) {
+            return 50;
+        }
 
-        int sx = Math.max(1, size.x());
-        int sz = Math.max(1, size.z());
+        // Defaults (match DB defaults)
+        int base = 4;
+        int max = 256;
+        int inc = 1;
 
-        int minX = origin.x();
-        int minZ = origin.z();
-        int maxXEx = origin.x() + sx;
-        int maxZEx = origin.z() + sz;
+        ServerConfig cfg = state.getServerConfig();
+        if (cfg != null) {
+            base = Math.max(1, cfg.plotHeightStart());
+            max = Math.max(base, cfg.plotHeightMax());
+            inc = Math.max(0, cfg.plotHeightIncreasePerPrestige());
+        }
 
-        return minX >= 0 && minZ >= 0 && maxXEx <= info.maxX() && maxZEx <= info.maxY();
+        int prestige = 0;
+        if (p != null) prestige = Math.max(0, p.getPrestigeLevel());
+
+        long raw = (long) base + (long) inc * (long) prestige;
+        if (raw < base) raw = base;
+        if (raw > max) raw = max;
+
+        return (int) raw;
     }
+
+
+
+
 
     private boolean isAreaUnlocked(UUID ownerId, GridPosition origin, Vector3Int size) {
         if (origin == null || size == null) return false;
@@ -393,6 +411,40 @@ final class GridWorldService {
 
         return true;
     }
+
+
+
+    private boolean isWithinPlotBounds(UUID ownerId, GridPosition origin, Vector3Int size) {
+        if (ownerId == null || origin == null || size == null) return false;
+
+        GridManager.PlotAreaInfo info = gridManager.getPlotAreaInfo(ownerId);
+        if (info == null) return false;
+
+        int sx = Math.max(1, size.x());
+        int sy = Math.max(1, size.y());
+        int sz = Math.max(1, size.z());
+
+        // X/Z bounds (existing semantics)
+        int minX = origin.x();
+        int minZ = origin.z();
+        int maxXEx = origin.x() + sx;
+        int maxZEx = origin.z() + sz;
+
+        if (minX < 0 || minZ < 0) return false;
+        if (maxXEx > info.maxX()) return false;
+        if (maxZEx > info.maxY()) return false; // NOTE: in PlotAreaInfo naming, maxY is Z
+
+        // NEW: Y bounds (positive only + capped)
+        int minY = origin.y();
+        int maxYEx = origin.y() + sy;
+
+        if (minY < 0) return false;
+
+        int hCap = getPlotHeightCap(ownerId);
+        return maxYEx <= hCap;
+    }
+
+
 
     boolean placeMachine(UUID ownerId, GridPosition pos, String typeId, Direction orientation) {
         state.touchPlayer(ownerId);

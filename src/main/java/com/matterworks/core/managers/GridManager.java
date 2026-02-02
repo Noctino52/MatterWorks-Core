@@ -2,6 +2,7 @@ package com.matterworks.core.managers;
 
 import com.matterworks.core.common.Direction;
 import com.matterworks.core.common.GridPosition;
+import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.domain.factions.FactionRotationInfo;
 import com.matterworks.core.domain.factions.FactionRotationSlot;
 import com.matterworks.core.domain.machines.base.PlacedMachine;
@@ -882,12 +883,12 @@ public double getEffectiveMachineSpeedMultiplier(UUID ownerId, String machineTyp
 
         // Log transaction asynchronously + aggregated
         economyWriter.recordTransaction(p, actionType, "MONEY", amount, itemId, factionId, valueToLog);
+
     }
 
-
-
-
-
+    public int getPlotHeightCap(UUID ownerId) {
+        return world.getPlotHeightCap(ownerId);
+    }
 
 
 
