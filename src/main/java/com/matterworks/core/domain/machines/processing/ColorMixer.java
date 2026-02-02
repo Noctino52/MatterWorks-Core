@@ -7,29 +7,35 @@ import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.domain.machines.base.ProcessorMachine;
 import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.matter.MatterPayload;
-import com.matterworks.core.domain.matter.MatterShape;
+import com.matterworks.core.domain.player.PlayerProfile;
 
 import java.util.UUID;
 
 /**
  * ColorMixer:
- * - 2 inputs (both colors != RAW, shape == null)
- * - output: SPHERE with mixed color
+ * - Input: 2x pure colors (shape must be null), color != RAW
+ * - Output: pure color (shape null)
  *
- * PERFORMANCE:
- * - Cached ports (no GridPosition allocations per tick/insert)
- * - No Recipe/List allocations per job
- * - Cached output by color
+ * WHITE gating:
+ * - If the resulting mix would be WHITE, player must have the tech unlocked.
+ *
+ * IMPORTANT:
+ * - In the current color system, MatterColor.mix() may return RAW as a sentinel for WHITE.
+ *   We normalize RAW -> WHITE BEFORE applying the tech gate to avoid producing WHITE without unlock.
  */
 public class ColorMixer extends ProcessorMachine {
 
     private static final long PROCESS_TICKS = 30;
+
+    // Tech gate for producing WHITE
+    private static final String TECH_WHITE_MIXING = "tech_whiteout_protocol";
 
     private transient Direction cachedOrientation;
     private transient GridPosition cachedSlot0Pos;
     private transient GridPosition cachedSlot1Pos;
     private transient GridPosition cachedOutputPos;
 
+    // Output cache by color (all outputs are shape=null)
     private static final MatterPayload[] OUT_CACHE = new MatterPayload[MatterColor.values().length];
 
     public ColorMixer(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata) {
@@ -105,7 +111,7 @@ public class ColorMixer extends ProcessorMachine {
     public boolean insertItem(MatterPayload item, GridPosition fromPos) {
         if (fromPos == null || item == null) return false;
 
-        // Mixer accepts only pure colors (no shape) and != RAW
+        // Mixer accepts only pure colors (shape must be null) and color != RAW
         if (item.color() == null || item.color() == MatterColor.RAW) return false;
         if (item.shape() != null) return false;
 
@@ -146,23 +152,48 @@ public class ColorMixer extends ProcessorMachine {
         if (c1.color() == null || c2.color() == null) return;
         if (c1.color() == c2.color()) return;
 
+        // 1) Compute mix
+        MatterColor mixed = MatterColor.mix(c1.color(), c2.color());
+
+        // 2) Normalize RAW -> WHITE (sentinel behavior in current system)
+        if (mixed == MatterColor.RAW) mixed = MatterColor.WHITE;
+
+        // 3) HARD GATE: do NOT produce, do NOT consume, do NOT start job
+        if (mixed == MatterColor.WHITE && !canCraftWhite()) {
+            return;
+        }
+
+        // 4) Now consume inputs
         consumeInput(0, 1, c1);
         consumeInput(1, 1, c2);
-
-        MatterColor mixed = MatterColor.mix(c1.color(), c2.color());
-        if (mixed == MatterColor.RAW) mixed = MatterColor.WHITE;
 
         MatterPayload out = cachedOutput(mixed);
         startProcessing(out, currentTick, PROCESS_TICKS, "PROCESS_START");
     }
 
+    private boolean canCraftWhite() {
+        if (gridManager == null) return false;
+
+        PlayerProfile p = null;
+        try {
+            p = gridManager.getCachedProfile(ownerId);
+        } catch (Throwable ignored) {
+        }
+
+        if (p == null) return false;
+        if (p.isAdmin()) return true;
+
+        return p.hasTech(TECH_WHITE_MIXING);
+    }
+
     private static MatterPayload cachedOutput(MatterColor color) {
-        if (color == null) return new MatterPayload(MatterShape.SPHERE, MatterColor.WHITE);
+        if (color == null) return new MatterPayload(null, MatterColor.WHITE);
 
         int ci = color.ordinal();
         MatterPayload p = OUT_CACHE[ci];
         if (p == null) {
-            p = new MatterPayload(MatterShape.SPHERE, color);
+            // IMPORTANT: output is pure color (shape=null)
+            p = new MatterPayload(null, color);
             OUT_CACHE[ci] = p;
         }
         return p;
