@@ -35,6 +35,8 @@ public class BlockRegistry {
                     + " pm=" + s.prestigeCostMult()
                     + " cat=" + s.category()
                     + " model=" + s.modelId()
+                    + " penaltyEvery=" + s.pricePenaltyEvery()
+                    + " penaltyAdd=" + s.pricePenaltyAdd()
                     + " speed=" + s.speed()
                     + " shopOrder=" + s.shopOrder());
         }

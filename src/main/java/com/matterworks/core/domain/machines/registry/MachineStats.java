@@ -10,6 +10,11 @@ public record MachineStats(
         int tier,
         String modelId,
         String category,
+
+        // Dynamic price penalty (owned count based)
+        int pricePenaltyEvery,
+        double pricePenaltyAdd,
+
         double speed,
         int shopOrder
 ) {
@@ -22,6 +27,8 @@ public record MachineStats(
                 1,
                 "model_missing",
                 "UNKNOWN",
+                0,
+                0.0,
                 1.0,
                 0
         );

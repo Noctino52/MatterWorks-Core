@@ -60,6 +60,88 @@ final class GridEconomyService {
         return repository.loadVoidShopCatalog();
     }
 
+    // ==========================================================
+    // DYNAMIC PRICE (owned-count penalty) - small TTL cache
+    // ==========================================================
+    private static final long INV_COUNT_CACHE_TTL_MS = 400L;
+
+    private record InvCountKey(UUID playerId, String itemId) {}
+
+    private static final class InvCountEntry {
+        final int count;
+        final long atMs;
+        InvCountEntry(int count, long atMs) {
+            this.count = count;
+            this.atMs = atMs;
+        }
+    }
+
+    private final java.util.concurrent.ConcurrentHashMap<InvCountKey, InvCountEntry> invCountCache =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    private int getInventoryCountCached(UUID playerId, String itemId) {
+        if (playerId == null || itemId == null) return 0;
+
+        long now = System.currentTimeMillis();
+        InvCountKey key = new InvCountKey(playerId, itemId);
+
+        InvCountEntry e = invCountCache.get(key);
+        if (e != null && (now - e.atMs) <= INV_COUNT_CACHE_TTL_MS) {
+            return Math.max(0, e.count);
+        }
+
+        int fresh = 0;
+        try {
+            fresh = repository.getInventoryItemCount(playerId, itemId);
+        } catch (Throwable ignored) {}
+
+        if (fresh < 0) fresh = 0;
+        invCountCache.put(key, new InvCountEntry(fresh, now));
+        return fresh;
+    }
+
+    private int getPlacedCount(UUID playerId, String itemId) {
+        if (playerId == null || itemId == null) return 0;
+
+        var grid = state.playerGrids.get(playerId);
+        if (grid == null || grid.isEmpty()) return 0;
+
+        int count = 0;
+        for (var pm : grid.values()) {
+            if (pm == null) continue;
+            String typeId = pm.getTypeId();
+            if (itemId.equals(typeId)) count++;
+        }
+        return count;
+    }
+
+    private double computeOwnedCountPenalty(UUID playerId, String itemId) {
+        if (playerId == null || itemId == null) return 0.0;
+
+        var stats = blockRegistry.getStats(itemId);
+        if (stats == null) return 0.0;
+
+        // Only for MACHINE category (premium doesn't make sense)
+        String cat = stats.category();
+        if (cat == null || !cat.equalsIgnoreCase("MACHINE")) return 0.0;
+
+        int every = Math.max(0, stats.pricePenaltyEvery());
+        double add = Math.max(0.0, stats.pricePenaltyAdd());
+
+        if (every <= 0 || add <= 0.0) return 0.0;
+
+        int totalOwned = getPlacedCount(playerId, itemId) + getInventoryCountCached(playerId, itemId);
+        if (totalOwned < 0) totalOwned = 0;
+
+        int steps = totalOwned / every; // integer division floor
+        if (steps <= 0) return 0.0;
+
+        double penalty = steps * add;
+        if (Double.isNaN(penalty) || Double.isInfinite(penalty) || penalty < 0.0) return 0.0;
+        return penalty;
+    }
+
+
     boolean canUseOverclock(UUID ownerId, String itemId) {
         if (ownerId == null || itemId == null || itemId.isBlank()) return false;
 
@@ -271,24 +353,37 @@ final class GridEconomyService {
     }
 
     double getEffectiveShopUnitPrice(UUID playerId, String itemId) {
-        PlayerProfile p = state.getCachedProfile(playerId);
-        return getEffectiveShopUnitPrice(p, itemId);
+        PlayerProfile p = (playerId != null ? state.getCachedProfile(playerId) : null);
+        return getEffectiveShopUnitPriceInternal(playerId, p, itemId);
     }
 
-    double getEffectiveShopUnitPrice(PlayerProfile p, String itemId) {
+
+    private double getEffectiveShopUnitPriceInternal(UUID playerId, PlayerProfile p, String itemId) {
         if (itemId == null) return 0.0;
 
         var stats = blockRegistry.getStats(itemId);
-        double base = (stats != null ? stats.basePrice() : 0.0);
-        double mult = (stats != null ? Math.max(0.0, stats.prestigeCostMult()) : 0.0);
 
+        double base = (stats != null ? stats.basePrice() : 0.0);
+        if (Double.isNaN(base) || Double.isInfinite(base) || base < 0.0) base = 0.0;
+
+        // NEW: penalty BEFORE prestige factor (prestige logic unchanged, just applied after base+penalty)
+        double penalty = computeOwnedCountPenalty(playerId, itemId);
+        double baseWithPenalty = base + penalty;
+
+        double mult = (stats != null ? Math.max(0.0, stats.prestigeCostMult()) : 0.0);
         int prestige = (p != null ? Math.max(0, p.getPrestigeLevel()) : 0);
 
         double factor = 1.0 + (prestige * mult);
-        double out = base * factor;
+        double out = baseWithPenalty * factor;
 
-        if (Double.isNaN(out) || Double.isInfinite(out)) return base;
+        if (Double.isNaN(out) || Double.isInfinite(out)) return Math.max(0.0, baseWithPenalty);
         return Math.max(0.0, out);
+    }
+
+
+    double getEffectiveShopUnitPrice(PlayerProfile p, String itemId) {
+        UUID playerId = (p != null ? p.getPlayerId() : null);
+        return getEffectiveShopUnitPriceInternal(playerId, p, itemId);
     }
 
     boolean attemptBailout(UUID ownerId) {
