@@ -24,7 +24,7 @@ import java.util.UUID;
  */
 public class Chromator extends ProcessorMachine {
 
-    private static final long PROCESS_TICKS = 30;
+    private static final long PROCESS_TICKS = 20;
 
     // Cached ports (depend on pos + orientation)
     private transient Direction cachedOrientation;
@@ -136,15 +136,21 @@ public class Chromator extends ProcessorMachine {
 
     @Override
     public void tick(long currentTick) {
+        // First, try to eject anything already sitting in the output buffer.
         super.tryEjectItem(currentTick);
 
         if (isProcessing()) {
-            if (currentTick >= finishTick) completeProcessing();
+            if (currentTick >= finishTick) {
+                completeProcessing();
+
+                // IMPORTANT: try to eject again in the SAME tick,
+                // otherwise every job pays +1 tick (throughput becomes T/(T+1)).
+                super.tryEjectItem(currentTick);
+            }
             return;
         }
 
         if (outputBuffer.getCount() >= outputBuffer.getMaxStackSize()) return;
-
         if (inputBuffer.getCountInSlot(0) <= 0) return;
         if (inputBuffer.getCountInSlot(1) <= 0) return;
 
@@ -163,6 +169,7 @@ public class Chromator extends ProcessorMachine {
         MatterPayload out = cachedOutput(base.shape(), dye.color());
         startProcessing(out, currentTick, PROCESS_TICKS, "PROCESS_START");
     }
+
 
     private static MatterPayload cachedOutput(MatterShape shape, MatterColor color) {
         if (shape == null || color == null) return new MatterPayload(shape, color);

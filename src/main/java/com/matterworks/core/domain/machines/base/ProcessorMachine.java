@@ -145,18 +145,28 @@ public abstract class ProcessorMachine extends PlacedMachine {
 
     /**
      * Output ejection:
-     * - Backoff if output is blocked (avoid retrying every tick)
-     * - No JSON writes per tick
+     * - If a job is finished, materialize its output BEFORE attempting ejection,
+     *   so processors can reach full MK1 throughput (no +1 tick penalty).
+     * - Backoff when blocked, but do not introduce a systematic gap.
      */
     protected void tryEjectItem(long currentTick) {
-        if (outputBuffer.isEmpty() || gridManager == null) return;
+        if (gridManager == null) return;
+
+        // IMPORTANT: if processing is finished, move output into the buffer NOW.
+        // This allows eject in the same tick and avoids the classic 20/(20+1) throughput loss.
+        if (outputBuffer.isEmpty() && isProcessing() && finishTick != -1 && currentTick >= finishTick) {
+            completeProcessing(); // may fill outputBuffer and clear processing state
+        }
+
+        if (outputBuffer.isEmpty()) return;
         if (currentTick < nextEjectAttemptTick) return;
 
         GridPosition targetPos = getOutputPosition();
         PlacedMachine neighbor = getNeighborAt(targetPos);
 
         if (neighbor == null) {
-            nextEjectAttemptTick = scheduleAfter(currentTick, 4, "EJECT_RETRY");
+            // Retry next tick (belt/drill philosophy: avoid systematic throughput loss due to tick ordering)
+            nextEjectAttemptTick = currentTick + 1;
             return;
         }
 
@@ -176,7 +186,8 @@ public abstract class ProcessorMachine extends PlacedMachine {
                 saveState();
             } else {
                 outputBuffer.insert(item);
-                nextEjectAttemptTick = scheduleAfter(currentTick, 2, "EJECT_RETRY");
+                // Retry next tick (no 2-tick backoff)
+                nextEjectAttemptTick = currentTick + 1;
             }
             return;
         }
@@ -197,13 +208,16 @@ public abstract class ProcessorMachine extends PlacedMachine {
                 saveState();
             } else {
                 outputBuffer.insert(item);
-                nextEjectAttemptTick = scheduleAfter(currentTick, 2, "EJECT_RETRY");
+                nextEjectAttemptTick = currentTick + 1;
             }
             return;
         }
 
-        nextEjectAttemptTick = scheduleAfter(currentTick, 6, "EJECT_RETRY");
+        // Other machines: small backoff is fine
+        nextEjectAttemptTick = currentTick + 2;
     }
+
+
 
     /**
      * Compatibility method: subclasses call saveState().
