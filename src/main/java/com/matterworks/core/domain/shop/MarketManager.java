@@ -57,9 +57,13 @@ public class MarketManager {
 
     private void initializePrices() {
         basePrices.put(MatterColor.RAW, 1.0);
-        basePrices.put(MatterColor.RED, 5.0);
-        basePrices.put(MatterColor.BLUE, 5.0);
-        basePrices.put(MatterColor.YELLOW, 5.0);
+
+        // Primary colors: requested baseline = $3 for a simple cube/color
+        basePrices.put(MatterColor.RED, 3.0);
+        basePrices.put(MatterColor.BLUE, 3.0);
+        basePrices.put(MatterColor.YELLOW, 3.0);
+
+        // Secondary / advanced colors keep higher value
         basePrices.put(MatterColor.PURPLE, 25.0);
         basePrices.put(MatterColor.ORANGE, 25.0);
         basePrices.put(MatterColor.GREEN, 25.0);
@@ -115,109 +119,21 @@ public class MarketManager {
         });
     }
 
-    private FactionDefinition findFactionById(int id, List<FactionDefinition> list) {
-        if (list == null) return null;
-        for (FactionDefinition f : list) {
-            if (f != null && f.id() == id) return f;
+    private FactionDefinition findFactionById(int id, List<FactionDefinition> all) {
+        if (all == null || all.isEmpty()) return null;
+        for (FactionDefinition f : all) {
+            if (f == null) continue;
+            if (f.id() == id) return f;
         }
         return null;
     }
 
-    /**
-     * Best-match rule selection:
-     * - among LIKE/DISLIKE rules, pick the "most specific".
-     * - tie-break: priority DESC, id ASC.
-     */
-    private FactionPricingRule findBestMatchingRule(MatterPayload payload, List<FactionPricingRule> rules) {
-        if (payload == null || rules == null || rules.isEmpty()) return null;
-
-        FactionPricingRule best = null;
-        int bestSpec = Integer.MIN_VALUE;
-        int bestPriority = Integer.MIN_VALUE;
-        long bestId = Long.MAX_VALUE;
-
-        for (FactionPricingRule r : rules) {
-            if (r == null) continue;
-            if (!r.matches(payload)) continue;
-
-            int spec = r.specificityScore();
-            int prio = r.priority();
-            long id = r.id();
-
-            boolean better = false;
-            if (spec > bestSpec) better = true;
-            else if (spec == bestSpec && prio > bestPriority) better = true;
-            else if (spec == bestSpec && prio == bestPriority && id < bestId) better = true;
-
-            if (better) {
-                best = r;
-                bestSpec = spec;
-                bestPriority = prio;
-                bestId = id;
-            }
-        }
-
-        return best;
-    }
-
-    private double sanitizeMultiplier(double m) {
-        if (Double.isNaN(m) || Double.isInfinite(m) || m <= 0.0) return 1.0;
-        if (m < MIN_SELL_MULT) return MIN_SELL_MULT;
-        if (m > MAX_SELL_MULT) return MAX_SELL_MULT;
-        return m;
-    }
-
     // ==========================================================
-    // MULTIPLIERS (NO DB)
+    // SELL
     // ==========================================================
 
-    private double applyPrestigeSellMultiplier(double value, UUID sellerId) {
-        PlayerProfile p = gridManager.getCachedProfile(sellerId);
-        int prestige = (p != null ? Math.max(0, p.getPrestigeLevel()) : 0);
-        if (prestige <= 0) return value;
-
-        ServerConfig cfg = gridManager.getServerConfig();
-        double k = (cfg != null ? Math.max(0.0, cfg.prestigeSellK()) : 0.0);
-        if (k <= 0.0) return value;
-
-        double factor = 1.0 + (prestige * k);
-        double out = value * factor;
-        if (Double.isNaN(out) || Double.isInfinite(out)) return value;
-        return Math.max(0.0, out);
-    }
-
-    private double applyNexusTechSellMultiplier(double value, UUID sellerId) {
-        double mult = 1.0;
-        try {
-            mult = gridManager.getTechNexusSellMultiplier(sellerId);
-        } catch (Throwable ignored) {}
-
-        if (Double.isNaN(mult) || Double.isInfinite(mult) || mult <= 0.0) mult = 1.0;
-
-        double out = value * mult;
-        if (Double.isNaN(out) || Double.isInfinite(out)) return value;
-        return Math.max(0.0, out);
-    }
-
-    private String formatEffects(MatterPayload item) {
-        if (item.effects() == null || item.effects().isEmpty()) return "[NO_EFFECT]";
-
-        StringBuilder sb = new StringBuilder(64);
-        sb.append('[');
-        for (int i = 0; i < item.effects().size(); i++) {
-            if (i > 0) sb.append('+');
-            sb.append(item.effects().get(i).name());
-        }
-        sb.append(']');
-        return sb.toString();
-    }
-
-    // ==========================================================
-    // SELL (TICK SAFE)
-    // ==========================================================
-
-    public void sellItem(MatterPayload item, UUID sellerId) {
-        if (item == null || sellerId == null) return;
+    public double sellItem(MatterPayload item, UUID sellerId) {
+        if (item == null || sellerId == null) return 0.0;
 
         long nowMs = System.currentTimeMillis();
         maybeTriggerFactionCacheRefreshAsync(nowMs, false);
@@ -243,44 +159,109 @@ public class MarketManager {
         // 2) nexus tech multiplier
         value = applyNexusTechSellMultiplier(value, sellerId);
 
-        // Money + transaction handled by GridEconomyService async writer
+        // Money + transaction handled by GridEconomyService async
         gridManager.addMoney(
                 sellerId,
                 value,
                 "MATTER_SELL",
-                (item.shape() != null ? item.shape().name() : "COLOR"),
-                cache.activeFactionId
+                item.toString()
         );
 
-        // Telemetry (in-memory)
-        try {
-            if (gridManager.getProductionTelemetry() != null) {
-                gridManager.getProductionTelemetry().recordSold(sellerId, item, 1L, value);
-            }
-        } catch (Throwable ignored) {}
-
         if (DEBUG_MARKET_LOG) {
-            String shapeTxt = (item.shape() != null ? item.shape().name() : "COLOR");
-            String colorTxt = (item.color() != null ? item.color().name() : "RAW");
-            String effTxt = formatEffects(item);
-
-            String factionTxt = (cache.activeFaction != null)
-                    ? (cache.activeFaction.displayName() + " #" + cache.activeFaction.id())
-                    : ("Faction #" + Math.max(1, cache.activeFactionId));
-
-            String ruleTxt = (appliedRule != null)
-                    ? ("ruleId=" + appliedRule.id()
-                    + " x" + String.format(Locale.US, "%.3f", factionMult)
-                    + (appliedRule.note() != null && !appliedRule.note().isBlank()
-                    ? " (" + appliedRule.note() + ")"
-                    : ""))
-                    : "no_rule x1.000";
-
-            System.out.println("MARKET: Sold " + shapeTxt + " (" + colorTxt + ") " + effTxt
-                    + " | " + factionTxt + " | " + ruleTxt
-                    + " -> $" + String.format(Locale.US, "%.2f", value));
+            String ruleTxt = (appliedRule != null ? (" rule=" + appliedRule.id()) : " rule=(none)");
+            System.out.println("[MARKET] sold=" + item + " base=" + String.format(Locale.US, "%.2f", calculateBaseValue(item))
+                    + " factionMult=" + String.format(Locale.US, "%.3f", factionMult)
+                    + " final=" + String.format(Locale.US, "%.2f", value)
+                    + ruleTxt);
         }
+
+        return value;
     }
+
+    // ==========================================================
+    // PRICING RULES (FACTIONS)
+    // ==========================================================
+
+    private FactionPricingRule findBestMatchingRule(MatterPayload item, List<FactionPricingRule> rules) {
+        if (item == null || rules == null || rules.isEmpty()) return null;
+
+        FactionPricingRule best = null;
+        double bestMult = 1.0;
+
+        for (FactionPricingRule r : rules) {
+            if (r == null) continue;
+
+            boolean matches = matchesRule(item, r);
+            if (!matches) continue;
+
+            double mult = sanitizeMultiplier(r.multiplier());
+
+            // Choose rule by highest absolute multiplier distance from 1.0
+            double score = Math.abs(mult - 1.0);
+            double bestScore = Math.abs(bestMult - 1.0);
+
+            if (best == null || score > bestScore) {
+                best = r;
+                bestMult = mult;
+            }
+        }
+
+        return best;
+    }
+
+    private boolean matchesRule(MatterPayload item, FactionPricingRule r) {
+        if (item == null || r == null) return false;
+
+        // rule has optional fields: color, shape, effect
+        MatterColor rc = r.color();
+        MatterShape rs = r.shape();
+
+        boolean hasEffect = (r.effect() != null);
+
+        // Match type and combine mode
+        String matchType = (r.matchType() != null ? r.matchType().name() : "CONTAINS");
+        String combineMode = (r.combineMode() != null ? r.combineMode().name() : "ALL");
+
+        boolean exact = "EXACT".equalsIgnoreCase(matchType);
+        boolean any = "ANY".equalsIgnoreCase(combineMode);
+
+        boolean mColor = (rc == null) || (item.color() == rc);
+        boolean mShape = (rs == null) || (item.shape() == rs);
+
+        boolean mEffect = true;
+        if (hasEffect) {
+            mEffect = item.effects() != null && item.effects().contains(r.effect());
+        }
+
+        if (exact) {
+            // exact means all provided constraints must match AND the item must not have extra dimensions not in rule?
+            // We keep it simple: still require those constraints; ignore "extra" effects unless effect is specified.
+            boolean ok = mColor && mShape && mEffect;
+
+            // if rule specified effect: require exactly that effect set? optional behavior:
+            // keep CONTAINS semantics for effect list even in EXACT to avoid being too punishing.
+            return ok;
+        }
+
+        // CONTAINS semantics
+        if (any) {
+            return mColor || mShape || mEffect;
+        }
+
+        // ALL (default)
+        return mColor && mShape && mEffect;
+    }
+
+    private double sanitizeMultiplier(double m) {
+        if (Double.isNaN(m) || Double.isInfinite(m)) return 1.0;
+        if (m < MIN_SELL_MULT) return MIN_SELL_MULT;
+        if (m > MAX_SELL_MULT) return MAX_SELL_MULT;
+        return m;
+    }
+
+    // ==========================================================
+    // BASE VALUE (COLOR + SHAPE + COMPLEXITY)
+    // ==========================================================
 
     private double calculateBaseValue(MatterPayload item) {
         double base = basePrices.getOrDefault(item.color(), 0.5);
@@ -295,6 +276,56 @@ public class MarketManager {
 
         return base * multiplier;
     }
+
+    // ==========================================================
+    // PRESTIGE SELL MULT (DB config)
+    // ==========================================================
+
+    private double applyPrestigeSellMultiplier(double value, UUID sellerId) {
+        if (sellerId == null) return value;
+
+        PlayerProfile p = gridManager.getCachedProfile(sellerId);
+        int prestige = (p != null ? Math.max(0, p.getPrestigeLevel()) : 0);
+        if (prestige <= 0) return value;
+
+        // ServerConfig is cached by repository (expected). Even if it hits DB, it's not in Nexus tick thread
+        // because sellItem is called on tick thread; but here we still use repository.loadServerConfig().
+        // If you ever move this to DB, consider caching the config in GridManager / runtime state.
+        ServerConfig cfg = null;
+        try { cfg = repository.loadServerConfig(); } catch (Throwable ignored) {}
+
+        double k = (cfg != null ? Math.max(0.0, cfg.prestigeSellK()) : 0.0);
+        if (k <= 0.0) return value;
+
+        double mult = 1.0 + prestige * k;
+        if (Double.isNaN(mult) || Double.isInfinite(mult) || mult <= 0.0) return value;
+
+        return value * mult;
+    }
+
+    // ==========================================================
+    // NEXUS TECH SELL MULT
+    // ==========================================================
+
+    private double applyNexusTechSellMultiplier(double value, UUID sellerId) {
+        if (sellerId == null) return value;
+
+        PlayerProfile p = gridManager.getCachedProfile(sellerId);
+        if (p == null) return value;
+
+        double techMult = 1.0;
+        try {
+            techMult = gridManager.getTechManager().getTechNexusSellMultiplier(p);
+        } catch (Throwable ignored) {}
+
+        if (Double.isNaN(techMult) || Double.isInfinite(techMult) || techMult <= 0.0) return value;
+
+        return value * techMult;
+    }
+
+    // ==========================================================
+    // CACHE STRUCT
+    // ==========================================================
 
     private static final class Cache {
         final long loadedAtMs;
