@@ -213,24 +213,11 @@ public class ServerGameStateDAO {
         }
     }
 
-    public int loadMinutesToInactive() {
-        String sql = "SELECT MinutesToInactive FROM server_gamestate WHERE id = 1";
-        try (Connection conn = db.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql);
-             ResultSet rs = ps.executeQuery()) {
-
-            if (rs.next()) {
-                int v = rs.getInt("MinutesToInactive");
-                return Math.max(1, v);
-            }
-        } catch (SQLException ignored) {}
-        return 5;
-    }
-
     public ServerConfig loadServerConfig() {
 
         // defaults "safe"
         double playerStartMoney = 1000.0;
+        int plotStartVeinClusterRadiusPct = 18; // default = 18%
         int veinRaw = 3, veinRed = 1, veinBlue = 1, veinYellow = 0;
         double sosThreshold = 500.0;
         int maxInventoryMachine = 64;
@@ -238,6 +225,12 @@ public class ServerGameStateDAO {
         int plotStartingX = 25, plotStartingY = 25;
         int plotMaxX = 50, plotMaxY = 50;
         int plotIncreaseX = 2, plotIncreaseY = 2;
+
+        // NEW: starting veins defaults (keep old hardcoded behavior as fallback)
+        int plotStartVeinRaw = 2;
+        int plotStartVeinRed = 1;
+        int plotStartVeinBlue = 1;
+        int plotStartVeinYellow = 1;
 
         // NEW: vertical cap defaults
         int plotHeightStart = 4;
@@ -257,6 +250,9 @@ public class ServerGameStateDAO {
             boolean hasMaxInv = SqlCompat.columnExists(conn, "server_gamestate", "max_inventory_machine");
 
             // plot columns: legacy + snake_case
+            String colStartVeinClusterPct = SqlCompat.firstExistingColumn(conn, "server_gamestate",
+                    "plot_start_vein_cluster_radius_pct", "Plot_Start_Vein_Cluster_Radius_Pct", "plotStartVeinClusterRadiusPct");
+
             String colPlotStartX = SqlCompat.firstExistingColumn(conn, "server_gamestate",
                     "plot_start_x", "Plot_Starting_X", "plot_starting_x");
             String colPlotStartY = SqlCompat.firstExistingColumn(conn, "server_gamestate",
@@ -269,6 +265,16 @@ public class ServerGameStateDAO {
                     "plot_increase_x", "Plot_IncreaseX", "Plot_Increase_X", "plot_increasex");
             String colPlotIncY = SqlCompat.firstExistingColumn(conn, "server_gamestate",
                     "plot_increase_y", "Plot_IncreaseY", "Plot_Increase_Y", "plot_increasey");
+
+            // NEW: starting veins columns
+            String colStartVeinRaw = SqlCompat.firstExistingColumn(conn, "server_gamestate",
+                    "plot_start_vein_raw", "Plot_Start_Vein_Raw", "plotStartVeinRaw");
+            String colStartVeinRed = SqlCompat.firstExistingColumn(conn, "server_gamestate",
+                    "plot_start_vein_red", "Plot_Start_Vein_Red", "plotStartVeinRed");
+            String colStartVeinBlue = SqlCompat.firstExistingColumn(conn, "server_gamestate",
+                    "plot_start_vein_blue", "Plot_Start_Vein_Blue", "plotStartVeinBlue");
+            String colStartVeinYellow = SqlCompat.firstExistingColumn(conn, "server_gamestate",
+                    "plot_start_vein_yellow", "Plot_Start_Vein_Yellow", "plotStartVeinYellow");
 
             // NEW: height columns (Y+ cap)
             String colPlotHStart = SqlCompat.firstExistingColumn(conn, "server_gamestate",
@@ -293,12 +299,20 @@ public class ServerGameStateDAO {
 
             if (hasMaxInv) sql.append(", max_inventory_machine");
 
+            if (colStartVeinClusterPct != null) sql.append(", ").append(colStartVeinClusterPct).append(" AS plot_start_vein_cluster_radius_pct");
+
+
             if (colPlotStartX != null) sql.append(", ").append(colPlotStartX).append(" AS plot_start_x");
             if (colPlotStartY != null) sql.append(", ").append(colPlotStartY).append(" AS plot_start_y");
             if (colPlotMaxX != null) sql.append(", ").append(colPlotMaxX).append(" AS plot_max_x");
             if (colPlotMaxY != null) sql.append(", ").append(colPlotMaxY).append(" AS plot_max_y");
             if (colPlotIncX != null) sql.append(", ").append(colPlotIncX).append(" AS plot_inc_x");
             if (colPlotIncY != null) sql.append(", ").append(colPlotIncY).append(" AS plot_inc_y");
+
+            if (colStartVeinRaw != null) sql.append(", ").append(colStartVeinRaw).append(" AS plot_start_vein_raw");
+            if (colStartVeinRed != null) sql.append(", ").append(colStartVeinRed).append(" AS plot_start_vein_red");
+            if (colStartVeinBlue != null) sql.append(", ").append(colStartVeinBlue).append(" AS plot_start_vein_blue");
+            if (colStartVeinYellow != null) sql.append(", ").append(colStartVeinYellow).append(" AS plot_start_vein_yellow");
 
             if (colPlotHStart != null) sql.append(", ").append(colPlotHStart).append(" AS plot_height_start");
             if (colPlotHMax != null) sql.append(", ").append(colPlotHMax).append(" AS plot_height_max");
@@ -333,6 +347,19 @@ public class ServerGameStateDAO {
                     if (colPlotIncX != null) plotIncreaseX = Math.max(1, rs.getInt("plot_inc_x"));
                     if (colPlotIncY != null) plotIncreaseY = Math.max(1, rs.getInt("plot_inc_y"));
 
+                    // NEW: starting veins values
+                    if (colStartVeinRaw != null) plotStartVeinRaw = Math.max(0, rs.getInt("plot_start_vein_raw"));
+                    if (colStartVeinRed != null) plotStartVeinRed = Math.max(0, rs.getInt("plot_start_vein_red"));
+                    if (colStartVeinBlue != null) plotStartVeinBlue = Math.max(0, rs.getInt("plot_start_vein_blue"));
+                    if (colStartVeinYellow != null) plotStartVeinYellow = Math.max(0, rs.getInt("plot_start_vein_yellow"));
+
+                    if (colStartVeinClusterPct != null) {
+                        plotStartVeinClusterRadiusPct = rs.getInt("plot_start_vein_cluster_radius_pct");
+                        // clamp safety: 0..50 (0 = centro preciso, 50 = metà lato)
+                        plotStartVeinClusterRadiusPct = Math.max(0, Math.min(50, plotStartVeinClusterRadiusPct));
+                    }
+
+
                     // NEW: height values
                     if (colPlotHStart != null) plotHeightStart = Math.max(1, rs.getInt("plot_height_start"));
                     if (colPlotHMax != null) plotHeightMax = Math.max(plotHeightStart, rs.getInt("plot_height_max"));
@@ -359,6 +386,8 @@ public class ServerGameStateDAO {
                 plotMaxX, plotMaxY,
                 plotIncreaseX, plotIncreaseY,
 
+                plotStartVeinRaw, plotStartVeinRed, plotStartVeinBlue, plotStartVeinYellow,plotStartVeinClusterRadiusPct,
+
                 plotHeightStart,
                 plotHeightMax,
                 plotHeightIncreasePerPrestige,
@@ -371,6 +400,23 @@ public class ServerGameStateDAO {
                 prestigeActionCostMult
         );
     }
+
+
+    public int loadMinutesToInactive() {
+        String sql = "SELECT MinutesToInactive FROM server_gamestate WHERE id = 1";
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+
+            if (rs.next()) {
+                int v = rs.getInt("MinutesToInactive");
+                return Math.max(1, v);
+            }
+        } catch (SQLException ignored) {}
+        return 5;
+    }
+
+
 
 
     public int getVoidPlotItemBreakerIncreased() {

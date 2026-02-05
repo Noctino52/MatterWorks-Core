@@ -16,7 +16,14 @@ public record ServerConfig(
         int plotIncreaseX,
         int plotIncreaseY,
 
-        // NEW: vertical build cap (Y positive only)
+        int plotStartVeinRaw,
+        int plotStartVeinRed,
+        int plotStartVeinBlue,
+        int plotStartVeinYellow,
+
+        // NEW: cluster radius for starting veins (percentage of starting square side)
+        int plotStartVeinClusterRadiusPct,
+
         int plotHeightStart,
         int plotHeightMax,
         int plotHeightIncreasePerPrestige,
@@ -25,11 +32,9 @@ public record ServerConfig(
         int prestigePlotBonus,
         double prestigeSellK,
 
-        // prestige action fee (to actually perform prestige)
         double prestigeActionCostBase,
         double prestigeActionCostMult
 ) {
-    // Backward-friendly alias used in some services
     public double startMoney() {
         return playerStartMoney;
     }

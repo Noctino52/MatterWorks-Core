@@ -17,7 +17,9 @@ import com.matterworks.core.ports.IWorldAccess;
 import com.matterworks.core.ui.MariaDBAdapter;
 import com.matterworks.core.ui.ServerConfig;
 
+
 import java.util.*;
+import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.stream.Collectors;
@@ -33,6 +35,7 @@ final class GridWorldService {
     private final GridRuntimeState state;
 
     private volatile long lastTickPerfLogMs = 0L;
+    private final Random rnd = new Random();
 
     GridWorldService(
             GridManager gridManager,
@@ -651,10 +654,11 @@ final class GridWorldService {
         int targetBlue = Math.max(serverConfig.veinBlue(), 1);
         int targetYellow = Math.max(serverConfig.veinYellow(), 1);
 
-        int unlockedRaw = Math.min(2, targetRaw);
-        int unlockedRed = Math.min(1, targetRed);
-        int unlockedBlue = Math.min(1, targetBlue);
-        int unlockedYellow = Math.min(1, targetYellow);
+        // NEW: read "starting veins" from DB (clamped to total targets)
+        int unlockedRaw = Math.min(Math.max(0, serverConfig.plotStartVeinRaw()), targetRaw);
+        int unlockedRed = Math.min(Math.max(0, serverConfig.plotStartVeinRed()), targetRed);
+        int unlockedBlue = Math.min(Math.max(0, serverConfig.plotStartVeinBlue()), targetBlue);
+        int unlockedYellow = Math.min(Math.max(0, serverConfig.plotStartVeinYellow()), targetYellow);
 
         spawnInUnlockedUntil(db, pid, out, MatterColor.RAW, unlockedRaw, y, info);
         spawnInUnlockedUntil(db, pid, out, MatterColor.RED, unlockedRed, y, info);
@@ -667,8 +671,16 @@ final class GridWorldService {
         for (int i = countColor(out, MatterColor.YELLOW); i < targetYellow; i++) spawnVeinInLockedArea(db, pid, out, MatterColor.YELLOW, y, info, maxX, maxY);
     }
 
-    private void spawnInUnlockedUntil(MariaDBAdapter db, Long pid, Map<GridPosition, MatterColor> out,
-                                      MatterColor t, int desiredUnlocked, int y, GridManager.PlotAreaInfo info) {
+
+    void spawnInUnlockedUntil(
+            MariaDBAdapter db,
+            Long pid,
+            Map<GridPosition, MatterColor> out,
+            MatterColor t,
+            int desiredUnlocked,
+            int y,
+            GridManager.PlotAreaInfo info
+    ) {
         if (desiredUnlocked <= 0) return;
 
         int minX = info.minX();
@@ -676,12 +688,156 @@ final class GridWorldService {
         int minZ = info.minZ();
         int maxZEx = info.maxZExclusive();
 
+        int width = Math.max(1, maxXEx - minX);
+        int height = Math.max(1, maxZEx - minZ);
+
+        // Center of the unlocked square (world coordinates)
+        int cx = minX + (width - 1) / 2;
+        int cz = minZ + (height - 1) / 2;
+
+        // Cluster radius: % of smaller side, with clamps
+        int minSide = Math.min(width, height);
+        state.reloadServerConfig();
+        ServerConfig serverConfig = state.getServerConfig();
+
+        int pct = serverConfig.plotStartVeinClusterRadiusPct(); // 0..50
+        double radiusFactor = pct / 100.0;
+
+        int radius = (int) Math.round(minSide * radiusFactor);
+        radius = Math.max(radius, 2);
+        radius = Math.min(radius, Math.max(2, minSide / 2));
+
+
+        Random r = new Random();
+
+        // Keep spawning until we reach the desired amount (or we can't add more)
         while (countColorInUnlocked(out, t, y, info) < desiredUnlocked) {
             int before = out.size();
-            spawnVeinInBounds(db, pid, out, t, y, minX, maxXEx, minZ, maxZEx);
+
+            // 1) Try clustered first
+            boolean placed = spawnVeinClusteredInBounds(db, pid, out, t, y,
+                    minX, maxXEx, minZ, maxZEx,
+                    cx, cz, radius, r
+            );
+
+            // 2) Fallback to uniform in-bounds (your old behavior)
+            if (!placed) {
+                spawnVeinInBounds(db, pid, out, t, y, minX, maxXEx, minZ, maxZEx);
+            }
+
+            // If still nothing was placed, stop to avoid infinite loops
             if (out.size() == before) break;
         }
     }
+
+    private boolean spawnVeinClusteredInBounds(
+            MariaDBAdapter db,
+            Long pid,
+            Map<GridPosition, MatterColor> out,
+            MatterColor t,
+            int y,
+            int minX,
+            int maxXEx,
+            int minZ,
+            int maxZEx,
+            int cx,
+            int cz,
+            int radius,
+            Random r
+    ) {
+        if (out == null) return false;
+
+        int attempts = 800; // plenty, but bounded
+
+        for (int tries = 0; tries < attempts; tries++) {
+            // Random point inside a circle around center
+            double angle = r.nextDouble() * Math.PI * 2.0;
+
+            // Uniform-ish inside circle (triangular trick)
+            double u = r.nextDouble() + r.nextDouble();
+            double rr = (u > 1.0 ? 2.0 - u : u) * radius;
+
+            int x = cx + (int) Math.round(Math.cos(angle) * rr);
+            int z = cz + (int) Math.round(Math.sin(angle) * rr);
+
+            if (x < minX || x >= maxXEx || z < minZ || z >= maxZEx) continue;
+
+            GridPosition key = new GridPosition(x, y, z);
+            if (out.containsKey(key)) continue;
+
+            db.saveResource(pid, x, z, t);
+            out.put(key, t);
+            return true;
+        }
+
+        return false;
+    }
+
+
+
+    /**
+     * Picks a position near the center using polar sampling inside a circle.
+     * Returns null if it can't find any valid in-bounds candidate quickly.
+     */
+    private GridPosition tryPickClusteredPosition(
+            int cx,
+            int cz,
+            int radius,
+            int w,
+            int h,
+            int y,
+            Map<GridPosition, MatterColor> occupied
+    ) {
+
+        // A few quick micro-attempts per "attempt" to reduce nulls
+        for (int k = 0; k < 4; k++) {
+            // Random point inside a circle (uniform area)
+            double t = rnd.nextDouble() * Math.PI * 2.0;
+            double u = rnd.nextDouble() + rnd.nextDouble(); // triangular distribution
+            double r = (u > 1.0 ? 2.0 - u : u) * radius;
+
+            int x = cx + (int) Math.round(Math.cos(t) * r);
+            int z = cz + (int) Math.round(Math.sin(t) * r);
+
+            if (x < 0 || x >= w || z < 0 || z >= h) continue;
+
+            GridPosition p = new GridPosition(x, y, z);
+            if (occupied.containsKey(p)) continue;
+
+            return p;
+        }
+
+        return null;
+    }
+
+    /**
+     * Attempts to place a vein at the given position, respecting whatever rules you already have.
+     * If your old code had checks (like isCellBuildable / not blocked / etc), keep them here.
+     */
+    private boolean tryPlaceVein(
+            MariaDBAdapter db,
+            Long pid,
+            Map<GridPosition, MatterColor> out,
+            GridPosition pos,
+            MatterColor color
+    ) {
+        // If you already have a "canSpawnVeinHere" or similar, call it here.
+        // For now we keep it minimal: avoid duplicates and persist the tile.
+
+        if (out.containsKey(pos)) return false;
+
+        out.put(pos, color);
+
+        // Persist to DB the same way you already do for veins.
+        // If your current code persists elsewhere (e.g. after generation), remove this insert.
+        // --- IMPORTANT ---
+        // If in your current implementation you don't write per-tile here, then DO NOT write now.
+        // Keep it consistent with existing flow.
+
+        return true;
+    }
+
+
 
     private int countColorInUnlocked(Map<GridPosition, MatterColor> out, MatterColor c, int y, GridManager.PlotAreaInfo info) {
         if (out == null || out.isEmpty() || c == null) return 0;
