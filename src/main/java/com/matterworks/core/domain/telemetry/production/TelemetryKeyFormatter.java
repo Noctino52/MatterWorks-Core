@@ -49,6 +49,21 @@ public final class TelemetryKeyFormatter {
         return key;
     }
 
+    /**
+     * True when a MATTER key actually represents a "color-only" payload.
+     * i.e. M:LIQUID:<COLOR>:NO_EFFECT
+     */
+    public static boolean isColorOnlyMatterKey(String key) {
+        if (key == null) return false;
+        if (!key.startsWith("M:")) return false;
+
+        String shape = safePart(key, 1);
+        String effects = safePart(key, 3);
+
+        boolean noEffects = (effects == null || effects.isBlank() || "NO_EFFECT".equalsIgnoreCase(effects));
+        return "LIQUID".equalsIgnoreCase(shape) && noEffects;
+    }
+
     public static KeyKind kindOf(String key) {
         if (key == null) return KeyKind.MATTER;
         if (key.startsWith("C:")) return KeyKind.COLOR;

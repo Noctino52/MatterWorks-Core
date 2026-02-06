@@ -695,7 +695,9 @@ public double getEffectiveMachineSpeedMultiplier(UUID ownerId, String machineTyp
                 .sorted((a, b) -> Double.compare(b.getMoneyEarned(), a.getMoneyEarned()))
                 .toList();
 
-        var soldMatters = snap.getSoldByMatterKey().entrySet().stream()
+        // 1) Prefer "real matters" (shape != null) i.e. not M:LIQUID:<COLOR>:NO_EFFECT
+        var soldMattersReal = snap.getSoldByMatterKey().entrySet().stream()
+                .filter(e -> !TelemetryKeyFormatter.isColorOnlyMatterKey(e.getKey()))
                 .map(e -> new ProductionStatLine(
                         KeyKind.MATTER,
                         e.getKey(),
@@ -706,6 +708,11 @@ public double getEffectiveMachineSpeedMultiplier(UUID ownerId, String machineTyp
                 .sorted((a, b) -> Double.compare(b.getMoneyEarned(), a.getMoneyEarned()))
                 .toList();
 
+        // 2) Fallback: if everything is being recorded as color-only, show soldColors instead
+        var soldForUi = !soldMattersReal.isEmpty()
+                ? soldMattersReal
+                : soldColors;
+
         return new ProductionStatsView(
                 window,
                 producedColors,
@@ -713,13 +720,15 @@ public double getEffectiveMachineSpeedMultiplier(UUID ownerId, String machineTyp
                 consumedColors,
                 consumedMatters,
                 soldColors,
-                soldMatters,
+                soldForUi,
                 snap.getTotalProduced(),
                 snap.getTotalConsumed(),
                 snap.getTotalSoldQuantity(),
                 snap.getTotalMoneyEarned()
         );
     }
+
+
 
     public boolean canPerformPrestige(UUID ownerId) {
         return economy.canPerformPrestige(ownerId);

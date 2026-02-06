@@ -155,7 +155,7 @@ public class ProductionPanel extends JPanel {
         wrap.add(Box.createVerticalStrut(10));
         wrap.add(buildTableCard("Consumed (Matters + Color-only)", consumedModel));
         wrap.add(Box.createVerticalStrut(10));
-        wrap.add(buildTableCard("Sold @ Nexus (Matters)", soldModel));
+        wrap.add(buildTableCard("Sold @ Nexus (Matters + Color-only)", soldModel));
         wrap.add(Box.createVerticalGlue());
 
         JScrollPane scroll = new JScrollPane(wrap);
