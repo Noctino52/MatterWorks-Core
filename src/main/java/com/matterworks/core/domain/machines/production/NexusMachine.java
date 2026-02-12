@@ -37,7 +37,7 @@ public class NexusMachine extends PlacedMachine {
     private transient double saleCooldownSeconds = -1.0;
 
     // Legacy constant: 10 ticks at 20 TPS => 0.5 seconds (2 sales/sec)
-    private static final int SALE_INTERVAL_TICKS = 10;
+    private static final int SALE_INTERVAL_TICKS = 5;
 
     public NexusMachine(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata) {
         super(dbId, ownerId, typeId, pos, metadata);
