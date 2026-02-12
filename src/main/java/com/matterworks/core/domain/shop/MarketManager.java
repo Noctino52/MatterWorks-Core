@@ -6,6 +6,7 @@ import com.matterworks.core.domain.matter.MatterColor;
 import com.matterworks.core.domain.matter.MatterPayload;
 import com.matterworks.core.domain.matter.MatterShape;
 import com.matterworks.core.domain.player.PlayerProfile;
+import com.matterworks.core.domain.telemetry.production.ProductionTelemetry;
 import com.matterworks.core.managers.GridManager;
 import com.matterworks.core.ui.MariaDBAdapter;
 import com.matterworks.core.ui.ServerConfig;
@@ -14,7 +15,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -58,7 +58,7 @@ public class MarketManager {
     private void initializePrices() {
         basePrices.put(MatterColor.RAW, 1.0);
 
-        // Primary colors: requested baseline = $3 for a simple cube/color
+        // Primary colors: baseline requested = $3 for a simple cube/color
         basePrices.put(MatterColor.RED, 3.0);
         basePrices.put(MatterColor.BLUE, 3.0);
         basePrices.put(MatterColor.YELLOW, 3.0);
@@ -167,6 +167,18 @@ public class MarketManager {
                 item.toString()
         );
 
+        // ==========================================================
+        // FIX: record "sold" telemetry so Production Panel -> Sold works
+        // ==========================================================
+        try {
+            ProductionTelemetry telemetry = gridManager.getProductionTelemetry();
+            if (telemetry != null) {
+                telemetry.recordSold(sellerId, item, 1L, value);
+            }
+        } catch (Throwable ignored) {
+            // Telemetry must never break the tick loop
+        }
+
         if (DEBUG_MARKET_LOG) {
             String ruleTxt = (appliedRule != null ? (" rule=" + appliedRule.id()) : " rule=(none)");
             System.out.println("[MARKET] sold=" + item + " base=" + String.format(Locale.US, "%.2f", calculateBaseValue(item))
@@ -234,13 +246,8 @@ public class MarketManager {
         }
 
         if (exact) {
-            // exact means all provided constraints must match AND the item must not have extra dimensions not in rule?
-            // We keep it simple: still require those constraints; ignore "extra" effects unless effect is specified.
-            boolean ok = mColor && mShape && mEffect;
-
-            // if rule specified effect: require exactly that effect set? optional behavior:
-            // keep CONTAINS semantics for effect list even in EXACT to avoid being too punishing.
-            return ok;
+            // exact means all provided constraints must match (we keep it simple)
+            return mColor && mShape && mEffect;
         }
 
         // CONTAINS semantics
@@ -288,9 +295,6 @@ public class MarketManager {
         int prestige = (p != null ? Math.max(0, p.getPrestigeLevel()) : 0);
         if (prestige <= 0) return value;
 
-        // ServerConfig is cached by repository (expected). Even if it hits DB, it's not in Nexus tick thread
-        // because sellItem is called on tick thread; but here we still use repository.loadServerConfig().
-        // If you ever move this to DB, consider caching the config in GridManager / runtime state.
         ServerConfig cfg = null;
         try { cfg = repository.loadServerConfig(); } catch (Throwable ignored) {}
 
