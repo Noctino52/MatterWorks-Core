@@ -3,6 +3,7 @@ package com.matterworks.core.domain.shop;
 import com.matterworks.core.domain.factions.FactionDefinition;
 import com.matterworks.core.domain.factions.FactionPricingRule;
 import com.matterworks.core.domain.matter.MatterColor;
+import com.matterworks.core.domain.matter.MatterEffect;
 import com.matterworks.core.domain.matter.MatterPayload;
 import com.matterworks.core.domain.matter.MatterShape;
 import com.matterworks.core.domain.player.PlayerProfile;
@@ -11,7 +12,7 @@ import com.matterworks.core.managers.GridManager;
 import com.matterworks.core.ui.MariaDBAdapter;
 import com.matterworks.core.ui.ServerConfig;
 
-import java.util.HashMap;
+import java.util.EnumMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -28,8 +29,8 @@ public class MarketManager {
 
     private static final boolean DEBUG_MARKET_LOG = false;
 
-    private static final long FACTION_CACHE_TTL_MS = 30_000L; // 30s
-    private static final long FACTION_CACHE_FAIL_BACKOFF_MS = 5_000L; // avoid retry spam on DB issues
+    private static final long CACHE_TTL_MS = 30_000L;          // 30s
+    private static final long CACHE_FAIL_BACKOFF_MS = 5_000L;  // avoid retry spam on DB issues
 
     private static final double MIN_SELL_MULT = 0.10;
     private static final double MAX_SELL_MULT = 10.0;
@@ -37,8 +38,6 @@ public class MarketManager {
     private final GridManager gridManager;
     private final MariaDBAdapter repository;
     private final ExecutorService ioExecutor;
-
-    private final Map<MatterColor, Double> basePrices = new HashMap<>();
 
     private final AtomicReference<Cache> cacheRef = new AtomicReference<>(Cache.empty());
     private final AtomicBoolean refreshInFlight = new AtomicBoolean(false);
@@ -49,36 +48,19 @@ public class MarketManager {
         this.repository = repository;
         this.ioExecutor = ioExecutor;
 
-        initializePrices();
-
         // Kick an initial async refresh (non-blocking)
-        maybeTriggerFactionCacheRefreshAsync(System.currentTimeMillis(), true);
-    }
-
-    private void initializePrices() {
-        basePrices.put(MatterColor.RAW, 1.0);
-
-        // Primary colors: baseline requested = $3 for a simple cube/color
-        basePrices.put(MatterColor.RED, 3.0);
-        basePrices.put(MatterColor.BLUE, 3.0);
-        basePrices.put(MatterColor.YELLOW, 3.0);
-
-        // Secondary / advanced colors keep higher value
-        basePrices.put(MatterColor.PURPLE, 25.0);
-        basePrices.put(MatterColor.ORANGE, 25.0);
-        basePrices.put(MatterColor.GREEN, 25.0);
-        basePrices.put(MatterColor.WHITE, 100.0);
+        maybeTriggerCacheRefreshAsync(System.currentTimeMillis(), true);
     }
 
     // ==========================================================
-    // ASYNC FACTION CACHE REFRESH (DB OUTSIDE TICK THREAD)
+    // ASYNC CACHE REFRESH (DB OUTSIDE TICK THREAD)
     // ==========================================================
 
-    private void maybeTriggerFactionCacheRefreshAsync(long nowMs, boolean force) {
+    private void maybeTriggerCacheRefreshAsync(long nowMs, boolean force) {
         if (nowMs < nextRefreshAttemptAtMs) return;
 
         Cache current = cacheRef.get();
-        boolean expired = (nowMs - current.loadedAtMs) > FACTION_CACHE_TTL_MS;
+        boolean expired = (nowMs - current.loadedAtMs) > CACHE_TTL_MS;
 
         if (!force && !expired) return;
 
@@ -86,6 +68,7 @@ public class MarketManager {
 
         ioExecutor.submit(() -> {
             try {
+                // ---------- Faction ----------
                 int activeFactionId = 1;
                 try { activeFactionId = Math.max(1, repository.getActiveFactionId()); }
                 catch (Throwable ignored) {}
@@ -100,23 +83,49 @@ public class MarketManager {
 
                 FactionDefinition activeFaction = findFactionById(activeFactionId, factions);
 
+                // ---------- Matter pricing (DB-driven, composable) ----------
+                Map<MatterShape, Double> shapeDb = Map.of();
+                Map<MatterColor, Double> colorDb = Map.of();
+                Map<MatterEffect, Double> effectDb = Map.of();
+
+                try { shapeDb = repository.loadMatterShapeBasePrices(); } catch (Throwable ignored) {}
+                try { colorDb = repository.loadMatterColorBasePrices(); } catch (Throwable ignored) {}
+                try { effectDb = repository.loadMatterEffectBasePrices(); } catch (Throwable ignored) {}
+
+                Map<MatterShape, Double> shapeMerged = mergeEnumMap(defaultShapePrices(), shapeDb, MatterShape.class);
+                Map<MatterColor, Double> colorMerged = mergeEnumMap(defaultColorPrices(), colorDb, MatterColor.class);
+                Map<MatterEffect, Double> effectMerged = mergeEnumMap(defaultEffectPrices(), effectDb, MatterEffect.class);
+
                 Cache updated = new Cache(
                         nowMs,
                         activeFactionId,
                         activeFaction,
-                        (rules != null ? rules : List.of())
+                        (rules != null ? rules : List.of()),
+                        shapeMerged,
+                        colorMerged,
+                        effectMerged
                 );
 
                 cacheRef.set(updated);
-                nextRefreshAttemptAtMs = nowMs + FACTION_CACHE_TTL_MS;
+                nextRefreshAttemptAtMs = nowMs + CACHE_TTL_MS;
 
             } catch (Throwable t) {
-                // Backoff on failure
-                nextRefreshAttemptAtMs = System.currentTimeMillis() + FACTION_CACHE_FAIL_BACKOFF_MS;
+                nextRefreshAttemptAtMs = System.currentTimeMillis() + CACHE_FAIL_BACKOFF_MS;
             } finally {
                 refreshInFlight.set(false);
             }
         });
+    }
+
+    private static <E extends Enum<E>> Map<E, Double> mergeEnumMap(
+            Map<E, Double> base,
+            Map<E, Double> override,
+            Class<E> enumType
+    ) {
+        EnumMap<E, Double> out = new EnumMap<>(enumType);
+        if (base != null) out.putAll(base);
+        if (override != null) out.putAll(override);
+        return out;
     }
 
     private FactionDefinition findFactionById(int id, List<FactionDefinition> all) {
@@ -136,59 +145,49 @@ public class MarketManager {
         if (item == null || sellerId == null) return 0.0;
 
         long nowMs = System.currentTimeMillis();
-        maybeTriggerFactionCacheRefreshAsync(nowMs, false);
+        maybeTriggerCacheRefreshAsync(nowMs, false);
 
         Cache cache = cacheRef.get();
 
-        double value = calculateBaseValue(item);
+        double baseValue = calculateBaseValue(item, cache);
+        double value = baseValue;
 
-        // 0) faction multiplier (cached)
+        // Read config flags (cached in GridRuntimeState, DB-backed)
+        ServerConfig cfg = null;
+        try { cfg = gridManager.getServerConfig(); } catch (Throwable ignored) {}
+        boolean enableFaction = (cfg == null) || cfg.enableFactionPriceMultiplier();
+        boolean enablePrestige = (cfg == null) || cfg.enablePrestigeSellMultiplier();
+
+        // 1) faction multiplier (optional)
         FactionPricingRule appliedRule = null;
         double factionMult = 1.0;
-        try {
-            appliedRule = findBestMatchingRule(item, cache.rulesForActiveFaction);
-            factionMult = (appliedRule != null ? appliedRule.multiplier() : 1.0);
-        } catch (Throwable ignored) {}
 
-        factionMult = sanitizeMultiplier(factionMult);
-        value = value * factionMult;
+        if (enableFaction) {
+            try {
+                appliedRule = findBestMatchingRule(item, cache.rulesForActiveFaction);
+                factionMult = (appliedRule != null ? appliedRule.multiplier() : 1.0);
+            } catch (Throwable ignored) {}
+            factionMult = sanitizeMultiplier(factionMult);
+            value = value * factionMult;
+        }
 
-        // 1) prestige multiplier (cached config)
-        value = applyPrestigeSellMultiplier(value, sellerId);
+        // 2) prestige multiplier (optional)
+        if (enablePrestige) {
+            value = applyPrestigeSellMultiplier(value, sellerId);
+        }
 
-        // 2) nexus tech multiplier
-        value = applyNexusTechSellMultiplier(value, sellerId);
+        // NO NEXUS tier boost (explicitly excluded)
 
-        // Money + transaction handled by GridEconomyService async
-        gridManager.addMoney(
-                sellerId,
-                value,
-                "MATTER_SELL",
-                item.toString()
-        );
+        gridManager.addMoney(sellerId, value, "MATTER_SELL", item.toString());
 
-        // ==========================================================
-        // FIX: record "sold" telemetry so Production Panel -> Sold works
-        // ==========================================================
         try {
             ProductionTelemetry telemetry = gridManager.getProductionTelemetry();
-            if (telemetry != null) {
-                telemetry.recordSold(sellerId, item, 1L, value);
-            }
-        } catch (Throwable ignored) {
-            // Telemetry must never break the tick loop
-        }
-
-        if (DEBUG_MARKET_LOG) {
-            String ruleTxt = (appliedRule != null ? (" rule=" + appliedRule.id()) : " rule=(none)");
-            System.out.println("[MARKET] sold=" + item + " base=" + String.format(Locale.US, "%.2f", calculateBaseValue(item))
-                    + " factionMult=" + String.format(Locale.US, "%.3f", factionMult)
-                    + " final=" + String.format(Locale.US, "%.2f", value)
-                    + ruleTxt);
-        }
+            if (telemetry != null) telemetry.recordSold(sellerId, item, 1L, value);
+        } catch (Throwable ignored) {}
 
         return value;
     }
+
 
     // ==========================================================
     // PRICING RULES (FACTIONS)
@@ -224,13 +223,10 @@ public class MarketManager {
     private boolean matchesRule(MatterPayload item, FactionPricingRule r) {
         if (item == null || r == null) return false;
 
-        // rule has optional fields: color, shape, effect
         MatterColor rc = r.color();
         MatterShape rs = r.shape();
-
         boolean hasEffect = (r.effect() != null);
 
-        // Match type and combine mode
         String matchType = (r.matchType() != null ? r.matchType().name() : "CONTAINS");
         String combineMode = (r.combineMode() != null ? r.combineMode().name() : "ALL");
 
@@ -246,16 +242,13 @@ public class MarketManager {
         }
 
         if (exact) {
-            // exact means all provided constraints must match (we keep it simple)
             return mColor && mShape && mEffect;
         }
 
-        // CONTAINS semantics
         if (any) {
             return mColor || mShape || mEffect;
         }
 
-        // ALL (default)
         return mColor && mShape && mEffect;
     }
 
@@ -267,21 +260,40 @@ public class MarketManager {
     }
 
     // ==========================================================
-    // BASE VALUE (COLOR + SHAPE + COMPLEXITY)
+    // BASE VALUE (DB-DRIVEN, COMPOSABLE)
+    // base = shapePrice + colorPrice + sum(effectPrices)
     // ==========================================================
 
-    private double calculateBaseValue(MatterPayload item) {
-        double base = basePrices.getOrDefault(item.color(), 0.5);
+    private double calculateBaseValue(MatterPayload item, Cache cache) {
+        if (item == null) return 0.0;
 
-        double multiplier = 1.0;
         MatterShape shape = item.shape();
+        MatterColor color = item.color();
+        List<MatterEffect> effects = item.effects();
 
-        if (shape == MatterShape.SPHERE) multiplier = 1.5;
-        else if (shape == MatterShape.PYRAMID) multiplier = 2.0;
+        double shapeV = 0.0;
+        if (shape != null) {
+            shapeV = cache.shapeBasePrices.getOrDefault(shape, 0.0);
+        }
 
-        if (item.isComplex()) multiplier *= 1.2;
+        double colorV = 0.0;
+        if (color != null) {
+            // default fallback if color missing in DB
+            colorV = cache.colorBasePrices.getOrDefault(color, 0.5);
+        }
 
-        return base * multiplier;
+        double effectsV = 0.0;
+        if (effects != null && !effects.isEmpty()) {
+            for (MatterEffect e : effects) {
+                if (e == null) continue;
+                effectsV += cache.effectBasePrices.getOrDefault(e, 0.0);
+            }
+        }
+
+        double base = shapeV + colorV + effectsV;
+        if (Double.isNaN(base) || Double.isInfinite(base) || base < 0.0) return 0.0;
+
+        return base;
     }
 
     // ==========================================================
@@ -328,24 +340,89 @@ public class MarketManager {
     }
 
     // ==========================================================
+    // DEFAULTS (SAFE FALLBACKS)
+    // ==========================================================
+
+    private static Map<MatterShape, Double> defaultShapePrices() {
+        EnumMap<MatterShape, Double> m = new EnumMap<>(MatterShape.class);
+        // Keep cube at 0 so "cube primary" stays exactly 3 if color is 3
+        m.put(MatterShape.CUBE, 0.0);
+        m.put(MatterShape.SPHERE, 0.5);
+        m.put(MatterShape.PYRAMID, 1.0);
+        return m;
+    }
+
+    private static Map<MatterColor, Double> defaultColorPrices() {
+        EnumMap<MatterColor, Double> m = new EnumMap<>(MatterColor.class);
+
+        m.put(MatterColor.RAW, 1.0);
+
+        // Primary colors: baseline requested = $3 for a simple cube/color
+        m.put(MatterColor.RED, 3.0);
+        m.put(MatterColor.BLUE, 3.0);
+        m.put(MatterColor.YELLOW, 3.0);
+
+        // Secondary / advanced colors
+        m.put(MatterColor.PURPLE, 25.0);
+        m.put(MatterColor.ORANGE, 25.0);
+        m.put(MatterColor.GREEN, 25.0);
+        m.put(MatterColor.WHITE, 100.0);
+
+        return m;
+    }
+
+    private static Map<MatterEffect, Double> defaultEffectPrices() {
+        EnumMap<MatterEffect, Double> m = new EnumMap<>(MatterEffect.class);
+        // Placeholder defaults until DB is populated
+        m.put(MatterEffect.SHINY, 15.0);
+        m.put(MatterEffect.BLAZING, 20.0);
+        m.put(MatterEffect.GLITCH, 30.0);
+        return m;
+    }
+
+    // ==========================================================
     // CACHE STRUCT
     // ==========================================================
 
     private static final class Cache {
         final long loadedAtMs;
+
         final int activeFactionId;
         final FactionDefinition activeFaction;
         final List<FactionPricingRule> rulesForActiveFaction;
 
-        Cache(long loadedAtMs, int activeFactionId, FactionDefinition activeFaction, List<FactionPricingRule> rules) {
+        final Map<MatterShape, Double> shapeBasePrices;
+        final Map<MatterColor, Double> colorBasePrices;
+        final Map<MatterEffect, Double> effectBasePrices;
+
+        Cache(
+                long loadedAtMs,
+                int activeFactionId,
+                FactionDefinition activeFaction,
+                List<FactionPricingRule> rules,
+                Map<MatterShape, Double> shapeBasePrices,
+                Map<MatterColor, Double> colorBasePrices,
+                Map<MatterEffect, Double> effectBasePrices
+        ) {
             this.loadedAtMs = loadedAtMs;
             this.activeFactionId = activeFactionId;
             this.activeFaction = activeFaction;
             this.rulesForActiveFaction = (rules != null ? rules : List.of());
+            this.shapeBasePrices = (shapeBasePrices != null ? shapeBasePrices : defaultShapePrices());
+            this.colorBasePrices = (colorBasePrices != null ? colorBasePrices : defaultColorPrices());
+            this.effectBasePrices = (effectBasePrices != null ? effectBasePrices : defaultEffectPrices());
         }
 
         static Cache empty() {
-            return new Cache(0L, 1, null, List.of());
+            return new Cache(
+                    0L,
+                    1,
+                    null,
+                    List.of(),
+                    defaultShapePrices(),
+                    defaultColorPrices(),
+                    defaultEffectPrices()
+            );
         }
     }
 }

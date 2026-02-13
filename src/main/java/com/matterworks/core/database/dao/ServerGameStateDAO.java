@@ -217,7 +217,7 @@ public class ServerGameStateDAO {
 
         // defaults "safe"
         double playerStartMoney = 1000.0;
-        int plotStartVeinClusterRadiusPct = 18; // default = 18%
+        int plotStartVeinClusterRadiusPct = 18;
         int veinRaw = 3, veinRed = 1, veinBlue = 1, veinYellow = 0;
         double sosThreshold = 500.0;
         int maxInventoryMachine = 64;
@@ -226,13 +226,11 @@ public class ServerGameStateDAO {
         int plotMaxX = 50, plotMaxY = 50;
         int plotIncreaseX = 2, plotIncreaseY = 2;
 
-        // NEW: starting veins defaults (keep old hardcoded behavior as fallback)
         int plotStartVeinRaw = 2;
         int plotStartVeinRed = 1;
         int plotStartVeinBlue = 1;
         int plotStartVeinYellow = 1;
 
-        // NEW: vertical cap defaults
         int plotHeightStart = 4;
         int plotHeightMax = 256;
         int plotHeightIncreasePerPrestige = 1;
@@ -241,15 +239,18 @@ public class ServerGameStateDAO {
         int prestigePlotBonus = 0;
         double prestigeSellK = 0.0;
 
-        // NEW defaults (prestige action fee)
         double prestigeActionCostBase = 0.0;
         double prestigeActionCostMult = 0.0;
+
+        // NEW defaults (enabled)
+        boolean enableFactionPriceMultiplier = true;
+        boolean enablePrestigeSellMultiplier = true;
+        boolean enableVoidShopBoosters = true;
 
         try (Connection conn = db.getConnection()) {
 
             boolean hasMaxInv = SqlCompat.columnExists(conn, "server_gamestate", "max_inventory_machine");
 
-            // plot columns: legacy + snake_case
             String colStartVeinClusterPct = SqlCompat.firstExistingColumn(conn, "server_gamestate",
                     "plot_start_vein_cluster_radius_pct", "Plot_Start_Vein_Cluster_Radius_Pct", "plotStartVeinClusterRadiusPct");
 
@@ -266,7 +267,6 @@ public class ServerGameStateDAO {
             String colPlotIncY = SqlCompat.firstExistingColumn(conn, "server_gamestate",
                     "plot_increase_y", "Plot_IncreaseY", "Plot_Increase_Y", "plot_increasey");
 
-            // NEW: starting veins columns
             String colStartVeinRaw = SqlCompat.firstExistingColumn(conn, "server_gamestate",
                     "plot_start_vein_raw", "Plot_Start_Vein_Raw", "plotStartVeinRaw");
             String colStartVeinRed = SqlCompat.firstExistingColumn(conn, "server_gamestate",
@@ -276,7 +276,6 @@ public class ServerGameStateDAO {
             String colStartVeinYellow = SqlCompat.firstExistingColumn(conn, "server_gamestate",
                     "plot_start_vein_yellow", "Plot_Start_Vein_Yellow", "plotStartVeinYellow");
 
-            // NEW: height columns (Y+ cap)
             String colPlotHStart = SqlCompat.firstExistingColumn(conn, "server_gamestate",
                     "plot_height_start", "Plot_Height_Start", "plotHeightStart");
             String colPlotHMax = SqlCompat.firstExistingColumn(conn, "server_gamestate",
@@ -284,14 +283,20 @@ public class ServerGameStateDAO {
             String colPlotHInc = SqlCompat.firstExistingColumn(conn, "server_gamestate",
                     "plot_height_increase_per_prestige", "Plot_Height_Increase_Per_Prestige", "plotHeightIncreasePerPrestige");
 
-            // prestige columns
             String colPrestigeVoid = SqlCompat.firstExistingColumn(conn, "server_gamestate", "prestige_void_coins_add");
             String colPrestigePlotBonus = SqlCompat.firstExistingColumn(conn, "server_gamestate", "prestige_plotbonus", "prestige_plot_bonus");
             String colPrestigeSellK = SqlCompat.firstExistingColumn(conn, "server_gamestate", "prestige_sell_k");
 
-            // prestige action fee columns
             String colPrestigeActionBase = SqlCompat.firstExistingColumn(conn, "server_gamestate", "prestige_action_cost_base");
             String colPrestigeActionMult = SqlCompat.firstExistingColumn(conn, "server_gamestate", "prestige_action_cost_mult");
+
+            // NEW: economy debug toggles
+            String colEnableFaction = SqlCompat.firstExistingColumn(conn, "server_gamestate",
+                    "enable_faction_price_multiplier");
+            String colEnablePrestige = SqlCompat.firstExistingColumn(conn, "server_gamestate",
+                    "enable_prestige_sell_multiplier");
+            String colEnableVoidBoosters = SqlCompat.firstExistingColumn(conn, "server_gamestate",
+                    "enable_voidshop_boosters");
 
             StringBuilder sql = new StringBuilder();
             sql.append("SELECT ")
@@ -300,7 +305,6 @@ public class ServerGameStateDAO {
             if (hasMaxInv) sql.append(", max_inventory_machine");
 
             if (colStartVeinClusterPct != null) sql.append(", ").append(colStartVeinClusterPct).append(" AS plot_start_vein_cluster_radius_pct");
-
 
             if (colPlotStartX != null) sql.append(", ").append(colPlotStartX).append(" AS plot_start_x");
             if (colPlotStartY != null) sql.append(", ").append(colPlotStartY).append(" AS plot_start_y");
@@ -316,14 +320,18 @@ public class ServerGameStateDAO {
 
             if (colPlotHStart != null) sql.append(", ").append(colPlotHStart).append(" AS plot_height_start");
             if (colPlotHMax != null) sql.append(", ").append(colPlotHMax).append(" AS plot_height_max");
-            if (colPlotHInc != null) sql.append(", ").append(colPlotHInc).append(" AS plot_height_inc");
+            if (colPlotHInc != null) sql.append(", ").append(colPlotHInc).append(" AS plot_height_inc_per_prestige");
 
             if (colPrestigeVoid != null) sql.append(", ").append(colPrestigeVoid).append(" AS prestige_void_coins_add");
-            if (colPrestigePlotBonus != null) sql.append(", ").append(colPrestigePlotBonus).append(" AS prestige_plotbonus");
+            if (colPrestigePlotBonus != null) sql.append(", ").append(colPrestigePlotBonus).append(" AS prestige_plot_bonus");
             if (colPrestigeSellK != null) sql.append(", ").append(colPrestigeSellK).append(" AS prestige_sell_k");
 
             if (colPrestigeActionBase != null) sql.append(", ").append(colPrestigeActionBase).append(" AS prestige_action_cost_base");
             if (colPrestigeActionMult != null) sql.append(", ").append(colPrestigeActionMult).append(" AS prestige_action_cost_mult");
+
+            if (colEnableFaction != null) sql.append(", ").append(colEnableFaction).append(" AS enable_faction_price_multiplier");
+            if (colEnablePrestige != null) sql.append(", ").append(colEnablePrestige).append(" AS enable_prestige_sell_multiplier");
+            if (colEnableVoidBoosters != null) sql.append(", ").append(colEnableVoidBoosters).append(" AS enable_voidshop_boosters");
 
             sql.append(" FROM server_gamestate WHERE id = 1");
 
@@ -338,43 +346,42 @@ public class ServerGameStateDAO {
                     veinYellow = rs.getInt("vein_yellow");
                     sosThreshold = rs.getDouble("sos_threshold");
 
-                    if (hasMaxInv) maxInventoryMachine = Math.max(1, rs.getInt("max_inventory_machine"));
+                    if (hasMaxInv) maxInventoryMachine = rs.getInt("max_inventory_machine");
 
-                    if (colPlotStartX != null) plotStartingX = Math.max(1, rs.getInt("plot_start_x"));
-                    if (colPlotStartY != null) plotStartingY = Math.max(1, rs.getInt("plot_start_y"));
-                    if (colPlotMaxX != null) plotMaxX = Math.max(plotStartingX, rs.getInt("plot_max_x"));
-                    if (colPlotMaxY != null) plotMaxY = Math.max(plotStartingY, rs.getInt("plot_max_y"));
-                    if (colPlotIncX != null) plotIncreaseX = Math.max(1, rs.getInt("plot_inc_x"));
-                    if (colPlotIncY != null) plotIncreaseY = Math.max(1, rs.getInt("plot_inc_y"));
+                    if (colStartVeinClusterPct != null) plotStartVeinClusterRadiusPct = rs.getInt("plot_start_vein_cluster_radius_pct");
 
-                    // NEW: starting veins values
-                    if (colStartVeinRaw != null) plotStartVeinRaw = Math.max(0, rs.getInt("plot_start_vein_raw"));
-                    if (colStartVeinRed != null) plotStartVeinRed = Math.max(0, rs.getInt("plot_start_vein_red"));
-                    if (colStartVeinBlue != null) plotStartVeinBlue = Math.max(0, rs.getInt("plot_start_vein_blue"));
-                    if (colStartVeinYellow != null) plotStartVeinYellow = Math.max(0, rs.getInt("plot_start_vein_yellow"));
+                    if (colPlotStartX != null) plotStartingX = rs.getInt("plot_start_x");
+                    if (colPlotStartY != null) plotStartingY = rs.getInt("plot_start_y");
+                    if (colPlotMaxX != null) plotMaxX = rs.getInt("plot_max_x");
+                    if (colPlotMaxY != null) plotMaxY = rs.getInt("plot_max_y");
+                    if (colPlotIncX != null) plotIncreaseX = rs.getInt("plot_inc_x");
+                    if (colPlotIncY != null) plotIncreaseY = rs.getInt("plot_inc_y");
 
-                    if (colStartVeinClusterPct != null) {
-                        plotStartVeinClusterRadiusPct = rs.getInt("plot_start_vein_cluster_radius_pct");
-                        // clamp safety: 0..50 (0 = centro preciso, 50 = metà lato)
-                        plotStartVeinClusterRadiusPct = Math.max(0, Math.min(50, plotStartVeinClusterRadiusPct));
-                    }
+                    if (colStartVeinRaw != null) plotStartVeinRaw = rs.getInt("plot_start_vein_raw");
+                    if (colStartVeinRed != null) plotStartVeinRed = rs.getInt("plot_start_vein_red");
+                    if (colStartVeinBlue != null) plotStartVeinBlue = rs.getInt("plot_start_vein_blue");
+                    if (colStartVeinYellow != null) plotStartVeinYellow = rs.getInt("plot_start_vein_yellow");
 
+                    if (colPlotHStart != null) plotHeightStart = rs.getInt("plot_height_start");
+                    if (colPlotHMax != null) plotHeightMax = rs.getInt("plot_height_max");
+                    if (colPlotHInc != null) plotHeightIncreasePerPrestige = rs.getInt("plot_height_inc_per_prestige");
 
-                    // NEW: height values
-                    if (colPlotHStart != null) plotHeightStart = Math.max(1, rs.getInt("plot_height_start"));
-                    if (colPlotHMax != null) plotHeightMax = Math.max(plotHeightStart, rs.getInt("plot_height_max"));
-                    if (colPlotHInc != null) plotHeightIncreasePerPrestige = Math.max(0, rs.getInt("plot_height_inc"));
+                    if (colPrestigeVoid != null) prestigeVoidCoinsAdd = rs.getInt("prestige_void_coins_add");
+                    if (colPrestigePlotBonus != null) prestigePlotBonus = rs.getInt("prestige_plot_bonus");
+                    if (colPrestigeSellK != null) prestigeSellK = rs.getDouble("prestige_sell_k");
 
-                    if (colPrestigeVoid != null) prestigeVoidCoinsAdd = Math.max(0, rs.getInt("prestige_void_coins_add"));
-                    if (colPrestigePlotBonus != null) prestigePlotBonus = Math.max(0, rs.getInt("prestige_plotbonus"));
-                    if (colPrestigeSellK != null) prestigeSellK = Math.max(0.0, rs.getDouble("prestige_sell_k"));
+                    if (colPrestigeActionBase != null) prestigeActionCostBase = rs.getDouble("prestige_action_cost_base");
+                    if (colPrestigeActionMult != null) prestigeActionCostMult = rs.getDouble("prestige_action_cost_mult");
 
-                    if (colPrestigeActionBase != null) prestigeActionCostBase = Math.max(0.0, rs.getDouble("prestige_action_cost_base"));
-                    if (colPrestigeActionMult != null) prestigeActionCostMult = Math.max(0.0, rs.getDouble("prestige_action_cost_mult"));
+                    if (colEnableFaction != null) enableFactionPriceMultiplier = rs.getInt("enable_faction_price_multiplier") != 0;
+                    if (colEnablePrestige != null) enablePrestigeSellMultiplier = rs.getInt("enable_prestige_sell_multiplier") != 0;
+                    if (colEnableVoidBoosters != null) enableVoidShopBoosters = rs.getInt("enable_voidshop_boosters") != 0;
                 }
             }
 
-        } catch (SQLException ignored) {}
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
 
         return new ServerConfig(
                 playerStartMoney,
@@ -386,18 +393,21 @@ public class ServerGameStateDAO {
                 plotMaxX, plotMaxY,
                 plotIncreaseX, plotIncreaseY,
 
-                plotStartVeinRaw, plotStartVeinRed, plotStartVeinBlue, plotStartVeinYellow,plotStartVeinClusterRadiusPct,
+                plotStartVeinRaw, plotStartVeinRed, plotStartVeinBlue, plotStartVeinYellow,
+                plotStartVeinClusterRadiusPct,
 
-                plotHeightStart,
-                plotHeightMax,
-                plotHeightIncreasePerPrestige,
+                plotHeightStart, plotHeightMax, plotHeightIncreasePerPrestige,
 
                 prestigeVoidCoinsAdd,
                 prestigePlotBonus,
                 prestigeSellK,
 
                 prestigeActionCostBase,
-                prestigeActionCostMult
+                prestigeActionCostMult,
+
+                enableFactionPriceMultiplier,
+                enablePrestigeSellMultiplier,
+                enableVoidShopBoosters
         );
     }
 

@@ -21,7 +21,6 @@ public record ServerConfig(
         int plotStartVeinBlue,
         int plotStartVeinYellow,
 
-        // NEW: cluster radius for starting veins (percentage of starting square side)
         int plotStartVeinClusterRadiusPct,
 
         int plotHeightStart,
@@ -33,7 +32,12 @@ public record ServerConfig(
         double prestigeSellK,
 
         double prestigeActionCostBase,
-        double prestigeActionCostMult
+        double prestigeActionCostMult,
+
+        // NEW: economy debug toggles (server_gamestate)
+        boolean enableFactionPriceMultiplier,
+        boolean enablePrestigeSellMultiplier,
+        boolean enableVoidShopBoosters
 ) {
     public double startMoney() {
         return playerStartMoney;

@@ -516,10 +516,24 @@ public class GridManager {
         var p = state.getCachedProfile(ownerId);
         if (p == null) return 1.0;
 
-        long playtime = state.getPlaytimeSecondsCached(ownerId);
-        double ocPlayer = p.getActiveOverclockMultiplier(playtime);
+        // NEW: server toggle to disable VoidShop boosters (personal + global)
+        boolean enableBoosters = true;
+        try {
+            ServerConfig cfg = state.getServerConfig();
+            if (cfg != null) enableBoosters = cfg.enableVoidShopBoosters();
+        } catch (Throwable ignored) {
+            enableBoosters = true;
+        }
 
-        double ocGlobal = getGlobalOverclockMultiplierNow();
+        long playtime = state.getPlaytimeSecondsCached(ownerId);
+
+        double ocPlayer = 1.0;
+        double ocGlobal = 1.0;
+
+        if (enableBoosters) {
+            ocPlayer = p.getActiveOverclockMultiplier(playtime);
+            ocGlobal = getGlobalOverclockMultiplierNow();
+        }
 
         double out = ocPlayer * ocGlobal;
         if (Double.isNaN(out) || Double.isInfinite(out) || out <= 0.0) out = 1.0;
@@ -534,6 +548,7 @@ public class GridManager {
         psc.byType.put(machineTypeId, new SpeedEntry(out, validUntil));
         return out;
     }
+
     // ==========================================================
 // EFFECTIVE MACHINE PROCESS TICKS (DB-driven by tier)
 // - Returns base ticks from DB for the player's unlocked tier.

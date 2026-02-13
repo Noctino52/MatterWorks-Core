@@ -7,12 +7,13 @@ import com.matterworks.core.domain.factions.FactionDefinition;
 import com.matterworks.core.domain.factions.FactionPricingRule;
 import com.matterworks.core.domain.machines.base.PlacedMachine;
 import com.matterworks.core.domain.matter.MatterColor;
+import com.matterworks.core.domain.matter.MatterEffect;
+import com.matterworks.core.domain.matter.MatterShape;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.domain.shop.VoidShopItem;
 import com.matterworks.core.model.PlotObject;
 import com.matterworks.core.model.PlotUnlockState;
 
-import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -34,8 +35,11 @@ public class MariaDBAdapter {
     private final PlotMaintenanceDAO plotMaintenanceDAO;
     private final VoidShopPurchaseDAO voidShopPurchaseDAO;
 
-    // NEW: factions
+    // factions
     private final FactionDAO factionDAO;
+
+    // NEW: matter pricing (shape/color/effect)
+    private final MatterPricingDAO matterPricingDAO;
 
     public MariaDBAdapter(DatabaseManager dbManager) {
         this.dbManager = dbManager;
@@ -54,6 +58,9 @@ public class MariaDBAdapter {
         this.voidShopPurchaseDAO = new VoidShopPurchaseDAO(dbManager);
 
         this.factionDAO = new FactionDAO(dbManager);
+
+        // NEW
+        this.matterPricingDAO = new MatterPricingDAO(dbManager);
     }
 
     // --- Extra ---
@@ -64,6 +71,24 @@ public class MariaDBAdapter {
     public DatabaseManager getDbManager() { return dbManager; }
 
     public TechDefinitionDAO getTechDefinitionDAO() { return techDefinitionDAO; }
+
+    // ==========================================================
+    // MATTER PRICING (DATA-DRIVEN)
+    // ==========================================================
+    public Map<MatterShape, Double> loadMatterShapeBasePrices() {
+        try { return matterPricingDAO.loadShapeBasePrices(); }
+        catch (Throwable t) { return Map.of(); }
+    }
+
+    public Map<MatterColor, Double> loadMatterColorBasePrices() {
+        try { return matterPricingDAO.loadColorBasePrices(); }
+        catch (Throwable t) { return Map.of(); }
+    }
+
+    public Map<MatterEffect, Double> loadMatterEffectBasePrices() {
+        try { return matterPricingDAO.loadEffectBasePrices(); }
+        catch (Throwable t) { return Map.of(); }
+    }
 
     // ==========================================================
     // FACTIONS (DATA-DRIVEN)
@@ -97,8 +122,11 @@ public class MariaDBAdapter {
     }
 
     public VoidShopItem loadVoidShopItem(String itemId) {
-        if (itemId == null || itemId.isBlank()) return null;
-        try { return voidShopDAO.loadById(itemId); }
+        if (itemId == null) return null;
+        String v = itemId.trim();
+        if (v.isEmpty()) return null;
+
+        try { return voidShopDAO.loadById(v); }
         catch (Throwable t) { return null; }
     }
 
@@ -161,10 +189,6 @@ public class MariaDBAdapter {
     public void setGlobalOverclockState(long endEpochMs, double multiplier, long lastDurationSeconds) {
         serverGameStateDAO.setGlobalOverclockState(endEpochMs, multiplier, lastDurationSeconds);
     }
-
-    // ==========================================================
-    // TRANSACTIONS
-    // ==========================================================
 
     // ==========================================================
     // CONFIG
@@ -258,8 +282,8 @@ public class MariaDBAdapter {
     }
 
     // ==========================================================
-// TRANSACTIONS
-// ==========================================================
+    // TRANSACTIONS
+    // ==========================================================
     public void logTransaction(PlayerProfile player, String actionType, String currency, double amount, String itemId) {
         logTransaction(player, actionType, currency, amount, itemId, null, null);
     }
@@ -278,8 +302,6 @@ public class MariaDBAdapter {
 
         transactionDAO.logTransaction(player, actionType, currency, bdAmount, itemId, factionId, bdValue);
     }
-
-
 
     // ==========================================================
     // PLOT UNLOCK
