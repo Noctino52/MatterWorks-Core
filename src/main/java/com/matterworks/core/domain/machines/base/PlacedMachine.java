@@ -24,11 +24,16 @@ public abstract class PlacedMachine implements IGridComponent {
     protected GridManager gridManager;
     protected boolean isDirty = false;
 
-    // Speed multiplier cache (hot path: belts/logistics call scheduleAfter a lot)
-    // Use time-based TTL to keep method signatures backward compatible.
+    // Speed multiplier cache (overclock-only after tier-driven ticks)
     private transient long speedCacheValidUntilMs = 0L;
     private transient double speedCacheMultiplier = 1.0;
-    private static final long SPEED_CACHE_TTL_MS = 1000L; // refresh at most once per second
+    private static final long SPEED_CACHE_TTL_MS = 1000L;
+
+    // Tier-driven ticks cache (hot path for logistics)
+    private transient long ticksCacheValidUntilMs = 0L;
+    private transient long ticksCacheValue = -1L;
+    private transient long ticksCacheFallback = -1L;
+    private static final long TICKS_CACHE_TTL_MS = 1000L;
 
     public PlacedMachine(Long dbId, UUID ownerId, String typeId, GridPosition pos, JsonObject metadata) {
         this.dbId = dbId;
@@ -69,10 +74,6 @@ public abstract class PlacedMachine implements IGridComponent {
         markDirty();
     }
 
-    /**
-     * Convenience overload for callers that pass string orientations.
-     * Converts to Direction internally.
-     */
     public void setOrientation(String orientation) {
         this.orientation = parseDirectionOrDefault(orientation, Direction.NORTH);
         this.metadata.addProperty("orientation", this.orientation.name());
@@ -98,9 +99,13 @@ public abstract class PlacedMachine implements IGridComponent {
 
     public void setGridContext(GridManager gm) {
         this.gridManager = gm;
-        // Reset cache when context changes
+        // Reset caches when context changes
         this.speedCacheValidUntilMs = 0L;
         this.speedCacheMultiplier = 1.0;
+
+        this.ticksCacheValidUntilMs = 0L;
+        this.ticksCacheValue = -1L;
+        this.ticksCacheFallback = -1L;
     }
 
     public void markDirty() { this.isDirty = true; }
@@ -125,21 +130,13 @@ public abstract class PlacedMachine implements IGridComponent {
         return metadata;
     }
 
-    // ==========================================================
-    // Orientation helper
-    // ==========================================================
     protected Vector3Int orientationToVector() {
         return orientation.toVector();
     }
 
     // ==========================================================
-    // SPEED HELPERS (Machine speed + Overclock)  --- HOT PATH
+    // SPEED HELPERS (Overclock only)
     // ==========================================================
-
-    /**
-     * Backward-compatible signature.
-     * Cached to avoid doing GridManager computation for every scheduleAfter() call.
-     */
     protected double getEffectiveSpeedMultiplier() {
         if (gridManager == null) return 1.0;
 
@@ -148,7 +145,7 @@ public abstract class PlacedMachine implements IGridComponent {
             return speedCacheMultiplier;
         }
 
-        double v = 1.0;
+        double v;
         try {
             v = gridManager.getEffectiveMachineSpeedMultiplier(ownerId, typeId);
         } catch (Throwable ignored) {
@@ -156,8 +153,6 @@ public abstract class PlacedMachine implements IGridComponent {
         }
 
         if (Double.isNaN(v) || Double.isInfinite(v) || v <= 0.0) v = 1.0;
-
-        // DESIGN RULE: upgrades must never slow down machines
         if (v < 1.0) v = 1.0;
 
         speedCacheMultiplier = v;
@@ -165,10 +160,36 @@ public abstract class PlacedMachine implements IGridComponent {
         return v;
     }
 
+    // ==========================================================
+    // TICKS HELPERS (Tier-driven ticks from DB)
+    // ==========================================================
+    protected long getTierDrivenBaseTicks(long fallbackTicks) {
+        long fb = Math.max(1L, fallbackTicks);
 
-    /**
-     * Backward-compatible signature used by many machines.
-     */
+        if (gridManager == null || ownerId == null || typeId == null || typeId.isBlank()) {
+            return fb;
+        }
+
+        long nowMs = System.currentTimeMillis();
+        if (nowMs < ticksCacheValidUntilMs && ticksCacheFallback == fb && ticksCacheValue > 0) {
+            return ticksCacheValue;
+        }
+
+        long v;
+        try {
+            v = gridManager.getEffectiveMachineProcessTicks(ownerId, typeId, fb);
+        } catch (Throwable ignored) {
+            v = fb;
+        }
+
+        if (v <= 0) v = fb;
+
+        ticksCacheValue = v;
+        ticksCacheFallback = fb;
+        ticksCacheValidUntilMs = nowMs + TICKS_CACHE_TTL_MS;
+        return v;
+    }
+
     protected long computeAcceleratedTicks(long baseTicks) {
         if (baseTicks <= 1) return Math.max(1L, baseTicks);
 

@@ -17,6 +17,12 @@ import java.util.UUID;
  * - Hot path MUST be allocation-light.
  * - Subclasses can use the "pendingOutput" mode to avoid allocating Recipe/List every job.
  *
+ * BALANCE (Tier-driven ticks):
+ * - startProcessing() takes a fallback tick value, but the effective ticks are read from DB
+ *   using the player's unlocked tier for this machine.
+ * - Overclock (player/global) is still applied via scheduleAfter(), but tech-tier no longer
+ *   changes speed multipliers.
+ *
  * Compatibility:
  * - Keeps currentRecipe field and the old flow working for machines not yet migrated.
  * - Keeps saveState() so subclasses that call it still compile.
@@ -65,8 +71,7 @@ public abstract class ProcessorMachine extends PlacedMachine {
             if (this.metadata != null && this.metadata.has("output") && this.metadata.get("output").isJsonObject()) {
                 this.outputBuffer.loadState(this.metadata.getAsJsonObject("output"));
             }
-        } catch (Throwable ignored) {
-        }
+        } catch (Throwable ignored) { }
     }
 
     protected abstract GridPosition getOutputPosition();
@@ -93,20 +98,43 @@ public abstract class ProcessorMachine extends PlacedMachine {
             if (gridManager != null && gridManager.getProductionTelemetry() != null && consumedItem != null) {
                 gridManager.getProductionTelemetry().recordConsumed(getOwnerId(), consumedItem, amount);
             }
-        } catch (Throwable ignored) {}
+        } catch (Throwable ignored) { }
 
         saveState();
     }
 
     /**
      * Starts a job without allocating a Recipe.
+     *
+     * IMPORTANT:
+     * - processTicks is treated as a FALLBACK value.
+     * - Real ticks are resolved from DB using (owner tier + machine type).
+     * - Overclock is still applied by scheduleAfter().
      */
     protected final void startProcessing(MatterPayload output, long currentTick, long processTicks, String reason) {
         if (output == null) return;
+
+        long effectiveBaseTicks = resolveTierDrivenProcessTicks(processTicks);
+
         this.pendingOutput = output;
         this.currentRecipe = null; // ensure we are in the new flow
-        this.finishTick = scheduleAfter(currentTick, processTicks, reason);
+        this.finishTick = scheduleAfter(currentTick, effectiveBaseTicks, reason);
+
         saveState();
+    }
+
+    private long resolveTierDrivenProcessTicks(long fallbackTicks) {
+        long fb = Math.max(1L, fallbackTicks);
+
+        if (gridManager == null) return fb;
+        if (ownerId == null) return fb;
+        if (typeId == null || typeId.isBlank()) return fb;
+
+        try {
+            return gridManager.getEffectiveMachineProcessTicks(ownerId, typeId, fb);
+        } catch (Throwable ignored) {
+            return fb;
+        }
     }
 
     /**
@@ -132,7 +160,7 @@ public abstract class ProcessorMachine extends PlacedMachine {
                 if (gridManager != null && gridManager.getProductionTelemetry() != null) {
                     gridManager.getProductionTelemetry().recordProduced(getOwnerId(), out, 1L);
                 }
-            } catch (Throwable ignored) {}
+            } catch (Throwable ignored) { }
 
             // Clear state
             pendingOutput = null;
@@ -146,16 +174,14 @@ public abstract class ProcessorMachine extends PlacedMachine {
     /**
      * Output ejection:
      * - If a job is finished, materialize its output BEFORE attempting ejection,
-     *   so processors can reach full MK1 throughput (no +1 tick penalty).
-     * - Backoff when blocked, but do not introduce a systematic gap.
+     *   so processors can reach full throughput (no +1 tick penalty).
      */
     protected void tryEjectItem(long currentTick) {
         if (gridManager == null) return;
 
-        // IMPORTANT: if processing is finished, move output into the buffer NOW.
-        // This allows eject in the same tick and avoids the classic 20/(20+1) throughput loss.
+        // If processing is finished, move output into the buffer NOW.
         if (outputBuffer.isEmpty() && isProcessing() && finishTick != -1 && currentTick >= finishTick) {
-            completeProcessing(); // may fill outputBuffer and clear processing state
+            completeProcessing();
         }
 
         if (outputBuffer.isEmpty()) return;
@@ -165,7 +191,6 @@ public abstract class ProcessorMachine extends PlacedMachine {
         PlacedMachine neighbor = getNeighborAt(targetPos);
 
         if (neighbor == null) {
-            // Retry next tick (belt/drill philosophy: avoid systematic throughput loss due to tick ordering)
             nextEjectAttemptTick = currentTick + 1;
             return;
         }
@@ -186,7 +211,6 @@ public abstract class ProcessorMachine extends PlacedMachine {
                 saveState();
             } else {
                 outputBuffer.insert(item);
-                // Retry next tick (no 2-tick backoff)
                 nextEjectAttemptTick = currentTick + 1;
             }
             return;
@@ -213,11 +237,8 @@ public abstract class ProcessorMachine extends PlacedMachine {
             return;
         }
 
-        // Other machines: small backoff is fine
         nextEjectAttemptTick = currentTick + 2;
     }
-
-
 
     /**
      * Compatibility method: subclasses call saveState().
@@ -230,7 +251,6 @@ public abstract class ProcessorMachine extends PlacedMachine {
 
     @Override
     public JsonObject serialize() {
-        // Materialize buffers ONLY here
         if (this.metadata == null) this.metadata = new JsonObject();
 
         if (runtimeStateDirty) {

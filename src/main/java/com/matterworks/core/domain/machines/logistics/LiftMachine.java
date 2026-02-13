@@ -14,16 +14,19 @@ import com.matterworks.core.domain.matter.MatterPayload;
 import java.util.UUID;
 
 /**
- * PERFORMANCE FIX:
- * - Avoid MachineInventory + JSON churn in tick().
- * - Avoid allocating GridPosition every tick (outPos and "sourceTop").
- * - Serialize only in serialize(), only when state changed.
+ * Lift:
+ * - Takes input from the same Y level as base.
+ * - Outputs to (forward + up).
+ * - Holds at most 1 item.
+ *
+ * BALANCE:
+ * - Tier-driven base ticks from DB for transport.
+ * - Overclock applied via computeAcceleratedTicks.
  */
 public class LiftMachine extends PlacedMachine {
 
-    private static final int TRANSPORT_TIME = 5;
+    private static final long TRANSPORT_TICKS_FALLBACK = 5L;
 
-    // Single-slot buffer
     private MatterPayload storedItem;
     private transient JsonObject storedItemJsonCache;
     private int cooldownTicks = 0;
@@ -33,7 +36,7 @@ public class LiftMachine extends PlacedMachine {
     // Cached ports/positions
     private transient Vector3Int cachedDir;
     private transient GridPosition cachedOutPos;     // forward + up
-    private transient GridPosition cachedSourceTop; // pos.y + 1 (used as sourcePos for nexus/proc/etc)
+    private transient GridPosition cachedSourceTop; // pos.y + 1
 
     // Neighbor cache
     private transient long neighborCacheValidUntilTick = Long.MIN_VALUE;
@@ -67,14 +70,12 @@ public class LiftMachine extends PlacedMachine {
     private void recomputePorts() {
         cachedDir = orientationToVector();
 
-        // Output is one block above + forward
         cachedOutPos = new GridPosition(
                 pos.x() + cachedDir.x(),
                 pos.y() + 1 + cachedDir.y(),
                 pos.z() + cachedDir.z()
         );
 
-        // Used as "sourcePos" (top cell of the lift)
         cachedSourceTop = new GridPosition(pos.x(), pos.y() + 1, pos.z());
 
         neighborCacheValidUntilTick = Long.MIN_VALUE;
@@ -89,7 +90,7 @@ public class LiftMachine extends PlacedMachine {
                 if (items.size() > 0 && items.get(0).isJsonObject()) {
                     JsonObject obj = items.get(0).getAsJsonObject();
                     storedItem = MatterPayload.fromJson(obj);
-                    storedItemJsonCache = obj; // reuse
+                    storedItemJsonCache = obj;
                 }
             }
         } catch (Throwable ignored) {
@@ -132,7 +133,8 @@ public class LiftMachine extends PlacedMachine {
             storedItem = null;
             storedItemJsonCache = null;
 
-            cooldownTicks = (int) computeAcceleratedTicks(TRANSPORT_TIME);
+            long base = getTierDrivenBaseTicks(TRANSPORT_TICKS_FALLBACK);
+            cooldownTicks = (int) computeAcceleratedTicks(base);
 
             runtimeStateDirty = true;
             markDirty();
@@ -146,7 +148,7 @@ public class LiftMachine extends PlacedMachine {
         // Original rule: input at same Y level
         if (fromPos.y() != this.pos.y()) return false;
 
-        // Only accept if sender is a belt (keeps original behavior)
+        // Only accept if sender is a belt
         PlacedMachine sender = getNeighborAt(fromPos);
         if (!(sender instanceof ConveyorBelt)) return false;
 

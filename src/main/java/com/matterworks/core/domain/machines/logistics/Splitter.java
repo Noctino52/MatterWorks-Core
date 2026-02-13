@@ -17,16 +17,15 @@ import java.util.UUID;
  * Splitter (2x1x1):
  * - Accepts items only from the back (must come from a ConveyorBelt)
  * - Holds at most 1 item
- * - After TRANSPORT_TIME ticks, tries to push to Output A / Output B alternately
+ * - After transport ticks, tries to push to Output A / Output B
  *
- * PERFORMANCE FIX:
- * - No MatterPayload.serialize() in insertItem() (hot path).
- * - Cached ports, per-output neighbor caches (TTL).
- * - Metadata updated only in serialize() when dirty.
+ * BALANCE:
+ * - Transport ticks are tier-driven from DB (mk1/mk2/mk3_process_ticks).
+ * - Overclock is applied by scheduleAfter() (via computeAcceleratedTicks inside).
  */
 public class Splitter extends PlacedMachine {
 
-    private static final int TRANSPORT_TIME = 10;
+    private static final long TRANSPORT_TICKS_FALLBACK = 10L;
 
     private MatterPayload currentItem;
     private transient JsonObject currentItemJsonCache;
@@ -56,14 +55,13 @@ public class Splitter extends PlacedMachine {
     private transient PlacedMachine cachedOutBNeighbor = null;
     private static final long NEIGHBOR_CACHE_TTL_TICKS = 20L;
 
-    // runtime dirty flag for metadata
     private boolean runtimeStateDirty = false;
 
     public Splitter(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata) {
         super(dbId, ownerId, typeId, pos, metadata);
         this.dimensions = new Vector3Int(2, 1, 1);
 
-        // Load legacy "items" format (capacity=1)
+        // Load legacy "items" format
         if (this.metadata != null && this.metadata.has("items") && this.metadata.get("items").isJsonArray()) {
             try {
                 JsonArray arr = this.metadata.getAsJsonArray("items");
@@ -72,7 +70,6 @@ public class Splitter extends PlacedMachine {
                     this.currentItemJsonCache = obj;
                     this.currentItem = MatterPayload.fromJson(obj);
 
-                    // travel will be initialized on tick
                     this.availableToPushAtTick = 0;
                     this.nextPushAttemptTick = 0;
                 }
@@ -124,14 +121,11 @@ public class Splitter extends PlacedMachine {
 
         cachedExtensionPos = getExtensionPosition();
 
-        // input is behind the main block
         cachedInputPos = pos.add(back.x(), back.y(), back.z());
 
-        // outputs are in front of each block
         cachedOutA = pos.add(fwd.x(), fwd.y(), fwd.z());
         cachedOutB = cachedExtensionPos.add(fwd.x(), fwd.y(), fwd.z());
 
-        // source positions used when inserting into processors/nexus
         cachedSourceA = pos;
         cachedSourceB = cachedExtensionPos;
 
@@ -142,9 +136,9 @@ public class Splitter extends PlacedMachine {
     public void tick(long currentTick) {
         if (currentItem == null) return;
 
-        // Initialize travel if needed (because insertItem does not know currentTick)
         if (availableToPushAtTick == 0) {
-            availableToPushAtTick = scheduleAfter(currentTick, TRANSPORT_TIME, "SPLITTER_MOVE");
+            long base = getTierDrivenBaseTicks(TRANSPORT_TICKS_FALLBACK);
+            availableToPushAtTick = scheduleAfter(currentTick, base, "SPLITTER_MOVE");
             nextPushAttemptTick = availableToPushAtTick;
             return;
         }
@@ -160,18 +154,15 @@ public class Splitter extends PlacedMachine {
         if (currentItem != null) return false;
 
         ensurePorts();
-
         if (!fromPos.equals(cachedInputPos)) return false;
 
-        // Only accept if sender is a belt (keeps original behavior)
         PlacedMachine sender = getNeighborAt(fromPos);
         if (!(sender instanceof ConveyorBelt)) return false;
 
         currentItem = item;
-        currentItemJsonCache = null; // invalidate cache
+        currentItemJsonCache = null;
         blockedStreak = 0;
 
-        // travel init on tick
         availableToPushAtTick = 0;
         nextPushAttemptTick = 0;
 
@@ -182,9 +173,7 @@ public class Splitter extends PlacedMachine {
     private void attemptSmartPush(long currentTick) {
         ensurePorts();
 
-        int primary = outputIndex & 1; // 0/1
-        int secondary = primary ^ 1;
-
+        int primary = outputIndex & 1;
         boolean moved;
 
         if (primary == 0) {
@@ -260,7 +249,7 @@ public class Splitter extends PlacedMachine {
 
     private void scheduleBlockedRetry(long currentTick) {
         blockedStreak = Math.min(MAX_BLOCKED_STREAK, blockedStreak + 1);
-        long backoff = 1L << blockedStreak; // 2,4,8,16,32...
+        long backoff = 1L << blockedStreak;
 
         long minTick = Math.max(currentTick + backoff, availableToPushAtTick);
         nextPushAttemptTick = minTick;
@@ -270,8 +259,8 @@ public class Splitter extends PlacedMachine {
         return switch (orientation) {
             case NORTH -> pos.add(1, 0, 0);
             case SOUTH -> pos.add(-1, 0, 0);
-            case EAST -> pos.add(0, 0, 1);
-            case WEST -> pos.add(0, 0, -1);
+            case EAST  -> pos.add(0, 0, 1);
+            case WEST  -> pos.add(0, 0, -1);
             default -> pos;
         };
     }
@@ -296,7 +285,6 @@ public class Splitter extends PlacedMachine {
                         currentItemJsonCache = null;
                     }
                 }
-
                 if (currentItemJsonCache != null) {
                     JsonObject obj = currentItemJsonCache.deepCopy();
                     obj.addProperty("count", 1);

@@ -15,23 +15,17 @@ import com.matterworks.core.synchronization.SimulationTime;
 
 import java.util.UUID;
 
-/**
- * Drill is data-driven:
- * - Machine typeId is always "drill"
- * - Upgrades (DB speed, tech tree, overclocks) are applied via getEffectiveSpeedMultiplier()
- *
- * Baseline: speedMult=1.0 => 1 item/sec => 60 items/min.
- */
 public class DrillMachine extends PlacedMachine {
 
-    private static final double BASE_ITEMS_PER_SECOND = 1.0;
+    // Design constant: 20 ticks == 1 second baseline
+    private static final double BASE_TICKS_PER_SECOND = 20.0;
+
+    // If DB is missing, default to 20 => 60/min
+    private static final long FALLBACK_PROCESS_TICKS = 20L;
 
     private final int maxStackSize;
 
-    // dt-based accumulator in "items"
     private double spawnAccumulator = 0.0;
-
-    // Output buffer (single slot with count)
     private int outputCount = 0;
 
     private MatterColor resourceToMine = MatterColor.RAW;
@@ -52,9 +46,7 @@ public class DrillMachine extends PlacedMachine {
                         int maxStackPerSlot) {
         super(dbId, ownerId, typeId, pos, metadata);
 
-        // Drill is 1x2x1
         this.dimensions = new Vector3Int(1, 2, 1);
-
         this.maxStackSize = Math.max(1, maxStackPerSlot);
 
         if (this.metadata != null && this.metadata.has("mining_resource")) {
@@ -88,7 +80,7 @@ public class DrillMachine extends PlacedMachine {
                     if ((!this.metadata.has("mining_resource")) && slot0.has("color")) {
                         try {
                             this.resourceToMine = MatterColor.valueOf(slot0.get("color").getAsString());
-                        } catch (Throwable ignored) {}
+                        } catch (Throwable ignored) { }
                     }
                 }
             } catch (Throwable ignored) {
@@ -143,10 +135,18 @@ public class DrillMachine extends PlacedMachine {
         double dt = SimulationTime.getDtSeconds();
         if (dt <= 0.0) dt = 0.05;
 
-        double speedMult = getEffectiveSpeedMultiplier();
-        if (speedMult <= 0.0) speedMult = 1.0;
+        // Tier-driven ticks per item
+        long processTicks = getTierDrivenBaseTicks(FALLBACK_PROCESS_TICKS);
+        if (processTicks <= 0) processTicks = FALLBACK_PROCESS_TICKS;
 
-        double rate = BASE_ITEMS_PER_SECOND * speedMult;
+        // items/sec = 20 / processTicks
+        double baseRateItemsPerSecond = BASE_TICKS_PER_SECOND / (double) processTicks;
+
+        // Overclock only
+        double overclockMult = getEffectiveSpeedMultiplier();
+        if (overclockMult <= 0.0) overclockMult = 1.0;
+
+        double rate = baseRateItemsPerSecond * overclockMult;
         spawnAccumulator += dt * rate;
 
         final int MAX_BURST_PER_TICK = 8;
@@ -161,7 +161,7 @@ public class DrillMachine extends PlacedMachine {
                 if (gridManager != null && gridManager.getProductionTelemetry() != null) {
                     gridManager.getProductionTelemetry().recordProduced(getOwnerId(), cachedOutputPayload, 1L);
                 }
-            } catch (Throwable ignored) {}
+            } catch (Throwable ignored) { }
 
             markDirty();
         }

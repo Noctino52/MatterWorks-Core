@@ -5,22 +5,21 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.matterworks.core.common.GridPosition;
-import com.matterworks.core.common.Vector3Int;
 import com.matterworks.core.domain.machines.base.PlacedMachine;
 import com.matterworks.core.domain.matter.MatterPayload;
 import com.matterworks.core.domain.shop.MarketManager;
 import com.matterworks.core.synchronization.SimTime;
+import com.matterworks.core.common.Vector3Int;
 
 import java.util.UUID;
 
 /**
- * PERFORMANCE FIX:
- * - Removes MachineInventory (which serialized ALL slots every insert/sale).
- * - Keeps a fixed-slot inventory with stacking and updates ONLY the changed slot in metadata.
+ * Nexus input ports MUST match UI:
+ * - 4 centered ports on the sides of a 3x3 footprint
+ * - only on Y layers: pos.y() and pos.y()+1 (same as drawNexusPortsGrid)
  *
- * DT-BASED SELL:
- * - Selling is driven by real seconds, not by currentTick.
- * - Respects tech tree / overclock speed multiplier via getEffectiveSpeedMultiplier().
+ * Inventory is slot-based for performance.
+ * Selling is DT-based (seconds), not tick-based.
  */
 public class NexusMachine extends PlacedMachine {
 
@@ -36,7 +35,7 @@ public class NexusMachine extends PlacedMachine {
     // DT-based cooldown (seconds until next sale)
     private transient double saleCooldownSeconds = -1.0;
 
-    // Legacy constant: 10 ticks at 20 TPS => 0.5 seconds (2 sales/sec)
+    // Legacy constant: 5 ticks @ 20 TPS => 0.25s base interval
     private static final int SALE_INTERVAL_TICKS = 5;
 
     public NexusMachine(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata) {
@@ -60,14 +59,11 @@ public class NexusMachine extends PlacedMachine {
         double mult = getEffectiveSpeedMultiplier();
         if (mult <= 0) mult = 1.0;
 
-        // Base: 10 ticks * 50ms => 0.5 seconds
+        // Base: SALE_INTERVAL_TICKS * baseTickSeconds()
         double baseIntervalSeconds = SALE_INTERVAL_TICKS * SimTime.baseTickSeconds();
-        // Faster nexus => shorter interval
         double intervalSeconds = baseIntervalSeconds / mult;
 
-        if (saleCooldownSeconds < 0.0) {
-            saleCooldownSeconds = intervalSeconds;
-        }
+        if (saleCooldownSeconds < 0.0) saleCooldownSeconds = intervalSeconds;
 
         saleCooldownSeconds -= dt;
 
@@ -78,15 +74,14 @@ public class NexusMachine extends PlacedMachine {
         }
     }
 
-    public boolean insertItem(MatterPayload item) {
-        return false;
-    }
-
     public synchronized boolean insertItem(MatterPayload item, GridPosition fromPos) {
         if (item == null) return false;
-        if (item.shape() == null) return false; // nexus accepts only "matter"
         if (fromPos == null) return false;
 
+        // Nexus accepts only "matter" (must have shape)
+        if (item.shape() == null) return false;
+
+        // Hard rule: ONLY the 4 blue input ports
         if (!isValidInputPort(fromPos)) return false;
 
         int idx = findInsertSlot(item);
@@ -100,8 +95,7 @@ public class NexusMachine extends PlacedMachine {
         }
 
         updateSlotJson(idx);
-        markDirty(); // persist inventory state async
-
+        markDirty();
         return true;
     }
 
@@ -172,15 +166,13 @@ public class NexusMachine extends PlacedMachine {
     }
 
     private void updateSlotJson(int idx) {
-        // mutate only the touched slot, not all slots
         if (slotItem[idx] == null || slotCount[idx] <= 0) {
             itemsJson.set(idx, JsonNull.INSTANCE);
-            return;
+        } else {
+            JsonObject obj = slotItem[idx].serialize();
+            obj.addProperty("count", Math.max(0, Math.min(slotCount[idx], MAX_STACK)));
+            itemsJson.set(idx, obj);
         }
-
-        JsonObject obj = slotItem[idx].serialize();
-        obj.addProperty("count", Math.max(0, Math.min(slotCount[idx], MAX_STACK)));
-        itemsJson.set(idx, obj);
 
         // keep metadata always pointing to the same itemsJson instance
         metadata.addProperty("capacity", CAPACITY_SLOTS);
@@ -191,7 +183,6 @@ public class NexusMachine extends PlacedMachine {
         if (this.metadata == null) this.metadata = new JsonObject();
 
         if (!metadata.has("items") || !metadata.get("items").isJsonArray()) {
-            // ensure base structure
             metadata.addProperty("capacity", CAPACITY_SLOTS);
             metadata.add("items", itemsJson);
             return;
@@ -211,7 +202,7 @@ public class NexusMachine extends PlacedMachine {
                     if (mp != null && c > 0) {
                         slotItem[i] = mp;
                         slotCount[i] = c;
-                        itemsJson.set(i, obj); // reuse existing json
+                        itemsJson.set(i, obj);
                     } else {
                         slotItem[i] = null;
                         slotCount[i] = 0;
@@ -229,7 +220,6 @@ public class NexusMachine extends PlacedMachine {
             }
         }
 
-        // fill remaining
         for (int i = lim; i < CAPACITY_SLOTS; i++) {
             slotItem[i] = null;
             slotCount[i] = 0;
@@ -240,28 +230,40 @@ public class NexusMachine extends PlacedMachine {
         metadata.add("items", itemsJson);
     }
 
+    /**
+     * EXACTLY the 4 UI blue ports for a 3x3 footprint:
+     * - North centered: (x+1, y/y+1, z-1)
+     * - South centered: (x+1, y/y+1, z+3)
+     * - West centered : (x-1, y/y+1, z+1)
+     * - East centered : (x+3, y/y+1, z+1)
+     *
+     * Accept only on relY 0..1 (same as UI).
+     */
     private boolean isValidInputPort(GridPosition from) {
-        int x = pos.x();
-        int y = pos.y();
-        int z = pos.z();
+        int baseX = pos.x();
+        int baseY = pos.y();
+        int baseZ = pos.z();
 
-        int dx = from.x() - x;
-        int dy = from.y() - y;
-        int dz = from.z() - z;
+        int relY = from.y() - baseY;
+        if (relY < 0 || relY > 1) return false;
 
-        if (dy < 0 || dy > 1) return false;
+        // Footprint is 3x3, so width/height are 3 on X/Z.
+        // The centered edge cells inside footprint are:
+        // (baseX+1, baseZ+0) north edge
+        // (baseX+1, baseZ+2) south edge
+        // (baseX+0, baseZ+1) west edge
+        // (baseX+2, baseZ+1) east edge
+        // The belt/source must be OUTSIDE footprint, one step away.
+        GridPosition north = new GridPosition(baseX + 1, from.y(), baseZ - 1);
+        GridPosition south = new GridPosition(baseX + 1, from.y(), baseZ + 3);
+        GridPosition west  = new GridPosition(baseX - 1, from.y(), baseZ + 1);
+        GridPosition east  = new GridPosition(baseX + 3, from.y(), baseZ + 1);
 
-        if (dx == 1 && dz == -1) return true;
-        if (dx == 1 && dz == 3) return true;
-        if (dx == -1 && dz == 1) return true;
-        if (dx == 3 && dz == 1) return true;
-
-        return false;
+        return from.equals(north) || from.equals(south) || from.equals(west) || from.equals(east);
     }
 
     @Override
     public JsonObject serialize() {
-        // Ensure metadata structure is always present
         metadata.addProperty("capacity", CAPACITY_SLOTS);
         metadata.add("items", itemsJson);
         return super.serialize();

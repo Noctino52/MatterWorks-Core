@@ -15,33 +15,27 @@ import java.util.UUID;
 
 /**
  * Merger (2x1x1):
- * - Two inputs (behind each of the 2 blocks), one output (front of main block).
+ * - Two inputs (behind main and extension), one output (front of main).
  * - Holds at most 1 item.
- * - Accepts only from the preferred input side (alternates).
+ * - Accepts only from the preferred input (alternates).
  *
- * PERFORMANCE FIX:
- * - Remove MachineInventory (JSON churn).
- * - No MatterPayload.serialize() in hot path.
- * - Cached ports and neighbor cache for output.
- * - Metadata updated only in serialize() when dirty.
+ * BALANCE:
+ * - Tier-driven base ticks from DB control transport time.
+ * - Overclock applied by scheduleAfter().
  */
 public class Merger extends PlacedMachine {
 
-    private static final int TRANSPORT_TIME = 10;
+    private static final long TRANSPORT_TICKS_FALLBACK = 10L;
 
-    // Buffer
     private MatterPayload storedItem;
     private transient JsonObject storedItemJsonCache;
 
-    // Timing
     private long availableToPushAtTick = -1;
     private long nextPushAttemptTick = -1;
 
-    // backoff when blocked
     private int blockedStreak = 0;
     private static final int MAX_BLOCKED_STREAK = 5;
 
-    // Preference/starvation
     private int preferredInputIndex = 0;
     private int starvationTicks = 0;
     private static final int STARVATION_THRESHOLD = 5;
@@ -60,14 +54,12 @@ public class Merger extends PlacedMachine {
     private transient PlacedMachine cachedOutNeighbor = null;
     private static final long NEIGHBOR_CACHE_TTL_TICKS = 20L;
 
-    // Dirty flag
     private boolean runtimeStateDirty = false;
 
     public Merger(Long dbId, UUID ownerId, GridPosition pos, String typeId, JsonObject metadata) {
         super(dbId, ownerId, typeId, pos, metadata);
         this.dimensions = new Vector3Int(2, 1, 1);
 
-        // Load legacy "items" format (capacity=1)
         if (this.metadata != null && this.metadata.has("items") && this.metadata.get("items").isJsonArray()) {
             try {
                 JsonArray arr = this.metadata.getAsJsonArray("items");
@@ -75,7 +67,8 @@ public class Merger extends PlacedMachine {
                     JsonObject obj = arr.get(0).getAsJsonObject();
                     this.storedItemJsonCache = obj;
                     this.storedItem = MatterPayload.fromJson(obj);
-                    this.availableToPushAtTick = 0; // will be initialized on tick
+
+                    this.availableToPushAtTick = 0;
                     this.nextPushAttemptTick = 0;
                 }
             } catch (Throwable ignored) {
@@ -124,11 +117,9 @@ public class Merger extends PlacedMachine {
 
         cachedExtPos = getExtensionPosition();
 
-        // Inputs are behind each block (main + extension)
         cachedInput0 = pos.add(cachedBack.x(), cachedBack.y(), cachedBack.z());
         cachedInput1 = cachedExtPos.add(cachedBack.x(), cachedBack.y(), cachedBack.z());
 
-        // Output is in front of main block
         cachedOut = pos.add(cachedFwd.x(), cachedFwd.y(), cachedFwd.z());
 
         portsValid = true;
@@ -140,14 +131,12 @@ public class Merger extends PlacedMachine {
 
         ensurePorts();
 
-        // Only accept if sender is a belt (keeps original behavior)
         PlacedMachine sender = getNeighborAt(fromPos);
         if (!(sender instanceof ConveyorBelt)) return false;
 
         int inputIndex = getInputIndexFromPos(fromPos);
         if (inputIndex == -1) return false;
 
-        // Keep original: accept only from preferred input
         if (inputIndex != preferredInputIndex) return false;
 
         storedItem = item;
@@ -157,7 +146,6 @@ public class Merger extends PlacedMachine {
         starvationTicks = 0;
         blockedStreak = 0;
 
-        // Initialize travel on first tick (we don't have currentTick here)
         availableToPushAtTick = 0;
         nextPushAttemptTick = 0;
 
@@ -168,9 +156,9 @@ public class Merger extends PlacedMachine {
     @Override
     public void tick(long currentTick) {
         if (storedItem != null) {
-            // Initialize travel if needed
             if (availableToPushAtTick == 0) {
-                availableToPushAtTick = scheduleAfter(currentTick, TRANSPORT_TIME, "MERGER_MOVE");
+                long base = getTierDrivenBaseTicks(TRANSPORT_TICKS_FALLBACK);
+                availableToPushAtTick = scheduleAfter(currentTick, base, "MERGER_MOVE");
                 nextPushAttemptTick = availableToPushAtTick;
                 return;
             }
@@ -233,7 +221,7 @@ public class Merger extends PlacedMachine {
 
     private void scheduleBlockedRetry(long currentTick) {
         blockedStreak = Math.min(MAX_BLOCKED_STREAK, blockedStreak + 1);
-        long backoff = 1L << blockedStreak; // 2,4,8,16,32
+        long backoff = 1L << blockedStreak;
 
         long minTick = Math.max(currentTick + backoff, availableToPushAtTick);
         nextPushAttemptTick = minTick;
@@ -269,7 +257,6 @@ public class Merger extends PlacedMachine {
         if (this.metadata == null) this.metadata = new JsonObject();
 
         if (runtimeStateDirty) {
-            // Legacy format: items[0] = payload json (+count)
             JsonArray items = new JsonArray();
 
             if (storedItem != null) {
@@ -297,7 +284,6 @@ public class Merger extends PlacedMachine {
 
             runtimeStateDirty = false;
         } else {
-            // Ensure fields exist for older UI expectations
             if (!this.metadata.has("orientation")) this.metadata.addProperty("orientation", this.orientation.name());
             if (!this.metadata.has("preferredInput")) this.metadata.addProperty("preferredInput", preferredInputIndex);
             if (!this.metadata.has("items")) {

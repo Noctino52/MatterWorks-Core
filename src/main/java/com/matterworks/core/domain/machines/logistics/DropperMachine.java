@@ -14,21 +14,27 @@ import com.matterworks.core.domain.matter.MatterPayload;
 import java.util.UUID;
 
 /**
- * PERFORMANCE FIX:
+ * Dropper:
+ * - Takes input from ABOVE, outputs FORWARD on same Y of the base block.
+ * - Holds at most 1 item.
+ *
+ * BALANCE:
+ * - Uses tier-driven base ticks from DB (mk1/mk2/mk3_process_ticks).
+ * - Overclock is applied via computeAcceleratedTicks().
+ *
+ * PERFORMANCE:
  * - Avoid MachineInventory + JSON churn in tick().
- * - Avoid allocating GridPosition every tick.
  * - Serialize state only in serialize(), and only when dirty.
  */
 public class DropperMachine extends PlacedMachine {
 
-    private static final int TRANSPORT_TIME = 5;
+    // Fallback if DB missing
+    private static final long TRANSPORT_TICKS_FALLBACK = 5L;
 
-    // Single-slot buffer
     private MatterPayload storedItem;
     private transient JsonObject storedItemJsonCache;
-    private int cooldownTicks = 0;
 
-    // Runtime dirty flag (avoid JSON churn in hot path)
+    private int cooldownTicks = 0;
     private boolean runtimeStateDirty = false;
 
     // Cached ports
@@ -36,7 +42,7 @@ public class DropperMachine extends PlacedMachine {
     private transient Vector3Int cachedDir;
     private transient GridPosition cachedOutPos;
 
-    // Neighbor cache (optional, helps when blocked)
+    // Neighbor cache
     private transient long neighborCacheValidUntilTick = Long.MIN_VALUE;
     private transient PlacedMachine cachedNeighbor = null;
     private static final long NEIGHBOR_CACHE_TTL_TICKS = 20L;
@@ -53,7 +59,6 @@ public class DropperMachine extends PlacedMachine {
     public void setOrientation(Direction orientation) {
         super.setOrientation(orientation);
         recomputePorts();
-        // orientation is already persisted in base metadata; mark dirty only if needed
         runtimeStateDirty = true;
         markDirty();
     }
@@ -81,8 +86,8 @@ public class DropperMachine extends PlacedMachine {
     }
 
     private void loadStateFromMetadata() {
-        // Legacy format: metadata.items is an array, slot0 is payload json (+count)
         if (this.metadata == null) return;
+
         try {
             if (this.metadata.has("items") && this.metadata.get("items").isJsonArray()) {
                 JsonArray items = this.metadata.getAsJsonArray("items");
@@ -132,8 +137,8 @@ public class DropperMachine extends PlacedMachine {
             storedItem = null;
             storedItemJsonCache = null;
 
-            // cooldown is a counter -> accelerate once
-            cooldownTicks = (int) computeAcceleratedTicks(TRANSPORT_TIME);
+            long base = getTierDrivenBaseTicks(TRANSPORT_TICKS_FALLBACK);
+            cooldownTicks = (int) computeAcceleratedTicks(base);
 
             runtimeStateDirty = true;
             markDirty();
@@ -147,7 +152,7 @@ public class DropperMachine extends PlacedMachine {
         // input comes only from above
         if (!fromPos.equals(cachedInputPosAbove)) return false;
 
-        // Original rule: only accept if sender is a belt
+        // Keep original rule: only accept if sender is a belt
         PlacedMachine sender = getNeighborAt(fromPos);
         if (!(sender instanceof ConveyorBelt)) return false;
 
@@ -173,7 +178,6 @@ public class DropperMachine extends PlacedMachine {
         if (metadata == null) metadata = new JsonObject();
 
         if (runtimeStateDirty) {
-            // Keep legacy format: items[0] = payload json (+count=1) or null
             JsonArray items = new JsonArray();
 
             if (storedItem != null) {
@@ -201,11 +205,9 @@ public class DropperMachine extends PlacedMachine {
 
             runtimeStateDirty = false;
         } else {
-            // Ensure minimum required fields exist for older saves/UI
             if (!metadata.has("capacity")) metadata.addProperty("capacity", 1);
             if (!metadata.has("orientation")) metadata.addProperty("orientation", this.orientation.name());
             if (!metadata.has("items")) {
-                // materialize if missing
                 runtimeStateDirty = true;
                 return serialize();
             }

@@ -11,39 +11,21 @@ import com.matterworks.core.domain.matter.MatterPayload;
 
 import java.util.UUID;
 
-/**
- * Conveyor Belt (MK1):
- * - Carries 1 item at a time (currentItem).
- * - PLUS a tiny ingress buffer (queuedItem) to avoid throughput loss due to tick ordering.
- *
- * Why ingress buffer:
- * - In a tick-based simulation, if belts are ticked in arbitrary order,
- *   upstream belts often try to push before downstream belts have pushed out.
- * - Without buffering, insert() fails and upstream waits -> systematic throughput loss (~50/55).
- * - With a 1-slot ingress queue, we preserve the "1 item on belt" rule and eliminate gaps.
- *
- * Visual meaning:
- * - currentItem: on the belt segment.
- * - queuedItem: waiting at the input edge, not yet on the belt.
- */
 public class ConveyorBelt extends PlacedMachine {
 
-    private static final long BASE_TRANSPORT_TICKS = 20L;
+    // Fallback if DB is missing: 20 ticks => baseline 60/min behavior (your classic MK1)
+    private static final long BASE_TRANSPORT_TICKS_FALLBACK = 20L;
 
-    // Item currently traveling on the belt
     private MatterPayload currentItem;
     private transient JsonObject currentItemJsonCache;
     private long arrivalTick = -1L;
 
-    // One-slot ingress buffer (waiting to enter when belt becomes free)
     private MatterPayload queuedItem;
     private transient JsonObject queuedItemJsonCache;
 
-    // Cached output position
     private Vector3Int cachedDir;
     private GridPosition cachedOutPos;
 
-    // Neighbor cache
     private transient long neighborCacheValidUntilTick = Long.MIN_VALUE;
     private transient PlacedMachine cachedNeighbor = null;
     private static final long NEIGHBOR_CACHE_TTL_TICKS = 20L;
@@ -54,7 +36,6 @@ public class ConveyorBelt extends PlacedMachine {
 
         recomputeCachedOutput();
 
-        // Backward compatibility: load currentItem if present
         if (this.metadata != null) {
             if (this.metadata.has("currentItem") && this.metadata.get("currentItem").isJsonObject()) {
                 try {
@@ -106,37 +87,27 @@ public class ConveyorBelt extends PlacedMachine {
         this.cachedNeighbor = null;
     }
 
-    /**
-     * Insert from upstream:
-     * - If belt is empty -> becomes currentItem
-     * - Else if current occupied but ingress buffer empty -> store queuedItem (waiting at input)
-     * - Else -> reject (belt is fully backed up)
-     */
     public synchronized boolean insertItem(MatterPayload item, long currentTick) {
         if (item == null) return false;
 
-        // Belt free -> put on belt immediately
         if (this.currentItem == null) {
             this.currentItem = item;
             this.currentItemJsonCache = null;
-            this.arrivalTick = scheduleAfter(currentTick, computeTransportTicks(), "BELT_MOVE");
+            this.arrivalTick = scheduleAfter(currentTick, computeTransportBaseTicks(), "BELT_MOVE");
             return true;
         }
 
-        // Belt busy -> try ingress buffer (waiting)
         if (this.queuedItem == null) {
             this.queuedItem = item;
             this.queuedItemJsonCache = null;
             return true;
         }
 
-        // Fully blocked
         return false;
     }
 
     @Override
     public void tick(long currentTick) {
-        // If belt is empty but we have queued, start moving it immediately
         if (currentItem == null && queuedItem != null) {
             currentItem = queuedItem;
             currentItemJsonCache = null;
@@ -144,13 +115,13 @@ public class ConveyorBelt extends PlacedMachine {
             queuedItem = null;
             queuedItemJsonCache = null;
 
-            arrivalTick = scheduleAfter(currentTick, computeTransportTicks(), "BELT_MOVE");
+            arrivalTick = scheduleAfter(currentTick, computeTransportBaseTicks(), "BELT_MOVE");
         }
 
         if (currentItem == null) return;
 
         if (arrivalTick == -1L) {
-            arrivalTick = scheduleAfter(currentTick, computeTransportTicks(), "BELT_MOVE");
+            arrivalTick = scheduleAfter(currentTick, computeTransportBaseTicks(), "BELT_MOVE");
         }
 
         if (currentTick >= arrivalTick) {
@@ -158,13 +129,10 @@ public class ConveyorBelt extends PlacedMachine {
         }
     }
 
-    private long computeTransportTicks() {
-        double mult = getEffectiveSpeedMultiplier();
-        if (mult <= 0.0) mult = 1.0;
-
-        long ticks = Math.round(BASE_TRANSPORT_TICKS / mult);
-        if (ticks < 1L) ticks = 1L;
-        return ticks;
+    private long computeTransportBaseTicks() {
+        // Tier-driven base ticks from DB, fallback to 20
+        long base = getTierDrivenBaseTicks(BASE_TRANSPORT_TICKS_FALLBACK);
+        return Math.max(1L, base);
     }
 
     private PlacedMachine getNeighborCached(long currentTick) {
@@ -181,7 +149,6 @@ public class ConveyorBelt extends PlacedMachine {
 
         PlacedMachine neighbor = getNeighborCached(currentTick);
         if (neighbor == null) {
-            // Retry next tick (NO exponential backoff -> keeps throughput stable)
             arrivalTick = currentTick + 1;
             return;
         }
@@ -197,7 +164,6 @@ public class ConveyorBelt extends PlacedMachine {
         else moved = false;
 
         if (moved) {
-            // Freed: load queued immediately (same tick) to avoid gaps
             this.currentItem = null;
             this.currentItemJsonCache = null;
             this.arrivalTick = -1L;
@@ -209,24 +175,18 @@ public class ConveyorBelt extends PlacedMachine {
                 this.queuedItem = null;
                 this.queuedItemJsonCache = null;
 
-                this.arrivalTick = scheduleAfter(currentTick, computeTransportTicks(), "BELT_MOVE");
+                this.arrivalTick = scheduleAfter(currentTick, computeTransportBaseTicks(), "BELT_MOVE");
             }
         } else {
-            // Retry next tick (no exponential delay)
             arrivalTick = currentTick + 1;
         }
     }
 
     @Override
     public synchronized JsonObject serialize() {
-        // currentItem
         if (currentItem != null) {
             if (currentItemJsonCache == null) {
-                try {
-                    currentItemJsonCache = currentItem.serialize();
-                } catch (Throwable ignored) {
-                    currentItemJsonCache = null;
-                }
+                try { currentItemJsonCache = currentItem.serialize(); } catch (Throwable ignored) { currentItemJsonCache = null; }
             }
             if (currentItemJsonCache != null) metadata.add("currentItem", currentItemJsonCache);
             else metadata.remove("currentItem");
@@ -234,14 +194,9 @@ public class ConveyorBelt extends PlacedMachine {
             metadata.remove("currentItem");
         }
 
-        // queuedItem
         if (queuedItem != null) {
             if (queuedItemJsonCache == null) {
-                try {
-                    queuedItemJsonCache = queuedItem.serialize();
-                } catch (Throwable ignored) {
-                    queuedItemJsonCache = null;
-                }
+                try { queuedItemJsonCache = queuedItem.serialize(); } catch (Throwable ignored) { queuedItemJsonCache = null; }
             }
             if (queuedItemJsonCache != null) metadata.add("queuedItem", queuedItemJsonCache);
             else metadata.remove("queuedItem");

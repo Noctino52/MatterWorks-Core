@@ -202,32 +202,16 @@ public class TechManager {
     // ==========================================================
 
     /**
-     * Returns the speed multiplier coming ONLY from tech upgrades (tier system),
-     * not including machine base speed, player overclock or global overclock.
+     * DEPRECATED (Tier-driven ticks change):
+     * Tech no longer provides a speed multiplier for machines.
+     * Machine tier affects processing ticks (read from DB).
+     *
+     * Kept for backward compatibility; always returns 1.0.
      */
     public double getTechSpeedMultiplierForMachine(PlayerProfile p, String machineTypeId) {
-        if (p == null) return 1.0;
-        if (machineTypeId == null || machineTypeId.isBlank()) return 1.0;
-
-        int bestTier = 1;
-        double bestMult = 1.0;
-
-        for (String techId : p.getUnlockedTechs()) {
-            TechNode node = nodes.get(techId);
-            if (node == null) continue;
-            if (!node.isUpgradeNode()) continue;
-            if (!node.targetsMachine(machineTypeId)) continue;
-
-            int tier = node.upgradeToTier();
-            if (tier > bestTier) {
-                bestTier = tier;
-                bestMult = node.safeSpeedMultiplier();
-            }
-        }
-
-        if (Double.isNaN(bestMult) || Double.isInfinite(bestMult) || bestMult <= 0.0) return 1.0;
-        return bestMult;
+        return 1.0;
     }
+
 
     /**
      * Extra sell multiplier for Nexus due to tech upgrades (tier system).

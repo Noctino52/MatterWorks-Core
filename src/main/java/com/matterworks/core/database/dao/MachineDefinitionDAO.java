@@ -25,7 +25,6 @@ public class MachineDefinitionDAO {
         try (Connection conn = db.getConnection()) {
 
             boolean hasPrestigeMult = columnExists(conn, "item_definitions", "prestigecostmultiplier");
-            boolean hasSpeed = columnExists(conn, "machine_definitions", "speed");
             boolean hasShopOrder = columnExists(conn, "item_definitions", "shop_order");
 
             // New nice names:
@@ -44,6 +43,15 @@ public class MachineDefinitionDAO {
             if (hasPenaltyAddNew) penaltyAddExpr = "i.price_penalty_add";
             else if (hasPenaltyAddOld) penaltyAddExpr = "i.money_to_add_per_penality";
 
+            // New DB-driven ticks per tier (compat-safe)
+            boolean hasMk1Ticks = columnExists(conn, "machine_definitions", "mk1_process_ticks");
+            boolean hasMk2Ticks = columnExists(conn, "machine_definitions", "mk2_process_ticks");
+            boolean hasMk3Ticks = columnExists(conn, "machine_definitions", "mk3_process_ticks");
+
+            String mk1Expr = hasMk1Ticks ? "m.mk1_process_ticks" : "20";
+            String mk2Expr = hasMk2Ticks ? "m.mk2_process_ticks" : "20";
+            String mk3Expr = hasMk3Ticks ? "m.mk3_process_ticks" : "20";
+
             String sql = """
                 SELECT
                     i.id,
@@ -58,7 +66,9 @@ public class MachineDefinitionDAO {
                     m.width,
                     m.height,
                     m.depth,
-                    %s AS speed
+                    %s AS mk1_process_ticks,
+                    %s AS mk2_process_ticks,
+                    %s AS mk3_process_ticks
                 FROM item_definitions i
                 JOIN machine_definitions m ON i.id = m.type_id
             """.formatted(
@@ -66,7 +76,9 @@ public class MachineDefinitionDAO {
                     hasShopOrder ? "i.shop_order" : "0",
                     penaltyEveryExpr,
                     penaltyAddExpr,
-                    hasSpeed ? "m.speed" : "1.0"
+                    mk1Expr,
+                    mk2Expr,
+                    mk3Expr
             );
 
             try (PreparedStatement ps = conn.prepareStatement(sql);
@@ -121,8 +133,9 @@ public class MachineDefinitionDAO {
                             rs.getInt("depth")
                     );
 
-                    double speed = rs.getDouble("speed");
-                    if (Double.isNaN(speed) || Double.isInfinite(speed) || speed <= 0.0) speed = 1.0;
+                    long mk1Ticks = safePositiveLong(rs, "mk1_process_ticks", 20L);
+                    long mk2Ticks = safePositiveLong(rs, "mk2_process_ticks", 20L);
+                    long mk3Ticks = safePositiveLong(rs, "mk3_process_ticks", 20L);
 
                     statsMap.put(
                             id,
@@ -136,7 +149,9 @@ public class MachineDefinitionDAO {
                                     category,
                                     pricePenaltyEvery,
                                     pricePenaltyAdd,
-                                    speed,
+                                    mk1Ticks,
+                                    mk2Ticks,
+                                    mk3Ticks,
                                     shopOrder
                             )
                     );
@@ -148,6 +163,16 @@ public class MachineDefinitionDAO {
         }
 
         return statsMap;
+    }
+
+    private long safePositiveLong(ResultSet rs, String column, long fallback) {
+        try {
+            long v = rs.getLong(column);
+            if (rs.wasNull() || v <= 0) return Math.max(1L, fallback);
+            return v;
+        } catch (Throwable ignored) {
+            return Math.max(1L, fallback);
+        }
     }
 
     private boolean columnExists(Connection conn, String table, String column) throws SQLException {

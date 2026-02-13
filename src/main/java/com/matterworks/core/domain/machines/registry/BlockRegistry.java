@@ -37,7 +37,7 @@ public class BlockRegistry {
                     + " model=" + s.modelId()
                     + " penaltyEvery=" + s.pricePenaltyEvery()
                     + " penaltyAdd=" + s.pricePenaltyAdd()
-                    + " speed=" + s.speed()
+                    + " ticks(mk1/mk2/mk3)=" + s.mk1ProcessTicks() + "/" + s.mk2ProcessTicks() + "/" + s.mk3ProcessTicks()
                     + " shopOrder=" + s.shopOrder());
         }
     }
@@ -114,13 +114,24 @@ public class BlockRegistry {
         return (s != null ? s.prestigeCostMult() : 0.0);
     }
 
-    public double getSpeed(String blockId) {
+    /**
+     * Returns the base processing ticks for a machine, for the provided tier.
+     * If the machine is missing in DB, uses fallbackTicks.
+     *
+     * IMPORTANT: This is base ticks; overclock is applied later by scheduleAfter().
+     */
+    public long getProcessTicks(String blockId, int tier, long fallbackTicks) {
         String id = normalizeId(blockId);
-        if (id == null) return 1.0;
+        if (id == null) return Math.max(1L, fallbackTicks);
+
         MachineStats s = statsCache.get(id);
-        double out = (s != null ? s.speed() : 1.0);
-        if (Double.isNaN(out) || Double.isInfinite(out) || out <= 0.0) return 1.0;
-        return out;
+        if (s == null) return Math.max(1L, fallbackTicks);
+
+        return s.getProcessTicksForTier(tier, fallbackTicks);
+    }
+
+    public long getProcessTicks(String blockId, int tier) {
+        return getProcessTicks(blockId, tier, 20L);
     }
 
     private String normalizeId(String id) {

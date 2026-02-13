@@ -496,53 +496,72 @@ public class GridManager {
         return "Global Overclock";
     }
 
+    // ==========================================================
+// EFFECTIVE MACHINE SPEED (overclock only)
+// - Tech tier no longer affects speed multipliers (tier drives process ticks instead)
+// - Machine "speed" column has been removed from DB
 // ==========================================================
-// EFFECTIVE MACHINE SPEED (machine base speed * player overclock * global overclock * tech tier)
-// ==========================================================
-public double getEffectiveMachineSpeedMultiplier(UUID ownerId, String machineTypeId) {
-    double machineSpeed = 1.0;
-    try {
-        machineSpeed = blockRegistry.getSpeed(machineTypeId);
-    } catch (Throwable ignored) {}
+    public double getEffectiveMachineSpeedMultiplier(UUID ownerId, String machineTypeId) {
 
-    if (Double.isNaN(machineSpeed) || Double.isInfinite(machineSpeed) || machineSpeed <= 0.0) {
-        machineSpeed = 1.0;
+        if (ownerId == null || machineTypeId == null) return 1.0;
+
+        // Shared cache across all machines of same player+type
+        long nowMs = System.currentTimeMillis();
+        PlayerSpeedCache psc = speedCache.computeIfAbsent(ownerId, _id -> new PlayerSpeedCache());
+        SpeedEntry cached = psc.byType.get(machineTypeId);
+        if (cached != null && nowMs < cached.validUntilMs) {
+            return cached.value;
+        }
+
+        var p = state.getCachedProfile(ownerId);
+        if (p == null) return 1.0;
+
+        long playtime = state.getPlaytimeSecondsCached(ownerId);
+        double ocPlayer = p.getActiveOverclockMultiplier(playtime);
+
+        double ocGlobal = getGlobalOverclockMultiplierNow();
+
+        double out = ocPlayer * ocGlobal;
+        if (Double.isNaN(out) || Double.isInfinite(out) || out <= 0.0) out = 1.0;
+
+        // DESIGN RULE: upgrades must never slow down machines
+        if (out < 1.0) out = 1.0;
+
+        // 1s TTL + small deterministic jitter to avoid stampede
+        long jitter = (machineTypeId.hashCode() & 0xFFL); // 0..255ms
+        long validUntil = nowMs + 1000L + jitter;
+
+        psc.byType.put(machineTypeId, new SpeedEntry(out, validUntil));
+        return out;
+    }
+    // ==========================================================
+// EFFECTIVE MACHINE PROCESS TICKS (DB-driven by tier)
+// - Returns base ticks from DB for the player's unlocked tier.
+// - Overclock is NOT applied here (scheduleAfter will apply it).
+// ==========================================================
+    public long getEffectiveMachineProcessTicks(UUID ownerId, String machineTypeId, long fallbackTicks) {
+        long fb = Math.max(1L, fallbackTicks);
+
+        if (ownerId == null || machineTypeId == null || machineTypeId.isBlank()) return fb;
+
+        int tier = 1;
+        try {
+            tier = getUnlockedMachineTier(ownerId, machineTypeId);
+        } catch (Throwable ignored) {
+            tier = 1;
+        }
+
+        if (tier < 1) tier = 1;
+        if (tier > 3) tier = 3;
+
+        try {
+            return blockRegistry.getProcessTicks(machineTypeId, tier, fb);
+        } catch (Throwable ignored) {
+            return fb;
+        }
     }
 
-    if (ownerId == null || machineTypeId == null) return machineSpeed;
 
-    // Shared cache across all machines of same player+type
-    long nowMs = System.currentTimeMillis();
-    PlayerSpeedCache psc = speedCache.computeIfAbsent(ownerId, _id -> new PlayerSpeedCache());
-    SpeedEntry cached = psc.byType.get(machineTypeId);
-    if (cached != null && nowMs < cached.validUntilMs) {
-        return cached.value;
-    }
-
-    var p = state.getCachedProfile(ownerId);
-    if (p == null) return machineSpeed;
-
-    long playtime = state.getPlaytimeSecondsCached(ownerId);
-    double ocPlayer = p.getActiveOverclockMultiplier(playtime);
-
-    double ocGlobal = getGlobalOverclockMultiplierNow();
-
-    double techMult = 1.0;
-    try {
-        techMult = techManager.getTechSpeedMultiplierForMachine(p, machineTypeId);
-    } catch (Throwable ignored) {}
-    if (Double.isNaN(techMult) || Double.isInfinite(techMult) || techMult <= 0.0) techMult = 1.0;
-
-    double out = machineSpeed * ocPlayer * ocGlobal * techMult;
-    if (Double.isNaN(out) || Double.isInfinite(out) || out <= 0.0) out = 1.0;
-
-    // 1s TTL + small deterministic jitter to avoid stampede
-    long jitter = (machineTypeId.hashCode() & 0xFFL); // 0..255ms
-    long validUntil = nowMs + 1000L + jitter;
-
-    psc.byType.put(machineTypeId, new SpeedEntry(out, validUntil));
-    return out;
-}
 
 
 
