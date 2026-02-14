@@ -189,6 +189,8 @@ public class MarketManager {
     }
 
 
+
+
     // ==========================================================
     // PRICING RULES (FACTIONS)
     // ==========================================================
@@ -412,6 +414,9 @@ public class MarketManager {
             this.colorBasePrices = (colorBasePrices != null ? colorBasePrices : defaultColorPrices());
             this.effectBasePrices = (effectBasePrices != null ? effectBasePrices : defaultEffectPrices());
         }
+
+
+
 
         static Cache empty() {
             return new Cache(

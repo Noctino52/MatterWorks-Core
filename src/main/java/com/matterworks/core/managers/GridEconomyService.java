@@ -1,5 +1,6 @@
 package com.matterworks.core.managers;
 
+import com.matterworks.core.domain.machines.base.PlacedMachine;
 import com.matterworks.core.domain.machines.registry.BlockRegistry;
 import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.domain.shop.VoidShopItem;
@@ -32,6 +33,9 @@ final class GridEconomyService {
     private static final String ITEM_GLOBAL_OVERCLOCK_2H = "global_overclock_2h";
     private static final String ITEM_GLOBAL_OVERCLOCK_12H = "global_overclock_12h";
     private static final String ITEM_GLOBAL_OVERCLOCK_24H = "global_overclock_24h";
+
+    private static final boolean DEBUG_PRICE_PENALTY = true; // set false when done
+
 
     GridEconomyService(
             GridManager gridManager,
@@ -80,25 +84,21 @@ final class GridEconomyService {
             new java.util.concurrent.ConcurrentHashMap<>();
 
     private int getInventoryCountCached(UUID playerId, String itemId) {
+        // IMPORTANT:
+        // Must be ALWAYS fresh. A short TTL cache can temporarily overcount during rapid place/remove,
+        // causing penalty steps to be applied too early.
         if (playerId == null || itemId == null) return 0;
-
-        long now = System.currentTimeMillis();
-        InvCountKey key = new InvCountKey(playerId, itemId);
-
-        InvCountEntry e = invCountCache.get(key);
-        if (e != null && (now - e.atMs) <= INV_COUNT_CACHE_TTL_MS) {
-            return Math.max(0, e.count);
-        }
 
         int fresh = 0;
         try {
             fresh = repository.getInventoryItemCount(playerId, itemId);
         } catch (Throwable ignored) {}
 
-        if (fresh < 0) fresh = 0;
-        invCountCache.put(key, new InvCountEntry(fresh, now));
-        return fresh;
+        return Math.max(0, fresh);
     }
+
+
+
 
     private int getPlacedCount(UUID playerId, String itemId) {
         if (playerId == null || itemId == null) return 0;
@@ -106,14 +106,24 @@ final class GridEconomyService {
         var grid = state.playerGrids.get(playerId);
         if (grid == null || grid.isEmpty()) return 0;
 
+        // The grid map contains one entry per occupied cell.
+        // Multi-block machines (e.g., drill 1x2x1) would be counted multiple times
+        // if we just iterate grid.values().
+        // We must count UNIQUE machine instances.
+        java.util.Set<PlacedMachine> unique = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+
         int count = 0;
         for (var pm : grid.values()) {
             if (pm == null) continue;
-            String typeId = pm.getTypeId();
-            if (itemId.equals(typeId)) count++;
+            if (!itemId.equals(pm.getTypeId())) continue;
+
+            if (unique.add(pm)) {
+                count++;
+            }
         }
         return count;
     }
+
 
     private double computeOwnedCountPenalty(UUID playerId, String itemId) {
         if (playerId == null || itemId == null) return 0.0;
@@ -130,16 +140,40 @@ final class GridEconomyService {
 
         if (every <= 0 || add <= 0.0) return 0.0;
 
-        int totalOwned = getPlacedCount(playerId, itemId) + getInventoryCountCached(playerId, itemId);
-        if (totalOwned < 0) totalOwned = 0;
+        int placed = getPlacedCount(playerId, itemId);
+        int inv = getInventoryCountCached(playerId, itemId);
+        int totalOwned = placed + inv;
+        if (totalOwned <= 0) return 0.0;
 
-        int steps = totalOwned / every; // integer division floor
-        if (steps <= 0) return 0.0;
+        // RULE:
+        // first "every" items (1..every) => 0 penalty
+        // from (every+1) onwards => +add for each block of "every"
+        //
+        // Example: every=6 => owned 1..6 => 0 ; 7..12 => 1 ; 13..18 => 2 ...
+        int steps = (totalOwned - 1) / every;
+        if (steps <= 0) {
+            if (DEBUG_PRICE_PENALTY && "drill".equals(itemId)) {
+                System.out.println("[PRICE_PENALTY][drill] every=" + every + " add=" + add
+                        + " placed=" + placed + " inv=" + inv + " total=" + totalOwned
+                        + " steps=" + steps + " penalty=0");
+            }
+            return 0.0;
+        }
 
         double penalty = steps * add;
+
+        if (DEBUG_PRICE_PENALTY && "drill".equals(itemId)) {
+            System.out.println("[PRICE_PENALTY][drill] every=" + every + " add=" + add
+                    + " placed=" + placed + " inv=" + inv + " total=" + totalOwned
+                    + " steps=" + steps + " penalty=" + penalty);
+        }
+
         if (Double.isNaN(penalty) || Double.isInfinite(penalty) || penalty < 0.0) return 0.0;
         return penalty;
     }
+
+
+
 
 
     boolean canUseOverclock(UUID ownerId, String itemId) {
@@ -348,9 +382,13 @@ final class GridEconomyService {
         if (!p.isAdmin() && p.getMoney() < cost) return false;
 
         if (!p.isAdmin()) addMoney(playerId, -cost, "ITEM_BUY", itemId);
+
         repository.modifyInventoryItem(playerId, itemId, amount);
+
         return true;
     }
+
+
 
     double getEffectiveShopUnitPrice(UUID playerId, String itemId) {
         PlayerProfile p = (playerId != null ? state.getCachedProfile(playerId) : null);
@@ -531,6 +569,7 @@ final class GridEconomyService {
             world.loadPlotSynchronously(ownerId);
         });
     }
+
 
     void prestigeUser(UUID ownerId) {
         if (ownerId == null) return;
