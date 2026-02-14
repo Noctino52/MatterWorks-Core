@@ -152,21 +152,11 @@ final class GridEconomyService {
         // Example: every=6 => owned 1..6 => 0 ; 7..12 => 1 ; 13..18 => 2 ...
         int steps = (totalOwned - 1) / every;
         if (steps <= 0) {
-            if (DEBUG_PRICE_PENALTY && "drill".equals(itemId)) {
-                System.out.println("[PRICE_PENALTY][drill] every=" + every + " add=" + add
-                        + " placed=" + placed + " inv=" + inv + " total=" + totalOwned
-                        + " steps=" + steps + " penalty=0");
-            }
             return 0.0;
         }
 
         double penalty = steps * add;
 
-        if (DEBUG_PRICE_PENALTY && "drill".equals(itemId)) {
-            System.out.println("[PRICE_PENALTY][drill] every=" + every + " add=" + add
-                    + " placed=" + placed + " inv=" + inv + " total=" + totalOwned
-                    + " steps=" + steps + " penalty=" + penalty);
-        }
 
         if (Double.isNaN(penalty) || Double.isInfinite(penalty) || penalty < 0.0) return 0.0;
         return penalty;

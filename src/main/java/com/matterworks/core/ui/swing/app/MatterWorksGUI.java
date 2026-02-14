@@ -1,6 +1,5 @@
 package com.matterworks.core.ui.swing.app;
 
-import com.matterworks.core.common.GridPosition;
 import com.matterworks.core.domain.machines.base.PlacedMachine;
 import com.matterworks.core.domain.machines.registry.BlockRegistry;
 import com.matterworks.core.domain.player.PlayerProfile;
@@ -16,6 +15,7 @@ import com.matterworks.core.ui.swing.panels.VoidShopPanel;
 import com.matterworks.core.domain.player.BoosterStatus;
 import com.matterworks.core.ui.swing.panels.ProductionPanel;
 import com.matterworks.core.ui.swing.panels.FactionsPanel;
+
 
 
 
@@ -58,6 +58,31 @@ public class MatterWorksGUI extends JFrame {
     private final AtomicBoolean economyUpdateInFlight = new AtomicBoolean(false);
     private volatile EconomyUiState lastEconomyUiState = null;
 
+    // Cached fallback (loaded off-EDT) for "items placed" count.
+    private volatile int cachedPlacedItemsFromDb = -1;
+
+    // ===== Economy UI refresh coalescing (EDT) =====
+    private static final int ECONOMY_UI_DEBOUNCE_MS = 120;
+
+    private javax.swing.Timer economyUiDebounceTimer;
+    private volatile boolean economyUiDirty = false;
+    private volatile long economyUiLastRequestAtMs = 0L;
+    private volatile long economyUiLastApplyAtMs = 0L;
+
+    // Cached DB-only count for tooltip/debug (never query DB on EDT)
+    private volatile Integer cachedDbPlacedItems = null;
+    private volatile long cachedDbPlacedItemsAtMs = 0L;
+
+    private javax.swing.Timer economyUiTimer;
+    private volatile boolean economyComputeInFlight = false;
+    private volatile EconomyUiState lastAppliedEconomyState = null;
+
+
+
+
+    // =========================
+// Replace the EconomyUiState record definition with this one
+// =========================
     private record EconomyUiState(
             boolean prestigeEnabled,
             String prestigeTooltip,
@@ -67,12 +92,17 @@ public class MatterWorksGUI extends JFrame {
             String voidText,
             String prestigeText,
             String plotIdText,
-            String plotItemsText,
+
+            // NEW: numeric values to avoid parsing strings like "ITEMS: x / y"
+            int placedItems,
+            int itemCap,
+
             String plotAreaText,
             boolean plotMinusEnabled,
             boolean plotPlusEnabled,
             boolean itemCapPlusEnabled
     ) {}
+
 
 
     private UUID currentPlayerUuid;
@@ -115,6 +145,31 @@ public class MatterWorksGUI extends JFrame {
 
 
 
+    private boolean economyStateEquals(EconomyUiState a, EconomyUiState b) {
+        if (a == b) return true;
+        if (a == null || b == null) return false;
+
+        return a.prestigeEnabled() == b.prestigeEnabled()
+                && a.instantPrestigeEnabled() == b.instantPrestigeEnabled()
+                && a.plotMinusEnabled() == b.plotMinusEnabled()
+                && a.plotPlusEnabled() == b.plotPlusEnabled()
+                && a.itemCapPlusEnabled() == b.itemCapPlusEnabled()
+                && a.placedItems() == b.placedItems()
+                && a.itemCap() == b.itemCap()
+                && safeEq(a.moneyText(), b.moneyText())
+                && safeEq(a.roleText(), b.roleText())
+                && safeEq(a.voidText(), b.voidText())
+                && safeEq(a.prestigeText(), b.prestigeText())
+                && safeEq(a.plotIdText(), b.plotIdText())
+                && safeEq(a.plotAreaText(), b.plotAreaText())
+                && safeEq(a.prestigeTooltip(), b.prestigeTooltip());
+    }
+
+    private boolean safeEq(String x, String y) {
+        return java.util.Objects.equals(x, y);
+    }
+
+
 
     public MatterWorksGUI(GridManager gm,
                           BlockRegistry reg,
@@ -127,6 +182,11 @@ public class MatterWorksGUI extends JFrame {
         this.repository = repo;
         this.onSave = onSave;
         this.currentPlayerUuid = initialUuid;
+
+
+
+        com.matterworks.core.ui.swing.debug.UiDebug.install();
+
 
         this.factoryPanel = new FactoryPanel(
                 gridManager,
@@ -268,7 +328,10 @@ public class MatterWorksGUI extends JFrame {
     }
 
     private void requestEconomyRefreshAsync() {
-        if (currentPlayerUuid == null) {
+        // Snapshot the target player now to avoid races while switching players
+        final UUID u = currentPlayerUuid;
+
+        if (u == null) {
             // Apply "empty" state fast on EDT
             SwingUtilities.invokeLater(this::applyEmptyEconomyUi);
             return;
@@ -279,12 +342,33 @@ public class MatterWorksGUI extends JFrame {
 
         runOffEdt(() -> {
             try {
-                EconomyUiState s = computeEconomyUiState(currentPlayerUuid);
+                // 1) Compute the UI state in background (this is already your pattern)
+                EconomyUiState s = computeEconomyUiState(u);
                 lastEconomyUiState = s;
 
+                // 2) IMPORTANT: update cached DB placed count in BACKGROUND (never on EDT)
+                // This is used only for tooltip/debug and for snapshot-empty fallback.
+                try {
+                    int dbPlaced = repository.getPlotItemsPlaced(u);
+                    cachedDbPlacedItems = dbPlaced;
+                    cachedDbPlacedItemsAtMs = System.currentTimeMillis();
+                } catch (Throwable t) {
+                    // Keep old cache if DB fails (do NOT crash refresh)
+                    // Optional debug:
+                    // t.printStackTrace();
+                }
+
+                // 3) Apply on EDT, but only if the user didn't switch player in the meantime
                 SwingUtilities.invokeLater(() -> {
                     try {
-                        applyEconomyUiState(s);
+                        if (currentPlayerUuid == null || !currentPlayerUuid.equals(u)) {
+                            // Player changed while this task was running -> skip applying stale UI
+                            return;
+                        }
+
+                        if (s == null) applyEmptyEconomyUi();
+                        else applyEconomyUiState(s);
+
                     } catch (Throwable t) {
                         t.printStackTrace();
                     }
@@ -296,6 +380,10 @@ public class MatterWorksGUI extends JFrame {
         });
     }
 
+
+    // =========================
+// FULL METHOD: computeEconomyUiState(UUID)
+// =========================
     private EconomyUiState computeEconomyUiState(UUID u) {
 
         PlayerProfile p = gridManager.getCachedProfile(u);
@@ -328,6 +416,7 @@ public class MatterWorksGUI extends JFrame {
 
         Long pid = cachedPlotId;
 
+        // This returns the placed item count, and may fallback to DB (debug already warns if it happens on EDT)
         int placed = computePlacedItemsIncludingStructures(u);
 
         int effectiveCap;
@@ -364,7 +453,6 @@ public class MatterWorksGUI extends JFrame {
         } catch (Throwable ignored) {}
 
         String plotIdText = "PLOT ID: " + (pid == null ? "---" : pid);
-        String plotItemsText = "ITEMS: " + placed + " / " + effectiveCap;
         String plotAreaText = "AREA: " + plotAreaStr;
 
         return new EconomyUiState(
@@ -376,13 +464,18 @@ public class MatterWorksGUI extends JFrame {
                 "VOID: " + voidCoins,
                 "PRESTIGE: " + prestige,
                 plotIdText,
-                plotItemsText,
+
+                // NEW: pass the numeric values directly (no more "ITEMS: x / y" strings)
+                placed,
+                effectiveCap,
+
                 plotAreaText,
                 plotMinusEnabled,
                 plotPlusEnabled,
                 itemCapPlusEnabled
         );
     }
+
 
 
 
@@ -406,44 +499,33 @@ public class MatterWorksGUI extends JFrame {
     private void applyEconomyUiState(EconomyUiState s) {
         if (s == null) return;
 
+        // Buttons
         topBar.setPrestigeButtonEnabled(s.prestigeEnabled());
         topBar.setPrestigeButtonToolTip(s.prestigeTooltip());
         topBar.setInstantPrestigeButtonEnabled(s.instantPrestigeEnabled());
 
+        // Labels (yes, this is still "heavy" if called too often,
+        // but we will fix the frequency with debouncing / diff later)
         topBar.getMoneyLabel().setText(s.moneyText());
         topBar.getRoleLabel().setText(s.roleText());
         topBar.getVoidCoinsLabel().setText(s.voidText());
         topBar.getPrestigeLabel().setText(s.prestigeText());
 
+        // Status bar
         statusBar.setPlotId(s.plotIdText());
 
-        // StatusBarPanel API:
-        // - setPlotItems(int placed, int cap)
-        int placed = 0;
-        int cap = 0;
-        try {
-            // computeEconomyUiState creates: "ITEMS: <placed> / <cap>"
-            String t = s.plotItemsText();
-            int idxColon = t.indexOf(':');
-            int idxSlash = t.indexOf('/');
-            if (idxColon >= 0 && idxSlash >= 0) {
-                String left = t.substring(idxColon + 1, idxSlash).trim();
-                String right = t.substring(idxSlash + 1).trim();
-                placed = Integer.parseInt(left);
-                cap = Integer.parseInt(right);
-            }
-        } catch (Throwable ignored) {}
+        // IMPORTANT: no string parsing anymore, use ints directly
+        statusBar.setPlotItems(s.placedItems(), s.itemCap());
 
-        statusBar.setPlotItems(placed, cap);
-
-        // StatusBarPanel API:
-        // - setPlotAreaText(String)
         statusBar.setPlotAreaText(s.plotAreaText());
 
         statusBar.setPlotMinusEnabled(s.plotMinusEnabled());
         statusBar.setPlotPlusEnabled(s.plotPlusEnabled());
         statusBar.setItemCapIncreaseEnabled(s.itemCapPlusEnabled());
     }
+
+
+
 
 
 
@@ -467,16 +549,60 @@ public class MatterWorksGUI extends JFrame {
         if (currentPlayerUuid != null) gridManager.touchPlayer(currentPlayerUuid);
     }
 
+    private void ensureEconomyUiDebouncerInstalled() {
+        if (economyUiDebounceTimer != null) return;
+
+        // Runs on EDT
+        economyUiDebounceTimer = new javax.swing.Timer(ECONOMY_UI_DEBOUNCE_MS, e -> {
+            if (!economyUiDirty) return;
+            economyUiDirty = false;
+
+            long start = System.nanoTime();
+            economyUiLastApplyAtMs = System.currentTimeMillis();
+
+            // IMPORTANT: this must be light; it will call the "if changed" path
+            requestEconomyUiRefreshDebounced();
+
+            long ms = (System.nanoTime() - start) / 1_000_000L;
+            if (ms >= 40) {
+                System.out.println("[UI-DBG] SLOW " + ms + "ms :: EDT economy apply (debounced)");
+            }
+        });
+        economyUiDebounceTimer.setRepeats(false);
+    }
+
+
+
     private void buyToolRightClick(String itemId, Integer amount) {
         UUID u = currentPlayerUuid;
         if (u == null) return;
 
+        com.matterworks.core.ui.swing.debug.UiDebug.logThread("buyToolRightClick(" + itemId + ", amount=" + amount + ")");
+
         runOffEdt(() -> {
-            gridManager.touchPlayer(u);
-            boolean ok = gridManager.buyItem(u, itemId, amount != null ? amount : 1);
-            if (ok) SwingUtilities.invokeLater(this::updateEconomyLabelsForce);
+            com.matterworks.core.ui.swing.debug.UiDebug.time("BG buyToolRightClick body", () -> {
+                gridManager.touchPlayer(u);
+
+                int qty = (amount != null ? amount : 1);
+
+                boolean ok = com.matterworks.core.ui.swing.debug.UiDebug.time(
+                        "CORE gridManager.buyItem(" + itemId + ", qty=" + qty + ")",
+                        () -> gridManager.buyItem(u, itemId, qty),
+                        10
+                );
+
+                com.matterworks.core.ui.swing.debug.UiDebug.log("buyItem result ok=" + ok);
+
+                if (ok) {
+                    SwingUtilities.invokeLater(() -> {
+                        com.matterworks.core.ui.swing.debug.UiDebug.time("EDT after-buy requestEconomyRefresh()", this::requestEconomyRefresh, 5);
+                    });
+                }
+            }, 1);
         });
     }
+
+
 
     private void selectStructureTool(String nativeId) {
         factoryPanel.setTool("STRUCTURE:" + nativeId);
@@ -801,73 +927,24 @@ public class MatterWorksGUI extends JFrame {
 
 
     private void requestEconomyRefresh() {
-        UUID u = currentPlayerUuid;
-
-        // If no player selected, just paint the empty state on EDT.
-        if (u == null) {
-            SwingUtilities.invokeLater(this::updateEconomyLabelsForce);
+        if (!javax.swing.SwingUtilities.isEventDispatchThread()) {
+            javax.swing.SwingUtilities.invokeLater(this::requestEconomyRefresh);
             return;
         }
 
-        // Avoid parallel fetches.
-        if (!economyFetchRunning.compareAndSet(false, true)) {
-            return;
+        ensureEconomyUiDebouncerInstalled();
+
+        economyUiDirty = true;
+        economyUiLastRequestAtMs = System.currentTimeMillis();
+
+        // restart debounce timer (coalesce many requests into 1 refresh)
+        if (economyUiDebounceTimer.isRunning()) {
+            economyUiDebounceTimer.restart();
+        } else {
+            economyUiDebounceTimer.start();
         }
-
-        runOffEdt(() -> {
-            try {
-                PlayerProfile p = gridManager.getCachedProfile(u);
-                if (p == null) return;
-
-                boolean isAdmin = p.isAdmin();
-                long now = System.currentTimeMillis();
-
-                // Refresh DB cache at most once per 800ms per player.
-                boolean mustReload = (economyCacheUuid == null)
-                        || !economyCacheUuid.equals(u)
-                        || (now - economyCacheLoadedAtMs) > 800L;
-
-                if (mustReload) {
-                    Long pid = null;
-                    try { pid = repository.getPlotId(u); } catch (Throwable ignored) {}
-
-                    int blockBreaker = 0;
-                    int plotBreaker = 0;
-
-                    if (!isAdmin) {
-                        try { blockBreaker = repository.getInventoryItemCount(u, "block_cap_breaker"); } catch (Throwable ignored) {}
-                        try { plotBreaker  = repository.getInventoryItemCount(u, "plot_size_breaker"); } catch (Throwable ignored) {}
-                    }
-
-                    int voidStep = 0;
-                    int baseCap = 1;
-                    int step = 0;
-                    int maxCap = Integer.MAX_VALUE;
-
-                    try { voidStep = safeGetVoidItemCapStep(); } catch (Throwable ignored) {}
-                    try { baseCap = safeGetDefaultItemCap(); } catch (Throwable ignored) {}
-                    try { step = safeGetItemCapStep(); } catch (Throwable ignored) {}
-                    try { maxCap = safeGetMaxItemCap(); } catch (Throwable ignored) {}
-
-                    economyCacheUuid = u;
-                    economyCacheLoadedAtMs = now;
-
-                    cachedPlotId = pid;
-                    cachedBlockCapBreakerOwned = Math.max(0, blockBreaker);
-                    cachedPlotSizeBreakerOwned = Math.max(0, plotBreaker);
-
-                    cachedVoidItemCapStep = Math.max(0, voidStep);
-                    cachedDefaultItemCap = Math.max(1, baseCap);
-                    cachedItemCapStep = Math.max(0, step);
-                    cachedMaxItemCap = (maxCap <= 0 ? Integer.MAX_VALUE : maxCap);
-                }
-            } finally {
-                economyFetchRunning.set(false);
-                // Apply labels on EDT (fast, no DB).
-                SwingUtilities.invokeLater(this::updateEconomyLabelsForce);
-            }
-        });
     }
+
 
 
     // ===== Tabs =====
@@ -905,6 +982,8 @@ public class MatterWorksGUI extends JFrame {
     private void handlePlayerSwitch() {
         Object sel = topBar.getPlayerSelector().getSelectedItem();
 
+        com.matterworks.core.ui.swing.debug.UiDebug.logThread("handlePlayerSwitch() selected=" + (sel != null ? sel.getClass().getName() : "null"));
+
         if (sel instanceof PlayerProfile p) {
             UUID newUuid = p.getPlayerId();
             if (newUuid == null) return;
@@ -916,30 +995,41 @@ public class MatterWorksGUI extends JFrame {
             setLoading(true);
 
             runOffEdt(() -> {
+                com.matterworks.core.ui.swing.debug.UiDebug.logThread("SWITCH BG start old=" + oldUuid + " new=" + newUuid);
+
                 try {
-                    try {
-                        if (oldUuid != null) gridManager.touchPlayer(oldUuid);
-                        onSave.run();
-                    } catch (Exception ex) {
-                        ex.printStackTrace();
-                    }
+                    com.matterworks.core.ui.swing.debug.UiDebug.time("BG onSave()", () -> {
+                        try {
+                            if (oldUuid != null) gridManager.touchPlayer(oldUuid);
+                            onSave.run();
+                        } catch (Exception ex) {
+                            ex.printStackTrace();
+                        }
+                    }, 10);
 
-                    safeCloseSession(oldUuid);
-                    safeOpenSession(newUuid);
+                    com.matterworks.core.ui.swing.debug.UiDebug.time("BG safeCloseSession(old)", () -> safeCloseSession(oldUuid), 10);
+                    com.matterworks.core.ui.swing.debug.UiDebug.time("BG safeOpenSession(new)", () -> safeOpenSession(newUuid), 10);
 
-                    gridManager.loadPlotFromDB(newUuid);
-                    gridManager.touchPlayer(newUuid);
+                    com.matterworks.core.ui.swing.debug.UiDebug.time("BG gridManager.loadPlotFromDB(new)", () -> {
+                        gridManager.loadPlotFromDB(newUuid);
+                    }, 10);
+
+                    com.matterworks.core.ui.swing.debug.UiDebug.time("BG gridManager.touchPlayer(new)", () -> {
+                        gridManager.touchPlayer(newUuid);
+                    }, 10);
 
                     SwingUtilities.invokeLater(() -> {
-                        currentPlayerUuid = newUuid;
-                        factoryPanel.setPlayerUuid(newUuid);
-                        resetEconomyCache();
-                        updateTabs();
-                        updateLabels();
-                        updateEconomyLabelsForce();
-                        setLoading(false);
-                        isSwitching = false;
-                        factoryPanel.requestFocusInWindow();
+                        com.matterworks.core.ui.swing.debug.UiDebug.time("EDT switch apply UI", () -> {
+                            currentPlayerUuid = newUuid;
+                            factoryPanel.setPlayerUuid(newUuid);
+                            resetEconomyCache();
+                            updateTabs();
+                            updateLabels();
+                            updateEconomyLabelsForce();
+                            setLoading(false);
+                            isSwitching = false;
+                            factoryPanel.requestFocusInWindow();
+                        }, 5);
                     });
 
                 } catch (Exception ex) {
@@ -948,12 +1038,15 @@ public class MatterWorksGUI extends JFrame {
                         setLoading(false);
                         isSwitching = false;
                     });
+                } finally {
+                    com.matterworks.core.ui.swing.debug.UiDebug.logThread("SWITCH BG end old=" + oldUuid + " new=" + newUuid);
                 }
             });
 
         } else if ("--- ADD NEW PLAYER ---".equals(sel)) {
             String n = JOptionPane.showInputDialog("Name:");
             if (n != null && !n.isBlank()) {
+                com.matterworks.core.ui.swing.debug.UiDebug.log("createNewPlayer name=" + n);
                 gridManager.createNewPlayer(n);
                 refreshPlayerList(true);
             } else {
@@ -961,6 +1054,7 @@ public class MatterWorksGUI extends JFrame {
             }
         }
     }
+
 
     private void handleDeletePlayer() {
         if (currentPlayerUuid == null) return;
@@ -1116,176 +1210,143 @@ public class MatterWorksGUI extends JFrame {
         lastItemCapPlusEnabled = false;
     }
 
+    // ✅ COMPLETAMENTE RISCRITTO: compute off-EDT + apply on-EDT, senza azzerare cache a caso.
     private void updateEconomyLabelsForce() {
-        resetEconomyCache();
-        updateEconomyLabelsIfChanged();
-    }
+        final UUID u = currentPlayerUuid;
 
-    private void updateEconomyLabelsIfChanged() {
-        UUID u = currentPlayerUuid;
         if (u == null) {
-            topBar.setPrestigeButtonEnabled(false);
-            topBar.setInstantPrestigeButtonEnabled(false);
-
-            topBar.getMoneyLabel().setText("MONEY: $---");
-            topBar.getRoleLabel().setText("[---]");
-            topBar.getVoidCoinsLabel().setText("VOID: ---");
-            topBar.getPrestigeLabel().setText("PRESTIGE: ---");
-
-            statusBar.setPlotId("PLOT ID: ---");
-            statusBar.setPlotItemsUnknown();
-            statusBar.setPlotAreaUnknown();
-            statusBar.setPlotMinusEnabled(false);
-            statusBar.setPlotPlusEnabled(false);
-            statusBar.setItemCapIncreaseEnabled(false);
-
-            requestEconomyRefreshAsync();
-
-            statusBar.setToolTipText(null);
+            SwingUtilities.invokeLater(() -> {
+                applyEmptyEconomyUi();
+                statusBar.setToolTipText(null);
+            });
             return;
         }
 
-        PlayerProfile p = gridManager.getCachedProfile(u);
-        if (p == null) return;
+        // Compute off-EDT
+        runOffEdt(() -> {
+            final long t0 = System.nanoTime();
+            EconomyUiState s = null;
+            Throwable err = null;
 
-        boolean techUnlocked = gridManager.getTechManager().isPrestigeUnlocked(p);
-        boolean canPrestige = gridManager.canPerformPrestige(u);
-        double cost = gridManager.getPrestigeActionCost(u);
-
-        topBar.setPrestigeButtonEnabled(canPrestige);
-
-        if (!techUnlocked) {
-            topBar.setPrestigeButtonToolTip("Unlock the 'Prestige' tech node first.");
-        } else if (p.isAdmin()) {
-            topBar.setPrestigeButtonToolTip("Prestige unlocked (ADMIN: no fee).");
-        } else {
-            int fee = (int) Math.round(cost);
-            if (!canPrestige) {
-                topBar.setPrestigeButtonToolTip("Prestige fee: $" + fee + " (not enough money).");
-            } else {
-                topBar.setPrestigeButtonToolTip("Prestige fee: $" + fee);
+            try {
+                s = computeEconomyUiState(u);
+            } catch (Throwable t) {
+                err = t;
             }
-        }
 
+            final long t1 = System.nanoTime();
+            final EconomyUiState sFinal = s;
+            final Throwable eFinal = err;
 
-        // instant enabled if item present (or admin)
-        topBar.setInstantPrestigeButtonEnabled(gridManager.canInstantPrestige(u));
+            // Apply on EDT
+            SwingUtilities.invokeLater(() -> {
+                final long a0 = System.nanoTime();
 
-        double money = p.getMoney();
-        String rank = String.valueOf(p.getRank());
-        boolean isAdmin = p.isAdmin();
-        int voidCoins = p.getVoidCoins();
-        int prestige = Math.max(0, p.getPrestigeLevel());
+                try {
+                    // If player changed while computing, do not apply stale UI
+                    if (currentPlayerUuid == null || !currentPlayerUuid.equals(u)) return;
 
-        Long pid = cachedPlotId;
+                    if (eFinal != null || sFinal == null) {
+                        applyEmptyEconomyUi();
+                    } else {
+                        // ✅ USE THE REAL METHOD YOU HAVE
+                        applyEconomyUiState(sFinal);
+                    }
 
-        // IMPORTANT: placed count includes structures (STRUCTURE_GENERIC) via runtime snapshot.
-        int placed = computePlacedItemsIncludingStructures(u);
+                } catch (Throwable t) {
+                    t.printStackTrace();
+                }
 
-        // IMPORTANT: cap read from core to avoid UI/core mismatch
-        int effectiveCap;
-        try {
-            effectiveCap = gridManager.getEffectiveItemPlacedOnPlotCap(u);
-        } catch (Throwable t) {
-            // fallback to old formula if core method isn't present for any reason
-            int baseCap = safeGetDefaultItemCap();
-            int step = safeGetItemCapStep();
-            int maxCap = safeGetMaxItemCap();
-            effectiveCap = computeEffectiveCap(baseCap, step, maxCap, prestige);
-        }
+                final long a1 = System.nanoTime();
+                long computeMs = (t1 - t0) / 1_000_000L;
+                long applyMs = (a1 - a0) / 1_000_000L;
 
-
-
-        int voidStep = cachedVoidItemCapStep;
-
-        boolean itemCapPlusEnabled = (voidStep > 0) && (isAdmin || cachedBlockCapBreakerOwned > 0);
-
-        boolean plotPlusEnabled = isAdmin || cachedPlotSizeBreakerOwned > 0;
-        boolean plotMinusEnabled = isAdmin; // '-' is admin-only (as before)
-
-
-
-        String plotAreaStr = null;
-        try {
-            GridManager.PlotAreaInfo info = gridManager.getPlotAreaInfo(u);
-            if (info != null) {
-                plotAreaStr = info.unlockedX() + "x" + info.unlockedY()
-                        + " (+" + info.extraX() + "/+" + info.extraY() + ")"
-                        + " MAX " + info.maxX() + "x" + info.maxY()
-                        + " INC " + info.increaseX() + "x" + info.increaseY();
-            }
-        } catch (Throwable ignored) {}
-
-        boolean changed =
-                Double.compare(money, lastMoneyShown) != 0 ||
-                        !Objects.equals(rank, lastRankShown) ||
-                        !Objects.equals(pid, lastPlotIdShown) ||
-                        (isAdmin != lastAdminShown) ||
-                        (voidCoins != lastVoidCoinsShown) ||
-                        (prestige != lastPrestigeShown) ||
-                        (placed != lastPlotItemsShown) ||
-                        (effectiveCap != lastPlotCapShown) ||
-                        !Objects.equals(plotAreaStr, lastPlotAreaShown) ||
-                        (plotPlusEnabled != lastPlotPlusEnabled) ||
-                        (plotMinusEnabled != lastPlotMinusEnabled) ||
-                        (itemCapPlusEnabled != lastItemCapPlusEnabled);
-
-
-        if (!changed) return;
-
-        lastMoneyShown = money;
-        lastRankShown = rank;
-        lastPlotIdShown = pid;
-        lastAdminShown = isAdmin;
-        lastVoidCoinsShown = voidCoins;
-        lastPrestigeShown = prestige;
-
-        lastPlotItemsShown = placed;
-        lastPlotCapShown = effectiveCap;
-
-        lastPlotAreaShown = plotAreaStr;
-        lastPlotPlusEnabled = plotPlusEnabled;
-        lastPlotMinusEnabled = plotMinusEnabled;
-
-        lastItemCapPlusEnabled = itemCapPlusEnabled;
-
-
-        topBar.getMoneyLabel().setText(String.format("MONEY: $%,.2f", money));
-        topBar.getRoleLabel().setText("[" + rank + "]");
-        topBar.getVoidCoinsLabel().setText("VOID: " + voidCoins);
-        topBar.getPrestigeLabel().setText("PRESTIGE: " + prestige);
-
-        topBar.getMoneyLabel().setForeground(isAdmin ? new Color(255, 215, 0) : Color.GREEN);
-        topBar.getRoleLabel().setForeground(isAdmin ? new Color(255, 215, 0) : Color.LIGHT_GRAY);
-        topBar.getVoidCoinsLabel().setForeground(new Color(190, 0, 220));
-        topBar.getPrestigeLabel().setForeground(new Color(0, 200, 255));
-
-        statusBar.setPlotId("PLOT ID: #" + (pid != null ? pid : "ERR"));
-
-        // tooltip explains that placed includes structures (runtime count)
-        int dbPlaced = repository.getPlotItemsPlaced(u);
-        String itemsTooltip =
-                "Placed items are counted from the runtime grid snapshot (machines + structures).\n" +
-                        "Runtime placed=" + placed + " | DB placed=" + dbPlaced + "\n" +
-                        "Cap is read from core. Void step=" + voidStep;
-
-        statusBar.setPlotItems(placed, effectiveCap, itemsTooltip);
-
-        if (plotAreaStr != null) statusBar.setPlotAreaText(plotAreaStr);
-        else statusBar.setPlotAreaUnknown();
-
-        statusBar.setPlotMinusEnabled(plotMinusEnabled);
-        statusBar.setPlotPlusEnabled(plotPlusEnabled);
-
-        statusBar.setItemCapIncreaseEnabled(itemCapPlusEnabled);
-
-        // status bar tooltip for cap formula (best-effort)
-        String tip = "Item cap: (core computed) | void_step=" + voidStep;
-        statusBar.setToolTipText(tip);
-
+                if (applyMs > 40) {
+                    System.out.println("[UI-DBG] SLOW updateEconomyLabelsForce(): compute="
+                            + computeMs + "ms apply=" + applyMs + "ms");
+                }
+            });
+        });
     }
 
+
+    /**
+     * ✅ Apply ultra-leggero:
+     * - niente parsing stringhe "ITEMS: x / y"
+     * - niente setText se non cambia
+     * - niente revalidate/repaint manuali
+     *
+     * Nota: per togliere il parsing, EconomyUiState deve avere placed/cap come int
+     * (vedi sotto).
+     */
+
+
+    private static void setLabelIfChanged(JLabel label, String text) {
+        String cur = label.getText();
+        if (cur == null || !cur.equals(text)) {
+            label.setText(text);
+        }
+    }
+
+
+
+    private void requestEconomyUiRefreshDebounced() {
+        final UUID u = currentPlayerUuid;
+        if (u == null) return;
+
+        // se un compute è già in volo, non ne avviare un altro
+        if (economyComputeInFlight) return;
+        economyComputeInFlight = true;
+
+        runOffEdt(() -> {
+            long t0 = System.nanoTime();
+            EconomyUiState computed = null;
+            Throwable err = null;
+
+            try {
+                computed = computeEconomyUiState(u); // ✅ QUI dentro può chiamare DB, ok: siamo OFF-EDT
+            } catch (Throwable t) {
+                err = t;
+            }
+
+            long t1 = System.nanoTime();
+            final EconomyUiState sFinal = computed;
+            final Throwable eFinal = err;
+
+            SwingUtilities.invokeLater(() -> {
+                try {
+                    // se nel frattempo hai cambiato player, non applicare roba vecchia
+                    if (currentPlayerUuid == null || !currentPlayerUuid.equals(u)) return;
+
+                    if (eFinal != null || sFinal == null) {
+                        applyEmptyEconomyUi();
+                    } else {
+                        // applica solo se davvero cambiato (evita revalidate/layout inutili)
+                        if (!economyStateEquals(lastAppliedEconomyState, sFinal)) {
+                            applyEconomyUiState(sFinal);
+                            lastAppliedEconomyState = sFinal;
+                        }
+                    }
+
+                    long t2 = System.nanoTime();
+                    long computeMs = (t1 - t0) / 1_000_000L;
+                    long applyMs = (t2 - t1) / 1_000_000L;
+
+                    if (applyMs > 40 || computeMs > 40) {
+                        System.out.println("[UI-DBG] economy refresh: compute=" + computeMs + "ms apply=" + applyMs + "ms");
+                    }
+
+                } finally {
+                    economyComputeInFlight = false;
+                }
+            });
+        });
+    }
+
+
+
     private int computePlacedItemsIncludingStructures(UUID ownerId) {
+        // Fast path: runtime snapshot (includes structures)
         try {
             var snap = gridManager.getSnapshot(ownerId);
             if (snap != null && !snap.isEmpty()) {
@@ -1298,13 +1359,24 @@ public class MatterWorksGUI extends JFrame {
             }
         } catch (Throwable ignored) {}
 
-        // fallback: DB (background now)
+        // Snapshot empty: NEVER hit DB on EDT.
+        if (SwingUtilities.isEventDispatchThread()) {
+            Integer db = cachedDbPlacedItems;
+            return (db != null ? db : 0);
+        }
+
+        // Background fallback allowed (rare)
         try {
-            return repository.getPlotItemsPlaced(ownerId);
+            int db = repository.getPlotItemsPlaced(ownerId);
+            cachedDbPlacedItems = db;
+            cachedDbPlacedItemsAtMs = System.currentTimeMillis();
+            return db;
         } catch (Throwable ignored) {
             return 0;
         }
     }
+
+
 
 
     private void updateLabels() {
