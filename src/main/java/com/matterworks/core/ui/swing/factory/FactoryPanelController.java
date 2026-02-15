@@ -19,6 +19,7 @@ import java.util.IdentityHashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 final class FactoryPanelController {
@@ -41,6 +42,9 @@ final class FactoryPanelController {
 
     private volatile boolean disposed = false;
 
+    private final RepaintCoalescer repaint;
+
+
     private volatile Snapshot snapshot = new Snapshot(Map.of(), Map.of());
     private volatile long lastFingerprint = 0L;
 
@@ -54,7 +58,6 @@ final class FactoryPanelController {
     private static final long META_CACHE_TTL_NANOS = 600_000_000L; // 0.6s
     private static final long META_REFRESH_BUDGET_NANOS = 3_000_000L; // 3ms per refresh tick
 
-    private volatile boolean repaintQueued = false;
     private static final int VISUAL_REPAINT_MS = 120;
 
     // Tooltip cache/debounce (cached-only on EDT)
@@ -97,24 +100,39 @@ final class FactoryPanelController {
             return t;
         });
 
+        // IMPORTANT: STOP repaint heartbeat.
+        // Keep the Timer instance, but DO NOT start it and do not repaint from it.
         visualRepaintTimer = new Timer(VISUAL_REPAINT_MS, e -> {
-            if (!disposed && panel.isDisplayable()) {
-                panel.repaint();
-            }
+            // no-op on purpose (event-driven repaint only)
         });
         visualRepaintTimer.setRepeats(true);
-        visualRepaintTimer.start();
+        visualRepaintTimer.stop();
 
         hookInputListeners();
+
+        this.repaint = new RepaintCoalescer(panel);
+
 
         // Structural snapshot refresh (machines/resources/plot area)
         refreshExec.scheduleWithFixedDelay(this::refreshCacheLoop, 0, 120, TimeUnit.MILLISECONDS);
     }
 
+
+
+
+
+
     void dispose() {
         disposed = true;
 
         try { if (visualRepaintTimer != null) visualRepaintTimer.stop(); } catch (Throwable ignored) {}
+
+        // Cancel pending tooltip computation
+        try {
+            ScheduledFuture<?> t = pendingTooltipTask;
+            if (t != null) t.cancel(false);
+        } catch (Throwable ignored) {}
+        pendingTooltipTask = null;
 
         try { refreshExec.shutdownNow(); } catch (Throwable ignored) {}
         try { commandExec.shutdownNow(); } catch (Throwable ignored) {}
@@ -132,8 +150,61 @@ final class FactoryPanelController {
         tooltipHtml = null;
         tooltipCreatedNanos = 0L;
         tooltipFingerprint = -1L;
-        pendingTooltipTask = null;
     }
+
+
+    public final class RepaintCoalescer {
+        private final JComponent target;
+        private final AtomicBoolean scheduled = new AtomicBoolean(false);
+        private final AtomicBoolean dirty = new AtomicBoolean(false);
+
+        private volatile long lastPaintNanos = 0L;
+        private static final long MIN_INTERVAL_NANOS = 80_000_000L; // 80ms ~ 12.5fps
+
+        public RepaintCoalescer(JComponent target) {
+            this.target = target;
+        }
+
+        public void request() {
+            dirty.set(true);
+            if (!scheduled.compareAndSet(false, true)) return;
+
+            SwingUtilities.invokeLater(this::drain);
+        }
+
+        private void drain() {
+            try {
+                if (!dirty.getAndSet(false)) return;
+
+                long now = System.nanoTime();
+                long delta = now - lastPaintNanos;
+
+                // rate-limit
+                if (lastPaintNanos != 0L && delta < MIN_INTERVAL_NANOS) {
+                    long delayMs = Math.max(1L, (MIN_INTERVAL_NANOS - delta) / 1_000_000L);
+                    // ripianifica più tardi senza martellare EDT
+                    new Timer((int) delayMs, e -> {
+                        ((Timer) e.getSource()).stop();
+                        drain();
+                    }).start();
+                    return;
+                }
+
+                lastPaintNanos = now;
+                target.repaint();
+            } finally {
+                scheduled.set(false);
+                if (dirty.get()) request();
+            }
+        }
+    }
+
+
+
+
+
+
+
 
     Snapshot getSnapshot() {
         return snapshot;
@@ -168,9 +239,24 @@ final class FactoryPanelController {
 
         invalidateTooltipCache();
 
+        // Cancel pending tooltip computation (avoid old tasks surviving a switch/force refresh)
+        ScheduledFuture<?> prev = pendingTooltipTask;
+        if (prev != null) {
+            try { prev.cancel(false); } catch (Throwable ignored) {}
+        }
+        pendingTooltipTask = null;
+
+        // Force next refresh to be considered "changed"
+        lastFingerprint = Long.MIN_VALUE;
+
+        // refreshOnce(true) will repaint coalesced (see method below)
         refreshOnce(true);
-        repaintCoalesced();
     }
+
+
+
+
+
 
     private void invalidateTooltipCache() {
         tooltipPos = null;
@@ -434,19 +520,28 @@ final class FactoryPanelController {
         refreshMetaCache(machines);
 
         long fp = fingerprint(machines, resources);
-        if (!forceRepaint && fp == lastFingerprint) {
-            plotAreaInfoSnapshot = areaInfo;
+
+        // Always update plot area info snapshot
+        plotAreaInfoSnapshot = areaInfo;
+
+        boolean changed = (fp != lastFingerprint);
+        if (!forceRepaint && !changed) {
             return;
         }
 
         lastFingerprint = fp;
         snapshot = new Snapshot(machines, resources);
-        plotAreaInfoSnapshot = areaInfo;
 
         invalidateTooltipCache();
 
-        if (forceRepaint) repaintCoalesced();
+        // EVENT-DRIVEN repaint:
+        // repaint only when snapshot changed OR forced.
+        repaintCoalesced();
     }
+
+
+
+
 
 
     private boolean needsMeta(PlacedMachine m) {
@@ -505,49 +600,93 @@ final class FactoryPanelController {
     }
 
     private long fingerprint(Map<GridPosition, PlacedMachine> machines, Map<GridPosition, MatterColor> resources) {
-        long h = 1469598103934665603L;
+        // Order-independent fingerprint:
+        // same content => same hash, regardless of Map iteration order (HashMap, etc.)
+        long h = 0x9E3779B97F4A7C15L;
 
-        if (machines != null) {
+        if (machines != null && !machines.isEmpty()) {
+            long acc = 0L;
             for (var e : machines.entrySet()) {
                 GridPosition p = e.getKey();
                 PlacedMachine m = e.getValue();
                 if (p == null || m == null) continue;
 
-                h ^= (p.x() * 73856093L) ^ (p.y() * 19349663L) ^ (p.z() * 83492791L);
-                h *= 1099511628211L;
+                long x = p.x();
+                long y = p.y();
+                long z = p.z();
 
+                // Base position hash
+                long eh = (x * 0xBF58476D1CE4E5B9L) ^ (y * 0x94D049BB133111EBL) ^ (z * 0x9E3779B97F4A7C15L);
+
+                // Stable machine identity: typeId only (no mutable runtime fields)
                 String id = m.getTypeId();
                 if (id != null) {
-                    h ^= id.hashCode();
-                    h *= 1099511628211L;
+                    eh ^= (long) id.hashCode() * 0xD6E8FEB86659FD93L;
                 }
+
+                // Avalanche/mix (Murmur-like)
+                eh ^= (eh >>> 33);
+                eh *= 0xFF51AFD7ED558CCDL;
+                eh ^= (eh >>> 33);
+                eh *= 0xC4CEB9FE1A85EC53L;
+                eh ^= (eh >>> 33);
+
+                // Commutative combine
+                acc ^= eh;
+                acc += 0x9E3779B97F4A7C15L;
             }
+
+            // Fold machines accumulator into h
+            h ^= acc;
+            h = Long.rotateLeft(h, 27) * 0x3C79AC492BA7B653L + 0x1C69B3F74AC4AE35L;
         }
 
-        if (resources != null) {
+        if (resources != null && !resources.isEmpty()) {
+            long acc = 0L;
             for (var e : resources.entrySet()) {
                 GridPosition p = e.getKey();
                 MatterColor c = e.getValue();
                 if (p == null || c == null) continue;
 
-                h ^= (p.x() * 1327L) ^ (p.z() * 7331L) ^ c.name().hashCode();
-                h *= 1099511628211L;
+                long x = p.x();
+                long y = p.y();
+                long z = p.z();
+
+                long eh = (x * 0xA24BAED4963EE407L) ^ (y * 0x9FB21C651E98DF25L) ^ (z * 0xC13FA9A902A6328FL);
+
+                // Stable resource identity: enum name
+                eh ^= (long) c.name().hashCode() * 0xD6E8FEB86659FD93L;
+
+                eh ^= (eh >>> 33);
+                eh *= 0xFF51AFD7ED558CCDL;
+                eh ^= (eh >>> 33);
+                eh *= 0xC4CEB9FE1A85EC53L;
+                eh ^= (eh >>> 33);
+
+                acc ^= eh;
+                acc += 0x9E3779B97F4A7C15L;
             }
+
+            h ^= acc;
+            h = Long.rotateLeft(h, 31) * 0x3C79AC492BA7B653L + 0x1C69B3F74AC4AE35L;
         }
+
+        // Final avalanche
+        h ^= (h >>> 33);
+        h *= 0xFF51AFD7ED558CCDL;
+        h ^= (h >>> 33);
+        h *= 0xC4CEB9FE1A85EC53L;
+        h ^= (h >>> 33);
 
         return h;
     }
 
+
     private void repaintCoalesced() {
         if (disposed) return;
-        if (repaintQueued) return;
-
-        repaintQueued = true;
-        SwingUtilities.invokeLater(() -> {
-            repaintQueued = false;
-            if (!disposed) panel.repaint();
-        });
+        repaint.request();
     }
+
 
     /**
      * EDT-safe: cached-only tooltip.

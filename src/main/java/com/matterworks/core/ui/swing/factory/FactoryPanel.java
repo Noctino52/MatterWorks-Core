@@ -51,10 +51,18 @@ public class FactoryPanel extends JPanel {
     }
 
     public void setPlayerUuid(UUID uuid) {
+        // Avoid redundant switches (prevents pointless refresh/repaint bursts)
+        if (uuid != null && uuid.equals(state.playerUuid)) return;
+        if (uuid == null && state.playerUuid == null) return;
+
         state.playerUuid = uuid;
         state.clearHover();
         forceRefreshNow();
     }
+
+
+
+
 
     public void setLayer(int y) {
         int cap = Math.max(1, state.maxBuildHeight);

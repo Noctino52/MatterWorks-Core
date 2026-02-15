@@ -12,6 +12,7 @@ import java.awt.*;
 import java.text.DecimalFormat;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -288,6 +289,7 @@ public class ProductionPanel extends JPanel {
             if (newLines != null && !newLines.isEmpty()) lines.addAll(newLines);
             fireTableDataChanged();
         }
+
 
         @Override
         public int getRowCount() {
