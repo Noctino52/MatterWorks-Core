@@ -480,54 +480,121 @@ public class MatterWorksGUI extends JFrame {
 
 
     private void applyEmptyEconomyUi() {
+        EconomyUiState prev = lastEconomyUiState;
+
+        EconomyUiState next = new EconomyUiState(
+                false,  // prestigeEnabled
+                null,   // prestigeTooltip
+                false,  // instantPrestigeEnabled
+                "MONEY: $---",
+                "[---]",
+                "VOID: ---",
+                "PRESTIGE: ---",
+                "PLOT ID: ---",
+                -1,     // placedItems unknown
+                -1,     // itemCap unknown
+                null,   // plotAreaText unknown
+                false,  // plotMinusEnabled
+                false,  // plotPlusEnabled
+                false   // itemCapPlusEnabled
+        );
+
+        if (prev != null && economyStateEquals(prev, next)) return;
+
+        // --- Top bar ---
         topBar.setPrestigeButtonEnabled(false);
+        topBar.setPrestigeButtonToolTip(null);
+
         topBar.setInstantPrestigeButtonEnabled(false);
+        topBar.setInstantPrestigeButtonToolTip(null);
 
-        topBar.getMoneyLabel().setText("MONEY: $---");
-        topBar.getRoleLabel().setText("[---]");
-        topBar.getVoidCoinsLabel().setText("VOID: ---");
-        topBar.getPrestigeLabel().setText("PRESTIGE: ---");
+        setLabelIfChanged(topBar.getMoneyLabel(), next.moneyText());
+        setLabelIfChanged(topBar.getRoleLabel(), next.roleText());
+        setLabelIfChanged(topBar.getVoidCoinsLabel(), next.voidText());
+        setLabelIfChanged(topBar.getPrestigeLabel(), next.prestigeText());
 
-        statusBar.setPlotId("PLOT ID: ---");
+        // --- Status bar ---
+        statusBar.setPlotId(next.plotIdText());
         statusBar.setPlotItemsUnknown();
         statusBar.setPlotAreaUnknown();
+
         statusBar.setPlotMinusEnabled(false);
         statusBar.setPlotPlusEnabled(false);
         statusBar.setItemCapIncreaseEnabled(false);
+
+        lastEconomyUiState = next;
     }
+
+
+
+
 
     private void applyEconomyUiState(EconomyUiState s) {
-        if (s == null) return;
+        if (s == null) {
+            applyEmptyEconomyUi();
+            return;
+        }
 
-        // Buttons
-        topBar.setPrestigeButtonEnabled(s.prestigeEnabled());
-        topBar.setPrestigeButtonToolTip(s.prestigeTooltip());
-        topBar.setInstantPrestigeButtonEnabled(s.instantPrestigeEnabled());
+        EconomyUiState prev = lastEconomyUiState;
+        if (prev != null && economyStateEquals(prev, s)) return;
 
-        // Labels (yes, this is still "heavy" if called too often,
-        // but we will fix the frequency with debouncing / diff later)
-        topBar.getMoneyLabel().setText(s.moneyText());
-        topBar.getRoleLabel().setText(s.roleText());
-        topBar.getVoidCoinsLabel().setText(s.voidText());
-        topBar.getPrestigeLabel().setText(s.prestigeText());
+        // --- Top bar: prestige buttons ---
+        if (prev == null || prev.prestigeEnabled() != s.prestigeEnabled()) {
+            topBar.setPrestigeButtonEnabled(s.prestigeEnabled());
+        }
+        if (prev == null || !java.util.Objects.equals(prev.prestigeTooltip(), s.prestigeTooltip())) {
+            topBar.setPrestigeButtonToolTip(s.prestigeTooltip());
+        }
+        if (prev == null || prev.instantPrestigeEnabled() != s.instantPrestigeEnabled()) {
+            topBar.setInstantPrestigeButtonEnabled(s.instantPrestigeEnabled());
+        }
 
-        // Status bar
-        statusBar.setPlotId(s.plotIdText());
+        // --- Top bar labels ---
+        setLabelIfChanged(topBar.getMoneyLabel(), s.moneyText());
+        setLabelIfChanged(topBar.getRoleLabel(), s.roleText());
+        setLabelIfChanged(topBar.getVoidCoinsLabel(), s.voidText());
+        setLabelIfChanged(topBar.getPrestigeLabel(), s.prestigeText());
 
-        // IMPORTANT: no string parsing anymore, use ints directly
-        statusBar.setPlotItems(s.placedItems(), s.itemCap());
+        // --- Status bar: plot id ---
+        if (prev == null || !java.util.Objects.equals(prev.plotIdText(), s.plotIdText())) {
+            statusBar.setPlotId(s.plotIdText());
+        }
 
-        statusBar.setPlotAreaText(s.plotAreaText());
+        // --- Status bar: items/cap (numeric, no parsing) ---
+        if (s.placedItems() < 0 || s.itemCap() < 0) {
+            if (prev == null || prev.placedItems() >= 0 || prev.itemCap() >= 0) {
+                statusBar.setPlotItemsUnknown();
+            }
+        } else {
+            if (prev == null || prev.placedItems() != s.placedItems() || prev.itemCap() != s.itemCap()) {
+                statusBar.setPlotItems(s.placedItems(), s.itemCap());
+            }
+        }
 
-        statusBar.setPlotMinusEnabled(s.plotMinusEnabled());
-        statusBar.setPlotPlusEnabled(s.plotPlusEnabled());
-        statusBar.setItemCapIncreaseEnabled(s.itemCapPlusEnabled());
+        // --- Status bar: plot area ---
+        if (s.plotAreaText() == null) {
+            if (prev == null || prev.plotAreaText() != null) {
+                statusBar.setPlotAreaUnknown();
+            }
+        } else {
+            if (prev == null || !java.util.Objects.equals(prev.plotAreaText(), s.plotAreaText())) {
+                statusBar.setPlotAreaText(s.plotAreaText());
+            }
+        }
+
+        // --- Status bar: buttons enable ---
+        if (prev == null || prev.plotMinusEnabled() != s.plotMinusEnabled()) {
+            statusBar.setPlotMinusEnabled(s.plotMinusEnabled());
+        }
+        if (prev == null || prev.plotPlusEnabled() != s.plotPlusEnabled()) {
+            statusBar.setPlotPlusEnabled(s.plotPlusEnabled());
+        }
+        if (prev == null || prev.itemCapPlusEnabled() != s.itemCapPlusEnabled()) {
+            statusBar.setItemCapIncreaseEnabled(s.itemCapPlusEnabled());
+        }
+
+        lastEconomyUiState = s;
     }
-
-
-
-
-
 
 
     private String formatRemainingSeconds(long seconds) {
@@ -550,26 +617,36 @@ public class MatterWorksGUI extends JFrame {
     }
 
     private void ensureEconomyUiDebouncerInstalled() {
-        if (economyUiDebounceTimer != null) return;
+        // Keep the same method name to avoid refactor churn,
+        // but switch implementation from "debounce one-shot" to "fixed-rate coalescing".
+        if (economyUiTimer != null) return;
+
+        // Target: 4–10Hz. 150ms ~= 6.6Hz
+        final int TICK_MS = 150;
 
         // Runs on EDT
-        economyUiDebounceTimer = new javax.swing.Timer(ECONOMY_UI_DEBOUNCE_MS, e -> {
+        economyUiTimer = new javax.swing.Timer(TICK_MS, e -> {
+            // Coalescing: only act if something marked the UI as dirty
             if (!economyUiDirty) return;
-            economyUiDirty = false;
 
-            long start = System.nanoTime();
+            // If compute is already running, keep dirty=true and wait next tick
+            if (economyComputeInFlight) return;
+
+            // Consume the dirty flag (latest snapshot wins)
+            economyUiDirty = false;
             economyUiLastApplyAtMs = System.currentTimeMillis();
 
-            // IMPORTANT: this must be light; it will call the "if changed" path
+            long start = System.nanoTime();
             requestEconomyUiRefreshDebounced();
-
             long ms = (System.nanoTime() - start) / 1_000_000L;
+
             if (ms >= 40) {
-                System.out.println("[UI-DBG] SLOW " + ms + "ms :: EDT economy apply (debounced)");
+                System.out.println("[UI-DBG] SLOW " + ms + "ms :: EDT economy tick (coalesced)");
             }
         });
-        economyUiDebounceTimer.setRepeats(false);
+        economyUiTimer.setRepeats(true);
     }
+
 
 
 
@@ -927,23 +1004,20 @@ public class MatterWorksGUI extends JFrame {
 
 
     private void requestEconomyRefresh() {
-        if (!javax.swing.SwingUtilities.isEventDispatchThread()) {
-            javax.swing.SwingUtilities.invokeLater(this::requestEconomyRefresh);
-            return;
-        }
-
-        ensureEconomyUiDebouncerInstalled();
-
-        economyUiDirty = true;
         economyUiLastRequestAtMs = System.currentTimeMillis();
+        economyUiDirty = true;
 
-        // restart debounce timer (coalesce many requests into 1 refresh)
-        if (economyUiDebounceTimer.isRunning()) {
-            economyUiDebounceTimer.restart();
-        } else {
-            economyUiDebounceTimer.start();
-        }
+        // Install + start fixed-rate coalescing loop (4–10Hz-ish)
+        SwingUtilities.invokeLater(() -> {
+            ensureEconomyUiDebouncerInstalled();
+
+            // Do not spam restart: fixed-rate timer will pick "latest wins"
+            if (economyUiTimer != null && !economyUiTimer.isRunning()) {
+                economyUiTimer.start();
+            }
+        });
     }
+
 
 
 
@@ -980,70 +1054,16 @@ public class MatterWorksGUI extends JFrame {
     // ===== Switching / Session =====
 
     private void handlePlayerSwitch() {
+        if (suppressPlayerEvents) return;
+
         Object sel = topBar.getPlayerSelector().getSelectedItem();
 
-        com.matterworks.core.ui.swing.debug.UiDebug.logThread("handlePlayerSwitch() selected=" + (sel != null ? sel.getClass().getName() : "null"));
+        com.matterworks.core.ui.swing.debug.UiDebug.logThread(
+                "handlePlayerSwitch() selected=" + (sel != null ? sel.getClass().getName() : "null")
+        );
 
-        if (sel instanceof PlayerProfile p) {
-            UUID newUuid = p.getPlayerId();
-            if (newUuid == null) return;
-            if (newUuid.equals(this.currentPlayerUuid)) return;
-
-            UUID oldUuid = this.currentPlayerUuid;
-
-            isSwitching = true;
-            setLoading(true);
-
-            runOffEdt(() -> {
-                com.matterworks.core.ui.swing.debug.UiDebug.logThread("SWITCH BG start old=" + oldUuid + " new=" + newUuid);
-
-                try {
-                    com.matterworks.core.ui.swing.debug.UiDebug.time("BG onSave()", () -> {
-                        try {
-                            if (oldUuid != null) gridManager.touchPlayer(oldUuid);
-                            onSave.run();
-                        } catch (Exception ex) {
-                            ex.printStackTrace();
-                        }
-                    }, 10);
-
-                    com.matterworks.core.ui.swing.debug.UiDebug.time("BG safeCloseSession(old)", () -> safeCloseSession(oldUuid), 10);
-                    com.matterworks.core.ui.swing.debug.UiDebug.time("BG safeOpenSession(new)", () -> safeOpenSession(newUuid), 10);
-
-                    com.matterworks.core.ui.swing.debug.UiDebug.time("BG gridManager.loadPlotFromDB(new)", () -> {
-                        gridManager.loadPlotFromDB(newUuid);
-                    }, 10);
-
-                    com.matterworks.core.ui.swing.debug.UiDebug.time("BG gridManager.touchPlayer(new)", () -> {
-                        gridManager.touchPlayer(newUuid);
-                    }, 10);
-
-                    SwingUtilities.invokeLater(() -> {
-                        com.matterworks.core.ui.swing.debug.UiDebug.time("EDT switch apply UI", () -> {
-                            currentPlayerUuid = newUuid;
-                            factoryPanel.setPlayerUuid(newUuid);
-                            resetEconomyCache();
-                            updateTabs();
-                            updateLabels();
-                            updateEconomyLabelsForce();
-                            setLoading(false);
-                            isSwitching = false;
-                            factoryPanel.requestFocusInWindow();
-                        }, 5);
-                    });
-
-                } catch (Exception ex) {
-                    ex.printStackTrace();
-                    SwingUtilities.invokeLater(() -> {
-                        setLoading(false);
-                        isSwitching = false;
-                    });
-                } finally {
-                    com.matterworks.core.ui.swing.debug.UiDebug.logThread("SWITCH BG end old=" + oldUuid + " new=" + newUuid);
-                }
-            });
-
-        } else if ("--- ADD NEW PLAYER ---".equals(sel)) {
+        // Special item: add new player
+        if ("--- ADD NEW PLAYER ---".equals(sel)) {
             String n = JOptionPane.showInputDialog("Name:");
             if (n != null && !n.isBlank()) {
                 com.matterworks.core.ui.swing.debug.UiDebug.log("createNewPlayer name=" + n);
@@ -1052,8 +1072,93 @@ public class MatterWorksGUI extends JFrame {
             } else {
                 refreshPlayerList(false);
             }
+            return;
         }
+
+        if (!(sel instanceof PlayerProfile p)) return;
+
+        UUID newUuid = p.getPlayerId();
+        if (newUuid == null) return;
+        if (newUuid.equals(this.currentPlayerUuid)) return;
+
+        final UUID oldUuid = this.currentPlayerUuid;
+
+        isSwitching = true;
+        setLoading(true);
+
+        // Stop timers during switching to avoid EDT bursts while tabs/layout are changing
+        SwingUtilities.invokeLater(() -> {
+            try { economyTimer.stop(); } catch (Exception ignored) {}
+            try { heartbeatTimer.stop(); } catch (Exception ignored) {}
+        });
+
+        runOffEdt(() -> {
+            com.matterworks.core.ui.swing.debug.UiDebug.logThread("SWITCH BG start old=" + oldUuid + " new=" + newUuid);
+
+            try {
+                com.matterworks.core.ui.swing.debug.UiDebug.time("BG onSave()", () -> {
+                    try {
+                        if (oldUuid != null) gridManager.touchPlayer(oldUuid);
+                        onSave.run();
+                    } catch (Exception ex) {
+                        ex.printStackTrace();
+                    }
+                }, 10);
+
+                com.matterworks.core.ui.swing.debug.UiDebug.time("BG safeCloseSession(old)", () -> safeCloseSession(oldUuid), 10);
+                com.matterworks.core.ui.swing.debug.UiDebug.time("BG safeOpenSession(new)", () -> safeOpenSession(newUuid), 10);
+
+                com.matterworks.core.ui.swing.debug.UiDebug.time("BG gridManager.loadPlotFromDB(new)", () -> {
+                    gridManager.loadPlotFromDB(newUuid);
+                }, 10);
+
+                com.matterworks.core.ui.swing.debug.UiDebug.time("BG gridManager.touchPlayer(new)", () -> {
+                    gridManager.touchPlayer(newUuid);
+                }, 10);
+
+                SwingUtilities.invokeLater(() -> {
+                    com.matterworks.core.ui.swing.debug.UiDebug.time("EDT switch apply UI", () -> {
+                        currentPlayerUuid = newUuid;
+
+                        factoryPanel.setPlayerUuid(newUuid);
+
+                        // IMPORTANT: reset caches + invalidate last snapshot
+                        resetEconomyCache();
+                        lastEconomyUiState = null;
+
+                        // Rebuild tabs (still on EDT), but avoid also doing economy compute/apply synchronously here
+                        updateTabs();
+                        updateLabels();
+
+                        // Instead of updateEconomyLabelsForce() (which triggers apply burst here),
+                        // request the snapshot refresh (compute off-EDT + apply small diff on EDT).
+                        requestEconomyRefreshAsync();
+
+                        setLoading(false);
+                        isSwitching = false;
+
+                        // Restart timers after switch is complete
+                        try { economyTimer.start(); } catch (Exception ignored) {}
+                        try { heartbeatTimer.start(); } catch (Exception ignored) {}
+
+                        factoryPanel.requestFocusInWindow();
+                    }, 5);
+                });
+
+            } catch (Exception ex) {
+                ex.printStackTrace();
+                SwingUtilities.invokeLater(() -> {
+                    setLoading(false);
+                    isSwitching = false;
+                    try { economyTimer.start(); } catch (Exception ignored) {}
+                    try { heartbeatTimer.start(); } catch (Exception ignored) {}
+                });
+            } finally {
+                com.matterworks.core.ui.swing.debug.UiDebug.logThread("SWITCH BG end old=" + oldUuid + " new=" + newUuid);
+            }
+        });
     }
+
 
 
     private void handleDeletePlayer() {
@@ -1171,25 +1276,60 @@ public class MatterWorksGUI extends JFrame {
 
         suppressPlayerEvents = true;
         try {
-            if (forceDb) cachedPlayerList = repository.getAllPlayers();
+            if (forceDb) {
+                List<PlayerProfile> fromDb = repository.getAllPlayers();
+                cachedPlayerList = (fromDb != null) ? fromDb : new ArrayList<>();
+            }
 
-            playerSelector.removeAllItems();
-            for (PlayerProfile p : cachedPlayerList) playerSelector.addItem(p);
-            playerSelector.addItem("--- ADD NEW PLAYER ---");
+            // Build desired model snapshot
+            List<Object> desired = new ArrayList<>();
+            for (PlayerProfile pp : cachedPlayerList) desired.add(pp);
+            desired.add("--- ADD NEW PLAYER ---");
 
-            if (currentPlayerUuid != null) {
-                for (int i = 0; i < playerSelector.getItemCount(); i++) {
-                    Object it = playerSelector.getItemAt(i);
-                    if (it instanceof PlayerProfile pp && pp.getPlayerId().equals(currentPlayerUuid)) {
-                        playerSelector.setSelectedIndex(i);
-                        break;
+            // Compare current combo content with desired; if equal, do nothing (no removeAllItems/revalidate storm)
+            boolean same = (playerSelector.getItemCount() == desired.size());
+            if (same) {
+                for (int i = 0; i < desired.size(); i++) {
+                    Object cur = playerSelector.getItemAt(i);
+                    Object want = desired.get(i);
+
+                    if (cur instanceof PlayerProfile a && want instanceof PlayerProfile b) {
+                        UUID au = a.getPlayerId();
+                        UUID bu = b.getPlayerId();
+                        if (au == null || bu == null || !au.equals(bu)) { same = false; break; }
+                    } else {
+                        if (!Objects.equals(cur, want)) { same = false; break; }
                     }
                 }
             }
+
+            if (!same) {
+                playerSelector.removeAllItems();
+                for (Object it : desired) playerSelector.addItem(it);
+            }
+
+            // Ensure selection is correct (without triggering unnecessary changes)
+            if (currentPlayerUuid != null) {
+                int desiredIndex = -1;
+                for (int i = 0; i < playerSelector.getItemCount(); i++) {
+                    Object it = playerSelector.getItemAt(i);
+                    if (it instanceof PlayerProfile pp && currentPlayerUuid.equals(pp.getPlayerId())) {
+                        desiredIndex = i;
+                        break;
+                    }
+                }
+
+                int curIndex = playerSelector.getSelectedIndex();
+                if (desiredIndex >= 0 && curIndex != desiredIndex) {
+                    playerSelector.setSelectedIndex(desiredIndex);
+                }
+            }
+
         } finally {
             suppressPlayerEvents = false;
         }
     }
+
 
     private void resetEconomyCache() {
         lastMoneyShown = Double.NaN;
@@ -1294,7 +1434,8 @@ public class MatterWorksGUI extends JFrame {
         final UUID u = currentPlayerUuid;
         if (u == null) return;
 
-        // se un compute è già in volo, non ne avviare un altro
+        // If a compute is already in flight, do nothing:
+        // the timer will tick again, and we also re-mark dirty when needed.
         if (economyComputeInFlight) return;
         economyComputeInFlight = true;
 
@@ -1304,7 +1445,7 @@ public class MatterWorksGUI extends JFrame {
             Throwable err = null;
 
             try {
-                computed = computeEconomyUiState(u); // ✅ QUI dentro può chiamare DB, ok: siamo OFF-EDT
+                computed = computeEconomyUiState(u); // OK: off-EDT
             } catch (Throwable t) {
                 err = t;
             }
@@ -1314,34 +1455,42 @@ public class MatterWorksGUI extends JFrame {
             final Throwable eFinal = err;
 
             SwingUtilities.invokeLater(() -> {
+                long a0 = System.nanoTime();
                 try {
-                    // se nel frattempo hai cambiato player, non applicare roba vecchia
+                    // If player changed while computing, do not apply stale UI.
                     if (currentPlayerUuid == null || !currentPlayerUuid.equals(u)) return;
 
                     if (eFinal != null || sFinal == null) {
                         applyEmptyEconomyUi();
+                        lastAppliedEconomyState = null;
                     } else {
-                        // applica solo se davvero cambiato (evita revalidate/layout inutili)
+                        // Diff-based: apply only if snapshot changed
                         if (!economyStateEquals(lastAppliedEconomyState, sFinal)) {
                             applyEconomyUiState(sFinal);
                             lastAppliedEconomyState = sFinal;
                         }
                     }
 
-                    long t2 = System.nanoTime();
-                    long computeMs = (t1 - t0) / 1_000_000L;
-                    long applyMs = (t2 - t1) / 1_000_000L;
-
-                    if (applyMs > 40 || computeMs > 40) {
-                        System.out.println("[UI-DBG] economy refresh: compute=" + computeMs + "ms apply=" + applyMs + "ms");
-                    }
-
                 } finally {
                     economyComputeInFlight = false;
+
+                    // If new changes happened while we were computing/applying,
+                    // keep the loop alive: next tick will pick the latest state.
+                    // (We intentionally do NOT start another compute immediately here.)
+                    // economyUiDirty might already be true; no harm.
+                }
+
+                long a1 = System.nanoTime();
+                long computeMs = (t1 - t0) / 1_000_000L;
+                long applyMs = (a1 - a0) / 1_000_000L;
+
+                if (applyMs > 40 || computeMs > 40) {
+                    System.out.println("[UI-DBG] economy refresh: compute=" + computeMs + "ms apply=" + applyMs + "ms");
                 }
             });
         });
     }
+
 
 
 
