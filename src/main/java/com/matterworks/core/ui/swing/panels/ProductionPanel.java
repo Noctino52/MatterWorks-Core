@@ -5,10 +5,27 @@ import com.matterworks.core.domain.telemetry.production.ProductionStatsView;
 import com.matterworks.core.domain.telemetry.production.ProductionTimeWindow;
 import com.matterworks.core.managers.GridManager;
 
-import javax.swing.*;
+import javax.swing.AbstractButton;
+import javax.swing.BorderFactory;
+import javax.swing.Box;
+import javax.swing.BoxLayout;
+import javax.swing.ButtonGroup;
+import javax.swing.JComponent;
+import javax.swing.JLabel;
+import javax.swing.JPanel;
+import javax.swing.JScrollPane;
+import javax.swing.JTable;
+import javax.swing.JToggleButton;
+import javax.swing.SwingConstants;
+import javax.swing.SwingUtilities;
+import javax.swing.Timer;
 import javax.swing.border.TitledBorder;
 import javax.swing.table.AbstractTableModel;
-import java.awt.*;
+import java.awt.BorderLayout;
+import java.awt.Color;
+import java.awt.Component;
+import java.awt.Dimension;
+import java.awt.Font;
 import java.text.DecimalFormat;
 import java.util.ArrayList;
 import java.util.List;
@@ -63,7 +80,13 @@ public class ProductionPanel extends JPanel {
         add(buildTop(), BorderLayout.NORTH);
         add(buildCenter(), BorderLayout.CENTER);
 
-        refreshTimer = new Timer(650, e -> requestRefresh());
+        // IMPORTANT: do not refresh if panel is hidden; auto-dispose if removed
+        refreshTimer = new Timer(650, e -> {
+            if (disposed) return;
+            if (!isDisplayable()) { dispose(); return; }
+            if (!isShowing()) return;
+            requestRefresh();
+        });
         refreshTimer.start();
 
         requestRefresh();
@@ -216,6 +239,7 @@ public class ProductionPanel extends JPanel {
 
     private void requestRefresh() {
         if (disposed) return;
+        if (!isShowing()) return;
 
         if (playerUuid == null || gridManager == null) {
             applyEmpty();
@@ -229,7 +253,6 @@ public class ProductionPanel extends JPanel {
         exec.submit(() -> {
             try {
                 ProductionStatsView view = gridManager.getProductionStatsView(playerUuid, w);
-
                 SwingUtilities.invokeLater(() -> applyView(view));
             } catch (Throwable t) {
                 t.printStackTrace();
@@ -244,7 +267,7 @@ public class ProductionPanel extends JPanel {
         producedModel.setLines(List.of());
         consumedModel.setLines(List.of());
         soldModel.setLines(List.of());
-        lblSummary.setText("No data.");
+        setSummaryIfChanged("No data.");
     }
 
     private void applyView(ProductionStatsView view) {
@@ -260,7 +283,7 @@ public class ProductionPanel extends JPanel {
         consumedModel.setLines(view.getConsumedMatters());
         soldModel.setLines(view.getSoldMatters());
 
-        lblSummary.setText(
+        setSummaryIfChanged(
                 "P: " + view.getTotalProduced()
                         + " | C: " + view.getTotalConsumed()
                         + " | S: " + view.getTotalSoldQuantity()
@@ -268,8 +291,13 @@ public class ProductionPanel extends JPanel {
         );
     }
 
+    private void setSummaryIfChanged(String txt) {
+        if (Objects.equals(lblSummary.getText(), txt)) return;
+        lblSummary.setText(txt);
+    }
+
     // =========================
-    // Table model
+    // Table model (optimized)
     // =========================
     private static final class LinesModel extends AbstractTableModel {
 
@@ -285,11 +313,52 @@ public class ProductionPanel extends JPanel {
         }
 
         void setLines(List<ProductionStatLine> newLines) {
+            if (newLines == null) newLines = List.of();
+
+            // Fast path: same reference
+            if (newLines == lines) return;
+
+            // If same size and equal content => no notify (kills repaint storm)
+            if (lines.size() == newLines.size() && contentEquals(lines, newLines, sold)) {
+                return;
+            }
+
+            // Same size but different values: update in place + fire rows updated
+            if (lines.size() == newLines.size()) {
+                for (int i = 0; i < newLines.size(); i++) {
+                    lines.set(i, newLines.get(i));
+                }
+                if (!lines.isEmpty()) {
+                    fireTableRowsUpdated(0, lines.size() - 1);
+                } else {
+                    fireTableDataChanged();
+                }
+                return;
+            }
+
+            // Structural change: rebuild and full notify
             lines.clear();
-            if (newLines != null && !newLines.isEmpty()) lines.addAll(newLines);
+            if (!newLines.isEmpty()) lines.addAll(newLines);
             fireTableDataChanged();
         }
 
+        private static boolean contentEquals(List<ProductionStatLine> a, List<ProductionStatLine> b, boolean sold) {
+            for (int i = 0; i < a.size(); i++) {
+                ProductionStatLine x = a.get(i);
+                ProductionStatLine y = b.get(i);
+
+                if (x == y) continue;
+                if (x == null || y == null) return false;
+
+                if (!Objects.equals(x.getLabel(), y.getLabel())) return false;
+                if (x.getQuantity() != y.getQuantity()) return false;
+
+                if (sold) {
+                    if (Double.compare(x.getMoneyEarned(), y.getMoneyEarned()) != 0) return false;
+                }
+            }
+            return true;
+        }
 
         @Override
         public int getRowCount() {

@@ -8,15 +8,32 @@ import com.matterworks.core.domain.factions.FactionRuleEnums;
 import com.matterworks.core.managers.GridManager;
 import com.matterworks.core.ui.MariaDBAdapter;
 
-import javax.swing.*;
+import javax.swing.BorderFactory;
+import javax.swing.Box;
+import javax.swing.BoxLayout;
+import javax.swing.JComponent;
+import javax.swing.JLabel;
+import javax.swing.JPanel;
+import javax.swing.JScrollPane;
+import javax.swing.SwingConstants;
+import javax.swing.SwingUtilities;
 import javax.swing.Timer;
 import javax.swing.border.TitledBorder;
-import java.awt.*;
+import java.awt.BorderLayout;
+import java.awt.Color;
+import java.awt.Component;
+import java.awt.Dimension;
+import java.awt.Font;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
-import java.util.*;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -59,6 +76,14 @@ public class FactionsPanel extends JPanel {
     private static final DateTimeFormatter TIME_FMT =
             DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault());
 
+    // ---- caching to avoid UI rebuild storms ----
+    private long lastDbSignature = Long.MIN_VALUE;
+    private long lastScheduleSignature = Long.MIN_VALUE;
+    private int lastActiveFactionId = Integer.MIN_VALUE;
+
+    private final Map<Integer, JPanel> factionCardsById = new HashMap<>();
+    private final Map<Integer, FactionDefinition> factionDefById = new HashMap<>();
+
     public FactionsPanel(MariaDBAdapter repository, GridManager gridManager) {
         this.repository = repository;
         this.gridManager = gridManager;
@@ -70,6 +95,7 @@ public class FactionsPanel extends JPanel {
         add(buildTop(), BorderLayout.NORTH);
         add(buildCenter(), BorderLayout.CENTER);
 
+        // IMPORTANT: javax.swing.Timer
         refreshTimer = new Timer(1500, e -> requestRefresh());
         refreshTimer.start();
 
@@ -78,7 +104,7 @@ public class FactionsPanel extends JPanel {
 
     public void dispose() {
         disposed = true;
-        try { if (refreshTimer != null) refreshTimer.stop(); } catch (Exception ignored) {}
+        try { refreshTimer.stop(); } catch (Exception ignored) {}
         try { exec.shutdownNow(); } catch (Exception ignored) {}
     }
 
@@ -104,7 +130,6 @@ public class FactionsPanel extends JPanel {
         lblNext.setFont(new Font("SansSerif", Font.PLAIN, 11));
         lblNext.setAlignmentX(Component.CENTER_ALIGNMENT);
 
-        // Schedule box
         scheduleBox.setOpaque(false);
         scheduleBox.setLayout(new BoxLayout(scheduleBox, BoxLayout.Y_AXIS));
         scheduleBox.setBorder(BorderFactory.createEmptyBorder(8, 6, 6, 6));
@@ -137,17 +162,18 @@ public class FactionsPanel extends JPanel {
 
     private void requestRefresh() {
         if (disposed) return;
+        if (!isDisplayable()) return;
+        if (!isShowing()) return; // if tab hidden, don't hammer EDT
         if (!refreshRunning.compareAndSet(false, true)) return;
 
         exec.submit(() -> {
             try {
-                // CORE-driven: rotation info + schedule (UI does not compute)
                 FactionRotationInfo rot = null;
                 List<FactionRotationSlot> schedule = List.of();
+
                 try { rot = gridManager.getFactionRotationInfo(); } catch (Throwable ignored) {}
                 try { schedule = gridManager.getFactionRotationSchedule(6); } catch (Throwable ignored) {}
 
-                // DB-driven: factions + rules (UI reads DB via adapter)
                 List<FactionDefinition> factions = safeLoadFactions();
                 Map<Integer, List<FactionPricingRule>> rulesByFaction = new HashMap<>();
                 for (FactionDefinition f : factions) {
@@ -155,12 +181,17 @@ public class FactionsPanel extends JPanel {
                     rulesByFaction.put(f.id(), safeLoadRules(f.id()));
                 }
 
+                long dbSig = computeDbSignature(factions, rulesByFaction);
+                long schedSig = computeScheduleSignature(schedule);
+
                 final FactionRotationInfo rotFinal = rot;
                 final List<FactionRotationSlot> scheduleFinal = (schedule != null ? schedule : List.of());
+                final List<FactionDefinition> factionsFinal = factions;
+                final Map<Integer, List<FactionPricingRule>> rulesFinal = rulesByFaction;
 
                 SwingUtilities.invokeLater(() -> {
-                    if (disposed) return;
-                    applySnapshot(rotFinal, scheduleFinal, factions, rulesByFaction);
+                    if (disposed || !isDisplayable() || !isShowing()) return;
+                    applySnapshot(rotFinal, scheduleFinal, factionsFinal, rulesFinal, dbSig, schedSig);
                 });
 
             } finally {
@@ -190,7 +221,9 @@ public class FactionsPanel extends JPanel {
     private void applySnapshot(FactionRotationInfo rot,
                                List<FactionRotationSlot> schedule,
                                List<FactionDefinition> factions,
-                               Map<Integer, List<FactionPricingRule>> rulesByFaction) {
+                               Map<Integer, List<FactionPricingRule>> rulesByFaction,
+                               long dbSignature,
+                               long scheduleSignature) {
 
         int activeFactionId = 1;
         String activeFactionName = "Faction #1";
@@ -199,56 +232,100 @@ public class FactionsPanel extends JPanel {
             activeFactionId = Math.max(1, rot.currentFactionId());
             activeFactionName = (rot.currentFactionName() != null) ? rot.currentFactionName() : ("Faction #" + activeFactionId);
 
-            lblCurrent.setText("Current faction: " + activeFactionName + " (#" + activeFactionId + ")");
+            setLabelIfChanged(lblCurrent, "Current faction: " + activeFactionName + " (#" + activeFactionId + ")");
 
             if (!rot.enabled()) {
-                lblRotation.setText("Rotation: OFF (manual via server_gamestate.active_faction_id)");
-                lblNext.setText("Next change: -");
+                setLabelIfChanged(lblRotation, "Rotation: OFF (manual via server_gamestate.active_faction_id)");
+                setLabelIfChanged(lblNext, "Next change: -");
             } else {
-                lblRotation.setText("Rotation: ON  | every " + rot.rotationHours() + " hour(s)");
+                setLabelIfChanged(lblRotation, "Rotation: ON  | every " + rot.rotationHours() + " hour(s)");
 
                 String remainingTxt = formatDuration(rot.remainingMs());
                 String atTxt = (rot.nextChangeEpochMs() > 0)
                         ? TIME_FMT.format(Instant.ofEpochMilli(rot.nextChangeEpochMs()))
                         : "?";
 
-                lblNext.setText("Next change in: " + remainingTxt + "  | at " + atTxt
+                setLabelIfChanged(lblNext, "Next change in: " + remainingTxt + "  | at " + atTxt
                         + "  | next: " + rot.nextFactionName());
             }
         } else {
-            lblCurrent.setText("Current faction: #" + activeFactionId);
-            lblRotation.setText("Rotation: ?");
-            lblNext.setText("Next change: ?");
+            setLabelIfChanged(lblCurrent, "Current faction: #" + activeFactionId);
+            setLabelIfChanged(lblRotation, "Rotation: ?");
+            setLabelIfChanged(lblNext, "Next change: ?");
         }
 
-        // Schedule render (no calculations)
-        renderSchedule(schedule);
+        // Schedule: rebuild only if changed
+        if (scheduleSignature != lastScheduleSignature) {
+            lastScheduleSignature = scheduleSignature;
+            renderSchedule(schedule);
+        }
 
-        // Cards
+        // Cards: rebuild only if DB signature changed
+        if (dbSignature != lastDbSignature) {
+            lastDbSignature = dbSignature;
+            rebuildFactionCards(activeFactionId, factions, rulesByFaction);
+        } else {
+            // If only active faction changed, update borders only
+            if (activeFactionId != lastActiveFactionId) {
+                updateActiveBorders(activeFactionId);
+            }
+        }
+
+        lastActiveFactionId = activeFactionId;
+    }
+
+    private void rebuildFactionCards(int activeFactionId,
+                                     List<FactionDefinition> factions,
+                                     Map<Integer, List<FactionPricingRule>> rulesByFaction) {
+
+        factionCardsById.clear();
+        factionDefById.clear();
+
         listWrap.removeAll();
 
-        if (factions.isEmpty()) {
+        if (factions == null || factions.isEmpty()) {
             JLabel empty = new JLabel("No factions found in DB.");
             empty.setForeground(Color.LIGHT_GRAY);
             empty.setFont(new Font("SansSerif", Font.PLAIN, 12));
             listWrap.add(empty);
             listWrap.revalidate();
             listWrap.repaint();
+            lastActiveFactionId = activeFactionId;
             return;
         }
 
         for (FactionDefinition f : factions) {
             if (f == null) continue;
 
-            boolean isActive = (f.id() == activeFactionId);
+            factionDefById.put(f.id(), f);
 
+            boolean isActive = (f.id() == activeFactionId);
             List<FactionPricingRule> rules = rulesByFaction.getOrDefault(f.id(), List.of());
-            listWrap.add(buildFactionCard(f, rules, isActive));
+
+            JPanel card = (JPanel) buildFactionCard(f, rules, isActive);
+            factionCardsById.put(f.id(), card);
+
+            listWrap.add(card);
             listWrap.add(Box.createVerticalStrut(10));
         }
 
         listWrap.add(Box.createVerticalGlue());
         listWrap.revalidate();
+        listWrap.repaint();
+
+        lastActiveFactionId = activeFactionId;
+    }
+
+    private void updateActiveBorders(int activeFactionId) {
+        for (Map.Entry<Integer, JPanel> e : factionCardsById.entrySet()) {
+            int id = e.getKey();
+            JPanel card = e.getValue();
+            FactionDefinition def = factionDefById.get(id);
+            if (card == null || def == null) continue;
+
+            boolean isActive = (id == activeFactionId);
+            applyCardBorder(card, def, isActive);
+        }
         listWrap.repaint();
     }
 
@@ -307,18 +384,7 @@ public class FactionsPanel extends JPanel {
         card.setLayout(new BoxLayout(card, BoxLayout.Y_AXIS));
         card.setBackground(CARD);
 
-        String title = f.displayName();
-        if (isActive) title = title + "  (ACTIVE)";
-
-        TitledBorder tb = BorderFactory.createTitledBorder(
-                BorderFactory.createLineBorder(Color.DARK_GRAY, 1),
-                title,
-                TitledBorder.LEFT,
-                TitledBorder.TOP,
-                new Font("SansSerif", Font.BOLD, 11),
-                isActive ? ACCENT : Color.WHITE
-        );
-        card.setBorder(tb);
+        applyCardBorder(card, f, isActive);
 
         if (f.description() != null && !f.description().isBlank()) {
             JLabel desc = new JLabel("<html><body style='width: 290px;'>" + escapeHtml(f.description()) + "</body></html>");
@@ -341,7 +407,7 @@ public class FactionsPanel extends JPanel {
 
         Comparator<FactionPricingRule> cmp = Comparator
                 .comparingInt(FactionPricingRule::specificityScore).reversed()
-                .thenComparing(Comparator.comparingInt(FactionPricingRule::priority).reversed())
+                .thenComparingInt(FactionPricingRule::priority).reversed()
                 .thenComparingLong(FactionPricingRule::id);
 
         likes.sort(cmp);
@@ -353,6 +419,22 @@ public class FactionsPanel extends JPanel {
 
         card.setMaximumSize(new Dimension(380, 9999));
         return card;
+    }
+
+    private void applyCardBorder(JPanel card, FactionDefinition f, boolean isActive) {
+        String title = f.displayName();
+        if (title == null || title.isBlank()) title = "Faction #" + f.id();
+        if (isActive) title = title + "  (ACTIVE)";
+
+        TitledBorder tb = BorderFactory.createTitledBorder(
+                BorderFactory.createLineBorder(Color.DARK_GRAY, 1),
+                title,
+                TitledBorder.LEFT,
+                TitledBorder.TOP,
+                new Font("SansSerif", Font.BOLD, 11),
+                isActive ? ACCENT : Color.WHITE
+        );
+        card.setBorder(tb);
     }
 
     private JComponent buildRuleSection(String label, Color labelColor, List<FactionPricingRule> rules) {
@@ -405,42 +487,39 @@ public class FactionsPanel extends JPanel {
         wrap.setLayout(new BoxLayout(wrap, BoxLayout.Y_AXIS));
         wrap.add(row);
 
-        JLabel badge = new JLabel(renderBadgeText(r));
+        String note = (r.note() != null && !r.note().isBlank()) ? (" • " + r.note()) : "";
+        JLabel badge = new JLabel("spec=" + r.specificityScore() + " prio=" + r.priority() + note);
         badge.setForeground(SOFT_GRAY);
         badge.setFont(new Font("SansSerif", Font.PLAIN, 10));
-
         wrap.add(badge);
+
         return wrap;
     }
 
     private String renderRuleText(FactionPricingRule r) {
+        // Build a stable, low-cost label without calling non-existing methods.
         StringBuilder sb = new StringBuilder();
-        boolean first = true;
 
-        if (r.color() != null) {
-            sb.append("color=").append(r.color().name());
-            first = false;
-        }
+        sb.append(r.matchType()).append(" ").append(r.combineMode()).append(": ");
+
+        boolean any = false;
         if (r.shape() != null) {
-            if (!first) sb.append(" + ");
             sb.append("shape=").append(r.shape().name());
-            first = false;
+            any = true;
+        }
+        if (r.color() != null) {
+            if (any) sb.append(", ");
+            sb.append("color=").append(r.color().name());
+            any = true;
         }
         if (r.effect() != null) {
-            if (!first) sb.append(" + ");
+            if (any) sb.append(", ");
             sb.append("effect=").append(r.effect().name());
+            any = true;
         }
+        if (!any) sb.append("(no filters)");
 
-        if (sb.length() == 0) sb.append("(invalid rule)");
         return sb.toString();
-    }
-
-    private String renderBadgeText(FactionPricingRule r) {
-        String mt = (r.matchType() != null) ? r.matchType().name() : "CONTAINS";
-        String cm = (r.combineMode() != null) ? r.combineMode().name() : "ALL";
-
-        if ("EXACT".equals(mt)) return "ABSOLUTE (EXACT match)";
-        return "CONTAINS " + cm;
     }
 
     private static String escapeHtml(String s) {
@@ -450,12 +529,84 @@ public class FactionsPanel extends JPanel {
                 .replace(">", "&gt;");
     }
 
+    private static void setLabelIfChanged(JLabel lbl, String txt) {
+        if (Objects.equals(lbl.getText(), txt)) return;
+        lbl.setText(txt);
+    }
+
     private static String formatDuration(long ms) {
-        if (ms < 0) return "-";
-        long totalSec = ms / 1000L;
-        long h = totalSec / 3600L;
-        long m = (totalSec % 3600L) / 60L;
-        long s = totalSec % 60L;
-        return String.format("%02d:%02d:%02d", h, m, s);
+        if (ms <= 0) return "0s";
+        long s = ms / 1000;
+        long h = s / 3600;
+        long m = (s % 3600) / 60;
+        long sec = (s % 60);
+        if (h > 0) return h + "h " + m + "m " + sec + "s";
+        if (m > 0) return m + "m " + sec + "s";
+        return sec + "s";
+    }
+
+    private static long computeScheduleSignature(List<FactionRotationSlot> schedule) {
+        if (schedule == null || schedule.isEmpty()) return 0L;
+        long h = 1469598103934665603L;
+        for (FactionRotationSlot s : schedule) {
+            h ^= s.factionId(); h *= 1099511628211L;
+            h ^= (s.isCurrent() ? 1 : 0); h *= 1099511628211L;
+            h ^= (s.startEpochMs() ^ (s.startEpochMs() >>> 32)); h *= 1099511628211L;
+            h ^= (s.endEpochMs() ^ (s.endEpochMs() >>> 32)); h *= 1099511628211L;
+            String name = s.factionName();
+            if (name != null) {
+                h ^= name.hashCode();
+                h *= 1099511628211L;
+            }
+        }
+        return h;
+    }
+
+    private static long computeDbSignature(List<FactionDefinition> factions,
+                                           Map<Integer, List<FactionPricingRule>> rulesByFaction) {
+        if (factions == null || factions.isEmpty()) return 0L;
+
+        long h = 2166136261L;
+        for (FactionDefinition f : factions) {
+            if (f == null) continue;
+
+            h = mix(h, f.id());
+            h = mix(h, safeHash(f.code()));
+            h = mix(h, safeHash(f.displayName()));
+            h = mix(h, safeHash(f.description()));
+            h = mix(h, f.sortOrder());
+
+            List<FactionPricingRule> rules = (rulesByFaction != null)
+                    ? rulesByFaction.getOrDefault(f.id(), List.of())
+                    : List.of();
+
+            h = mix(h, rules.size());
+            for (FactionPricingRule r : rules) {
+                if (r == null) continue;
+
+                h = mix(h, (int) (r.id() ^ (r.id() >>> 32)));
+                h = mix(h, r.factionId());
+                h = mix(h, safeHash(String.valueOf(r.sentiment())));
+                h = mix(h, safeHash(String.valueOf(r.matchType())));
+                h = mix(h, safeHash(String.valueOf(r.combineMode())));
+                h = mix(h, safeHash(r.color() != null ? r.color().name() : null));
+                h = mix(h, safeHash(r.shape() != null ? r.shape().name() : null));
+                h = mix(h, safeHash(r.effect() != null ? r.effect().name() : null));
+                h = mix(h, (int) Math.round(r.multiplier() * 1_000_000));
+                h = mix(h, r.priority());
+                h = mix(h, safeHash(r.note()));
+            }
+        }
+        return h;
+    }
+
+    private static long mix(long h, int v) {
+        h ^= v;
+        h *= 16777619L;
+        return h;
+    }
+
+    private static int safeHash(String s) {
+        return (s != null) ? s.hashCode() : 0;
     }
 }
