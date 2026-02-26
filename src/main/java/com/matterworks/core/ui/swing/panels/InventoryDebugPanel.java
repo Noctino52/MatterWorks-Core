@@ -4,31 +4,12 @@ import com.matterworks.core.domain.player.PlayerProfile;
 import com.matterworks.core.managers.GridManager;
 import com.matterworks.core.ui.MariaDBAdapter;
 
-import javax.swing.BorderFactory;
-import javax.swing.Box;
-import javax.swing.BoxLayout;
-import javax.swing.JButton;
-import javax.swing.JLabel;
-import javax.swing.JPanel;
-import javax.swing.SwingUtilities;
+import javax.swing.*;
 import javax.swing.Timer;
-import java.awt.BorderLayout;
-import java.awt.Color;
-import java.awt.Dimension;
-import java.awt.Font;
-import java.awt.Insets;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
+import java.awt.*;
 import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Set;
-import java.util.UUID;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.RejectedExecutionException;
+import java.util.*;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class InventoryDebugPanel extends JPanel {
@@ -102,11 +83,15 @@ public class InventoryDebugPanel extends JPanel {
         final JButton btnAdd;
         final JLabel lblBuyPrice;
 
+        // counts/unlock from heavy refresh
         volatile int lastCount = Integer.MIN_VALUE; // force first render
         volatile boolean unlocked = true;
 
+        // IMPORTANT: cached unit price computed off-EDT (so fast refresh never hits DB)
+        volatile double cachedUnitPrice = Double.NaN;      // NaN => not ready
+        volatile long cachedUnitPriceRounded = Long.MIN_VALUE;
+
         // cache for fast refresh
-        volatile long lastShownPriceRounded = Long.MIN_VALUE;
         volatile Boolean lastAfford = null;
 
         RowUI(String itemId, boolean tradeable, JLabel label, JButton btnRem, JButton btnAdd, JLabel lblBuyPrice) {
@@ -155,7 +140,7 @@ public class InventoryDebugPanel extends JPanel {
         }
         list.add(Box.createVerticalGlue());
 
-        // Fast refresh (NO DB): prices + enable states
+        // Fast refresh (STRICTLY NO DB): prices (cached) + enable states
         fastPriceTimer = new Timer(450, e -> {
             if (disposed) return;
             if (!isDisplayable()) { dispose(); return; }
@@ -164,7 +149,7 @@ public class InventoryDebugPanel extends JPanel {
         });
         fastPriceTimer.start();
 
-        // Heavy refresh (DB): counts + unlock
+        // Heavy refresh (DB): counts + unlock + (NOW) price computation in background
         countsTimer = new Timer(1500, e -> {
             if (disposed) return;
             if (!isDisplayable()) { dispose(); return; }
@@ -219,9 +204,7 @@ public class InventoryDebugPanel extends JPanel {
         // Show/hide prices ONLY when mode changes (not every tick)
         for (RowUI r : rows.values()) {
             if (!r.tradeable) continue;
-            if (r.lblBuyPrice != null) {
-                setVisibleIfChanged(r.lblBuyPrice, isPlayerView);
-            }
+            if (r.lblBuyPrice != null) setVisibleIfChanged(r.lblBuyPrice, isPlayerView);
         }
     }
 
@@ -233,73 +216,49 @@ public class InventoryDebugPanel extends JPanel {
         row.setOpaque(false);
         row.setMaximumSize(new Dimension(350, 42));
 
-        JLabel lblInfo = new JLabel(itemId + ": 0");
-        lblInfo.setForeground(Color.WHITE);
-        lblInfo.setFont(new Font("Monospaced", Font.BOLD, 12));
+        JLabel label = new JLabel(itemId + ": 0");
+        label.setForeground(Color.WHITE);
+        label.setFont(new Font("Monospaced", Font.PLAIN, 12));
+
+        JPanel right = new JPanel();
+        right.setOpaque(false);
+        right.setLayout(new BoxLayout(right, BoxLayout.X_AXIS));
 
         JButton btnRem = new JButton("-");
         JButton btnAdd = new JButton("+");
+        setupTinyButton(btnRem, new Color(140, 80, 80));
+        setupTinyButton(btnAdd, new Color(80, 140, 80));
 
-        setupTinyButton(btnRem, new Color(120, 50, 50));
-        setupTinyButton(btnAdd, new Color(50, 110, 50));
-
-        JLabel lblBuyPrice = new JLabel("...");
-        lblBuyPrice.setFont(new Font("SansSerif", Font.PLAIN, 10));
-        lblBuyPrice.setForeground(PENDING_GRAY);
-        lblBuyPrice.setPreferredSize(new Dimension(55, 18));
-        lblBuyPrice.setMinimumSize(new Dimension(55, 18));
-
-        JPanel east = new JPanel();
-        east.setOpaque(false);
-        east.setLayout(new BoxLayout(east, BoxLayout.X_AXIS));
-        east.add(btnRem);
-        east.add(Box.createHorizontalStrut(6));
-        east.add(btnAdd);
-        east.add(Box.createHorizontalStrut(6));
-        east.add(lblBuyPrice);
-
-        final String finalItemId = itemId;
-
-        if (!tradeable) {
-            btnRem.setVisible(false);
-            btnAdd.setVisible(false);
-            lblBuyPrice.setVisible(false);
-
-            row.add(lblInfo, BorderLayout.CENTER);
-            row.add(east, BorderLayout.EAST);
-
-            rows.put(finalItemId, new RowUI(finalItemId, false, lblInfo, btnRem, btnAdd, lblBuyPrice));
-            return row;
+        JLabel price = null;
+        if (tradeable) {
+            price = new JLabel("...");
+            price.setForeground(PENDING_GRAY);
+            price.setFont(new Font("Monospaced", Font.BOLD, 12));
+            price.setBorder(BorderFactory.createEmptyBorder(0, 0, 0, 6));
         }
 
+        if (price != null) right.add(price);
+        right.add(btnRem);
+        right.add(Box.createHorizontalStrut(6));
+        right.add(btnAdd);
+
+        row.add(label, BorderLayout.CENTER);
+        row.add(right, BorderLayout.EAST);
+
+        RowUI ui = new RowUI(itemId, tradeable, label, btnRem, btnAdd, price);
+        rows.put(itemId, ui);
+
+        // Actions
+        String finalItemId = itemId;
         btnAdd.addActionListener(e -> runActionAsync(btnAdd, () -> {
-            PlayerProfile p = gridManager.getCachedProfile(playerUuid);
-            boolean isPlayerView = stableIsPlayerView(p);
-
-            if (isPlayerView) gridManager.buyItem(playerUuid, finalItemId, 1);
-            else repository.modifyInventoryItem(playerUuid, finalItemId, 1);
+            gridManager.buyItem(playerUuid, finalItemId, 1);
         }));
 
+        String finalItemId1 = itemId;
         btnRem.addActionListener(e -> runActionAsync(btnRem, () -> {
-            PlayerProfile p = gridManager.getCachedProfile(playerUuid);
-            boolean isPlayerView = stableIsPlayerView(p);
-
-            if (isPlayerView) {
-                int have = repository.getInventoryItemCount(playerUuid, finalItemId);
-                if (have > 0) {
-                    double refund = gridManager.getEffectiveShopUnitPrice(playerUuid, finalItemId) * 0.5;
-                    gridManager.addMoney(playerUuid, refund, "ITEM_SELL", finalItemId);
-                    repository.modifyInventoryItem(playerUuid, finalItemId, -1);
-                }
-            } else {
-                repository.modifyInventoryItem(playerUuid, finalItemId, -1);
-            }
+            repository.modifyInventoryItem(playerUuid, finalItemId1, -1);
         }));
 
-        row.add(lblInfo, BorderLayout.CENTER);
-        row.add(east, BorderLayout.EAST);
-
-        rows.put(finalItemId, new RowUI(finalItemId, true, lblInfo, btnRem, btnAdd, lblBuyPrice));
         return row;
     }
 
@@ -327,6 +286,7 @@ public class InventoryDebugPanel extends JPanel {
                     t.printStackTrace();
                 } finally {
                     SwingUtilities.invokeLater(() -> {
+                        // IMPORTANT: these must remain cheap on EDT.
                         refreshPricesAndButtons();
                         requestCountsRefresh();
                         if (onEconomyMaybeChanged != null) onEconomyMaybeChanged.run();
@@ -342,8 +302,9 @@ public class InventoryDebugPanel extends JPanel {
     }
 
     /**
-     * Fast refresh (NO DB): prices + button enable states.
-     * Optimized: updates only if values actually changed.
+     * Fast refresh (STRICTLY NO DB):
+     * - uses cachedUnitPrice computed in requestCountsRefresh() background thread.
+     * - updates only if values changed.
      */
     private void refreshPricesAndButtons() {
         if (disposed) return;
@@ -390,35 +351,46 @@ public class InventoryDebugPanel extends JPanel {
         for (RowUI r : rows.values()) {
             if (!r.tradeable) continue;
 
-            double price = gridManager.getEffectiveShopUnitPrice(p, r.itemId);
-            boolean afford = isAdmin || money >= price;
+            double price = r.cachedUnitPrice; // cached: NO DB here
+            boolean priceReady = !Double.isNaN(price) && !Double.isInfinite(price) && price >= 0.0;
 
             if (r.lblBuyPrice != null) {
                 if (!r.unlocked) {
                     setTextIfChanged(r.lblBuyPrice, "LOCK");
                     setColorIfChanged(r.lblBuyPrice, LOCK_GRAY);
+                } else if (!priceReady) {
+                    setTextIfChanged(r.lblBuyPrice, "...");
+                    setColorIfChanged(r.lblBuyPrice, PENDING_GRAY);
                 } else {
+                    boolean afford = isAdmin || money >= price;
+
                     long rounded = Math.round(price);
-                    if (rounded != r.lastShownPriceRounded) {
+                    if (rounded != r.cachedUnitPriceRounded) {
                         setTextIfChanged(r.lblBuyPrice, "$" + String.format(Locale.US, "%d", rounded));
-                        r.lastShownPriceRounded = rounded;
+                        r.cachedUnitPriceRounded = rounded;
                     }
 
                     if (!moneySame || !adminSame || r.lastAfford == null || afford != r.lastAfford) {
                         setColorIfChanged(r.lblBuyPrice, afford ? BUY_GREEN : CANT_AFFORD_RED);
                         r.lastAfford = afford;
                     }
+
+                    setEnabledIfChanged(r.btnAdd, r.unlocked && afford);
+                    setEnabledIfChanged(r.btnRem, r.lastCount > 0);
+                    continue;
                 }
             }
 
-            setEnabledIfChanged(r.btnAdd, r.unlocked && afford);
+            // fallback button state when price not ready
+            setEnabledIfChanged(r.btnAdd, r.unlocked);
             setEnabledIfChanged(r.btnRem, r.lastCount > 0);
         }
     }
 
     /**
-     * Heavy refresh (DB): inventory counts + unlock states.
-     * Optimized: no queue buildup, apply only changed label text/unlock flags.
+     * Heavy refresh (DB): inventory counts + unlock states + (NEW) price computation off-EDT.
+     *
+     * Key guarantee: price computation MUST NOT hit DB (it uses invCount already fetched).
      */
     private void requestCountsRefresh() {
         if (disposed) return;
@@ -429,18 +401,31 @@ public class InventoryDebugPanel extends JPanel {
         try {
             countsExec.submit(() -> {
                 try {
+                    // 1) DB counts (off-EDT)
                     Map<String, Integer> counts = new HashMap<>();
                     for (String itemId : rows.keySet()) {
                         counts.put(itemId, repository.getInventoryItemCount(playerUuid, itemId));
                     }
 
+                    // 2) Profile snapshot (cached, no DB)
                     PlayerProfile p = gridManager.getCachedProfile(playerUuid);
                     boolean isPlayerView = stableIsPlayerView(p);
 
+                    // 3) Unlock states (no DB)
                     Map<String, Boolean> unlocked = new HashMap<>();
                     if (isPlayerView && p != null) {
                         for (String itemId : rows.keySet()) {
                             unlocked.put(itemId, gridManager.getTechManager().canBuyItem(p, itemId));
+                        }
+                    }
+
+                    // 4) Prices OFF-EDT, NO DB: compute from known invCount
+                    Map<String, Double> unitPrices = new HashMap<>();
+                    if (isPlayerView && p != null) {
+                        for (String itemId : rows.keySet()) {
+                            int invCount = counts.getOrDefault(itemId, 0);
+                            double unit = gridManager.getEffectiveShopUnitPrice(p, itemId, invCount);
+                            unitPrices.put(itemId, unit);
                         }
                     }
 
@@ -454,6 +439,17 @@ public class InventoryDebugPanel extends JPanel {
 
                             boolean countChanged = (c != r.lastCount);
                             r.lastCount = c;
+
+                            // update cached price (even if not visible yet)
+                            if (r.tradeable && isPlayerView && p != null) {
+                                Double unit = unitPrices.get(r.itemId);
+                                r.cachedUnitPrice = (unit != null ? unit : Double.NaN);
+                                // do not update rounded here: refreshPricesAndButtons() handles formatting
+                            } else {
+                                r.cachedUnitPrice = Double.NaN;
+                                r.cachedUnitPriceRounded = Long.MIN_VALUE;
+                                r.lastAfford = null;
+                            }
 
                             if (!r.tradeable) {
                                 if (countChanged) setTextIfChanged(r.label, r.itemId + ": " + c);

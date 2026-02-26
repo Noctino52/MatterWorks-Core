@@ -255,8 +255,17 @@ public class GridManager {
 
     public PlayerProfile getCachedProfile(UUID uuid) { return state.getCachedProfile(uuid); }
     public boolean buyItem(UUID playerId, String itemId, int amount) { return economy.buyItem(playerId, itemId, amount); }
-    public double getEffectiveShopUnitPrice(UUID playerId, String itemId) { return economy.getEffectiveShopUnitPrice(playerId, itemId); }
-    public double getEffectiveShopUnitPrice(PlayerProfile p, String itemId) { return economy.getEffectiveShopUnitPrice(p, itemId); }
+    public double getEffectiveShopUnitPrice(UUID playerId, String itemId) {
+        return economy.getEffectiveShopUnitPrice(playerId, itemId);
+    }
+
+    public double getEffectiveShopUnitPrice(PlayerProfile p, String itemId) {
+        return economy.getEffectiveShopUnitPrice(p, itemId);
+    }
+    public double getEffectiveShopUnitPrice(PlayerProfile p, String itemId, int inventoryCount) {
+        return economy.getEffectiveShopUnitPriceKnownInvCount(p, itemId, inventoryCount);
+    }
+
     public boolean attemptBailout(UUID ownerId) { return economy.attemptBailout(ownerId); }
 
     public void resetUserPlot(UUID ownerId) { economy.resetUserPlot(ownerId); }

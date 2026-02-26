@@ -378,12 +378,71 @@ final class GridEconomyService {
         return true;
     }
 
+    double getEffectiveShopUnitPriceKnownInvCount(PlayerProfile p, String itemId, int inventoryCount) {
+        UUID playerId = (p != null ? p.getPlayerId() : null);
+        return getEffectiveShopUnitPriceInternalKnownInvCount(playerId, p, itemId, inventoryCount);
+    }
+
+
+    private double getEffectiveShopUnitPriceInternalKnownInvCount(UUID playerId, PlayerProfile p, String itemId, int inventoryCount) {
+        if (itemId == null) return 0.0;
+
+        var stats = blockRegistry.getStats(itemId);
+
+        double base = (stats != null ? stats.basePrice() : 0.0);
+        if (Double.isNaN(base) || Double.isInfinite(base) || base < 0.0) base = 0.0;
+
+        // Same pricing pipeline as getEffectiveShopUnitPriceInternal, but penalty uses known invCount (NO DB)
+        double penalty = computeOwnedCountPenaltyKnownInvCount(playerId, itemId, inventoryCount);
+        double baseWithPenalty = base + penalty;
+
+        double mult = (stats != null ? Math.max(0.0, stats.prestigeCostMult()) : 0.0);
+        int prestige = (p != null ? Math.max(0, p.getPrestigeLevel()) : 0);
+
+        double factor = 1.0 + (prestige * mult);
+        double out = baseWithPenalty * factor;
+
+        if (Double.isNaN(out) || Double.isInfinite(out)) return Math.max(0.0, baseWithPenalty);
+        return Math.max(0.0, out);
+    }
+
+
+    private double computeOwnedCountPenaltyKnownInvCount(UUID playerId, String itemId, int inventoryCount) {
+        if (playerId == null || itemId == null) return 0.0;
+
+        var stats = blockRegistry.getStats(itemId);
+        if (stats == null) return 0.0;
+
+        String cat = stats.category();
+        if (cat == null || !cat.equalsIgnoreCase("MACHINE")) return 0.0;
+
+        int every = Math.max(0, stats.pricePenaltyEvery());
+        double add = Math.max(0.0, stats.pricePenaltyAdd());
+        if (every <= 0 || add <= 0.0) return 0.0;
+
+        // placed count is in-memory/cache; inventoryCount is passed from DB thread
+        int placed = getPlacedCount(playerId, itemId);
+        int inv = Math.max(0, inventoryCount);
+
+        int totalOwned = placed + inv;
+        if (totalOwned <= 0) return 0.0;
+
+        int steps = (totalOwned - 1) / every;
+        if (steps <= 0) return 0.0;
+
+        double penalty = steps * add;
+        if (Double.isNaN(penalty) || Double.isInfinite(penalty) || penalty < 0.0) return 0.0;
+        return penalty;
+    }
+
 
 
     double getEffectiveShopUnitPrice(UUID playerId, String itemId) {
         PlayerProfile p = (playerId != null ? state.getCachedProfile(playerId) : null);
         return getEffectiveShopUnitPriceInternal(playerId, p, itemId);
     }
+
+
 
 
     private double getEffectiveShopUnitPriceInternal(UUID playerId, PlayerProfile p, String itemId) {

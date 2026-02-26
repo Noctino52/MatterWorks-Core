@@ -28,6 +28,7 @@ import java.awt.event.WindowEvent;
 import java.lang.reflect.Method;
 import java.util.*;
 import java.util.List;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -664,7 +665,7 @@ public class MatterWorksGUI extends JFrame {
 
                 boolean ok = com.matterworks.core.ui.swing.debug.UiDebug.time(
                         "CORE gridManager.buyItem(" + itemId + ", qty=" + qty + ")",
-                        () -> gridManager.buyItem(u, itemId, qty),
+                        (Callable<Boolean>) () -> gridManager.buyItem(u, itemId, qty),
                         10
                 );
 
